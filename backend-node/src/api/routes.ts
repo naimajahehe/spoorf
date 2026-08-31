@@ -1,6 +1,27 @@
 import { Router, Request, Response } from 'express';
 import { DeviceManager } from '../services/deviceManager';
-import { LicenseManager } from '../services/licenseManager';
+import { LicenseManager, FeatureLimitError, FeatureLockedError } from '../services/licenseManager';
+
+/**
+ * KEAMANAN (P2): Sanitasi respons error 500 — hindari kebocoran detail internal.
+ * Detail lengkap selalu di-log ke server; klien hanya menerima pesan operasional
+ * yang dikenal (validasi/feature-gate/"not found"), selain itu pesan generik.
+ */
+const OPERATIONAL_ERROR_RE = /not found|required|already|invalid|cannot|gateway|tidak valid|tidak ditemukan|diperlukan|dilindungi|kebal|di luar jangkauan|terkunci|format|batas|upgrade/i;
+
+function respondError(res: Response, err: any, status = 500): void {
+    // eslint-disable-next-line no-console
+    console.error('[API Error]', err);
+    const msg = typeof err?.message === 'string' ? err.message : '';
+    const isOperational =
+        err instanceof FeatureLimitError ||
+        err instanceof FeatureLockedError ||
+        (msg !== '' && OPERATIONAL_ERROR_RE.test(msg));
+    res.status(status).json({
+        success: false,
+        error: isOperational ? msg : 'Terjadi kesalahan internal pada server.'
+    });
+}
 
 export const createRouter = (deviceManager: DeviceManager, licenseManager?: LicenseManager) => {
     const router = Router();
@@ -28,10 +49,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
                 count: devices.length
             });
         } catch (error: any) {
-            res.status(500).json({
-                success: false,
-                error: error.message
-            });
+            respondError(res, error);
         }
     });
 
@@ -54,10 +72,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
                 message: 'Semua data perangkat dan profil berhasil dibersihkan'
             });
         } catch (error: any) {
-            res.status(500).json({
-                success: false,
-                error: error.message
-            });
+            respondError(res, error);
         }
     });
 
@@ -74,10 +89,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
                 message: `Device ${ip} blocked`
             });
         } catch (error: any) {
-            res.status(500).json({
-                success: false,
-                error: error.message
-            });
+            respondError(res, error);
         }
     });
 
@@ -92,10 +104,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
                 message: `Device ${ip} unblocked`
             });
         } catch (error: any) {
-            res.status(500).json({
-                success: false,
-                error: error.message
-            });
+            respondError(res, error);
         }
     });
 
@@ -115,10 +124,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
                 message: `Device ${ip} redirected to ${redirectUrl}`
             });
         } catch (error: any) {
-            res.status(500).json({
-                success: false,
-                error: error.message
-            });
+            respondError(res, error);
         }
     });
 
@@ -133,10 +139,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
                 message: `Redirect for ${ip} stopped`
             });
         } catch (error: any) {
-            res.status(500).json({
-                success: false,
-                error: error.message
-            });
+            respondError(res, error);
         }
     });
 
@@ -150,10 +153,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
                 message: `Device with MAC ${mac} deleted from database`
             });
         } catch (error: any) {
-            res.status(500).json({
-                success: false,
-                error: error.message
-            });
+            respondError(res, error);
         }
     });
 
@@ -172,10 +172,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
                 message: `Alias for ${mac} updated to "${alias}"`
             });
         } catch (error: any) {
-            res.status(500).json({
-                success: false,
-                error: error.message
-            });
+            respondError(res, error);
         }
     });
 
@@ -194,10 +191,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
                 message: `Speed limit for ${ip} set to ${limit}%`
             });
         } catch (error: any) {
-            res.status(500).json({
-                success: false,
-                error: error.message
-            });
+            respondError(res, error);
         }
     });
 
@@ -213,10 +207,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
                 message: `Ports deep scanned for ${ip}`
             });
         } catch (error: any) {
-            res.status(500).json({
-                success: false,
-                error: error.message
-            });
+            respondError(res, error);
         }
     });
 
@@ -229,10 +220,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
                 status
             });
         } catch (error: any) {
-            res.status(500).json({
-                success: false,
-                error: error.message
-            });
+            respondError(res, error);
         }
     });
 
@@ -254,7 +242,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
             const telemetry = await deviceManager.getTelemetry();
             res.json({ success: true, telemetry });
         } catch (err: any) {
-            res.status(500).json({ success: false, error: err.message });
+            respondError(res, err);
         }
     });
 
@@ -263,7 +251,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
             const wifi = await deviceManager.getWifiInfo();
             res.json({ success: true, wifi });
         } catch (err: any) {
-            res.status(500).json({ success: false, error: err.message });
+            respondError(res, err);
         }
     });
 
@@ -273,7 +261,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
             const status = await deviceManager.getTransparentGatewayStatus();
             res.json({ success: true, data: status });
         } catch (err: any) {
-            res.status(500).json({ success: false, error: err.message });
+            respondError(res, err);
         }
     });
 
@@ -286,7 +274,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
             const data = await deviceManager.startTransparentGateway(ip, gatewayIp);
             res.json({ success: true, data, message: `Transparent gateway started for ${ip}` });
         } catch (err: any) {
-            res.status(500).json({ success: false, error: err.message });
+            respondError(res, err);
         }
     });
 
@@ -299,7 +287,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
             await deviceManager.stopTransparentGateway(ip);
             res.json({ success: true, message: `Transparent gateway stopped for ${ip}` });
         } catch (err: any) {
-            res.status(500).json({ success: false, error: err.message });
+            respondError(res, err);
         }
     });
 
@@ -308,7 +296,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
             const domains = await deviceManager.getSinkholeDomains();
             res.json({ success: true, domains });
         } catch (err: any) {
-            res.status(500).json({ success: false, error: err.message });
+            respondError(res, err);
         }
     });
 
@@ -321,7 +309,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
             const domains = await deviceManager.addSinkholeDomain(domain);
             res.json({ success: true, domain, domains });
         } catch (err: any) {
-            res.status(500).json({ success: false, error: err.message });
+            respondError(res, err);
         }
     });
 
@@ -331,7 +319,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
             const domains = await deviceManager.removeSinkholeDomain(domain);
             res.json({ success: true, domain, domains });
         } catch (err: any) {
-            res.status(500).json({ success: false, error: err.message });
+            respondError(res, err);
         }
     });
 
@@ -341,7 +329,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
             const logs = await deviceManager.getGatewayDnsLogs(limit);
             res.json({ success: true, logs });
         } catch (err: any) {
-            res.status(500).json({ success: false, error: err.message });
+            respondError(res, err);
         }
     });
 
@@ -350,7 +338,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
             await deviceManager.clearGatewayDnsLogs();
             res.json({ success: true, message: 'Gateway DNS logs cleared' });
         } catch (err: any) {
-            res.status(500).json({ success: false, error: err.message });
+            respondError(res, err);
         }
     });
 
@@ -364,7 +352,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
                 data: result
             });
         } catch (err: any) {
-            res.status(500).json({ success: false, error: err.message });
+            respondError(res, err);
         }
     });
 
@@ -374,7 +362,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
             const result = await deviceManager.quickReauthProfiling();
             res.json({ success: true, message: 'Quick Re-Auth profiling completed', data: result });
         } catch (err: any) {
-            res.status(500).json({ success: false, error: err.message });
+            respondError(res, err);
         }
     });
 
@@ -384,7 +372,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
             const stats = await deviceManager.getDhcpStats();
             res.json({ success: true, data: stats });
         } catch (err: any) {
-            res.status(500).json({ success: false, error: err.message });
+            respondError(res, err);
         }
     });
 
@@ -394,7 +382,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
             const status = await deviceManager.getApIsolationStatus();
             res.json({ success: true, data: status });
         } catch (err: any) {
-            res.status(500).json({ success: false, error: err.message });
+            respondError(res, err);
         }
     });
 
@@ -404,7 +392,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
             const caInfo = await deviceManager.getCAInfo();
             res.json({ success: true, data: caInfo });
         } catch (err: any) {
-            res.status(500).json({ success: false, error: err.message });
+            respondError(res, err);
         }
     });
 
@@ -415,7 +403,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
             res.setHeader('Content-Disposition', 'attachment; filename="spoorf-ca.crt"');
             res.send(certPem);
         } catch (err: any) {
-            res.status(500).json({ success: false, error: err.message });
+            respondError(res, err);
         }
     });
 
@@ -430,7 +418,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
             const result = await deviceManager.getL7Flows({ limit, search, scheme, method, is_blocked });
             res.json(result);
         } catch (err: any) {
-            res.status(500).json({ success: false, error: err.message });
+            respondError(res, err);
         }
     });
 
@@ -439,7 +427,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
             await deviceManager.clearL7Flows();
             res.json({ success: true, message: 'L7 Flows cleared' });
         } catch (err: any) {
-            res.status(500).json({ success: false, error: err.message });
+            respondError(res, err);
         }
     });
 
@@ -452,7 +440,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
             const result = await deviceManager.generateLeafCert(domain);
             res.json(result);
         } catch (err: any) {
-            res.status(500).json({ success: false, error: err.message });
+            respondError(res, err);
         }
     });
 
@@ -462,7 +450,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
             const status = await deviceManager.getBettercapStatus();
             res.json(status);
         } catch (err: any) {
-            res.status(500).json({ success: false, error: err.message });
+            respondError(res, err);
         }
     });
 
@@ -471,7 +459,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
             const rules = await deviceManager.getBettercapDnsRules();
             res.json({ success: true, rules });
         } catch (err: any) {
-            res.status(500).json({ success: false, error: err.message });
+            respondError(res, err);
         }
     });
 
@@ -484,7 +472,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
             const result = await deviceManager.addBettercapDnsRule(domain, target_ip || '192.168.1.1', action || 'spoof', is_enabled !== false);
             res.json(result);
         } catch (err: any) {
-            res.status(500).json({ success: false, error: err.message });
+            respondError(res, err);
         }
     });
 
@@ -495,7 +483,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
             const result = await deviceManager.updateBettercapDnsRule(id, { domain, target_ip, action, is_enabled });
             res.json(result);
         } catch (err: any) {
-            res.status(500).json({ success: false, error: err.message });
+            respondError(res, err);
         }
     });
 
@@ -505,7 +493,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
             const result = await deviceManager.deleteBettercapDnsRule(id);
             res.json(result);
         } catch (err: any) {
-            res.status(500).json({ success: false, error: err.message });
+            respondError(res, err);
         }
     });
 
@@ -515,7 +503,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
             const result = await deviceManager.setBettercapDnsSpoofAll(enabled === true, address || '');
             res.json(result);
         } catch (err: any) {
-            res.status(500).json({ success: false, error: err.message });
+            respondError(res, err);
         }
     });
 
@@ -528,7 +516,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
             const result = await deviceManager.loadBettercapDnsHosts(content, default_address || '', action || 'spoof');
             res.json(result);
         } catch (err: any) {
-            res.status(500).json({ success: false, error: err.message });
+            respondError(res, err);
         }
     });
 
@@ -538,7 +526,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
             const result = await deviceManager.setBettercapDnsTtl(isNaN(ttl) ? 10 : ttl);
             res.json(result);
         } catch (err: any) {
-            res.status(500).json({ success: false, error: err.message });
+            respondError(res, err);
         }
     });
 
@@ -548,7 +536,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
             const credentials = await deviceManager.getBettercapCredentials(limit);
             res.json({ success: true, credentials });
         } catch (err: any) {
-            res.status(500).json({ success: false, error: err.message });
+            respondError(res, err);
         }
     });
 
@@ -557,7 +545,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
             await deviceManager.clearBettercapCredentials();
             res.json({ success: true, message: 'Credentials cleared' });
         } catch (err: any) {
-            res.status(500).json({ success: false, error: err.message });
+            respondError(res, err);
         }
     });
 
@@ -570,7 +558,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
             const data = await deviceManager.runBettercapSynScan(target_ip, ports, profile || 'top-20');
             res.json({ success: true, data });
         } catch (err: any) {
-            res.status(500).json({ success: false, error: err.message });
+            respondError(res, err);
         }
     });
 
@@ -640,7 +628,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
             }
             res.json({ success: true, message: 'Logged out successfully' });
         } catch (err: any) {
-            res.status(500).json({ success: false, error: err.message });
+            respondError(res, err);
         }
     });
 
@@ -650,7 +638,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
             const data = await deviceManager.getShieldStatus();
             res.json({ success: true, data });
         } catch (err: any) {
-            res.status(500).json({ success: false, error: err.message });
+            respondError(res, err);
         }
     });
 
@@ -665,7 +653,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
             );
             res.json({ success: true, data });
         } catch (err: any) {
-            res.status(500).json({ success: false, error: err.message });
+            respondError(res, err);
         }
     });
 
@@ -675,7 +663,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
             const data = await deviceManager.setShieldMode(mode || 'host_lock', Boolean(autoRetaliate));
             res.json({ success: true, data });
         } catch (err: any) {
-            res.status(500).json({ success: false, error: err.message });
+            respondError(res, err);
         }
     });
 
@@ -684,7 +672,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
             const data = await deviceManager.getShieldThreats();
             res.json({ success: true, data });
         } catch (err: any) {
-            res.status(500).json({ success: false, error: err.message });
+            respondError(res, err);
         }
     });
 
@@ -693,7 +681,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
             const success = await deviceManager.clearShieldThreats();
             res.json({ success, message: 'Threats log cleared' });
         } catch (err: any) {
-            res.status(500).json({ success: false, error: err.message });
+            respondError(res, err);
         }
     });
 
@@ -704,7 +692,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
             const status = await deviceManager.getGamingStatus();
             res.json({ success: true, data: status });
         } catch (error: any) {
-            res.status(500).json({ success: false, error: error.message });
+            respondError(res, error);
         }
     });
 
@@ -714,7 +702,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
             const status = await deviceManager.toggleGamingMode(Boolean(enabled), mode, target_ping_ms);
             res.json({ success: true, data: status });
         } catch (error: any) {
-            res.status(500).json({ success: false, error: error.message });
+            respondError(res, error);
         }
     });
 

@@ -24,7 +24,9 @@ Dokumen ini bersifat **arsitektural/aspiratif**. Tabel berikut memisahkan apa ya
 | **Verifikasi kriptografis lisensi (RS256/Ed25519)** | 🧭 Roadmap | Kode saat ini: lisensi lokal, token tidak diverifikasi kripto; aktivasi berbasis prefix string (lihat SPEC-008). |
 | **Anti Clock-Tamper (monotonic + NTP)** | 🧭 Roadmap | Grace period memakai `Date.now()` langsung; belum ada monotonic/NTP. |
 | **HWID slot enforcement server-side** | 🧭 Roadmap | Butuh Cloud API; belum diimplementasi. |
-| **Root CA key encryption at-rest** | 🧭 Roadmap (OPEN) | `certs.py` menyimpan key tanpa enkripsi (`NoEncryption()`). |
+| **Captive portal escaping (anti-XSS/open-redirect)** | ✅ Implemented (P2) | `portal_server.py` — whitelist skema + `html.escape` + `js_string_literal` (cegah `</script>` breakout). |
+| **Sanitasi error API (anti info-disclosure)** | ✅ Implemented (P2) | Node `respondError` (`routes.ts`); Python `@app.exception_handler` men-scrub 5xx (`server.py`). |
+| **Proteksi izin Root CA key** | 🟡 Sebagian (P2) | Izin file diperketat (`chmod 600`/`icacls`) + gitignore. Enkripsi passphrase at-rest = Roadmap. |
 
 > Rincian temuan & sisa item terbuka: [`docs/SECURITY_AUDIT.md`](../SECURITY_AUDIT.md).
 

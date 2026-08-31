@@ -6,7 +6,7 @@
 > **Target Version**: NetCut Sentinel v2.2.0  
 > **Catatan (2026-08-31):** Sebelumnya salah bernomor `SPEC-008` (bentrok dengan Cloud Auth). Dinormalkan menjadi **SPEC-012**.
 >
-> **Keamanan CA (lihat SECURITY_AUDIT [OPEN]):** Private key Root CA (`certs/spoorf-ca-key.pem`) saat ini disimpan **tanpa enkripsi** (`serialization.NoEncryption()` di `certs.py`). CA ini di-install ke trust store perangkat korban, jadi kebocoran key = kemampuan MITM. Lindungi ACL file & pertimbangkan enkripsi at-rest.
+> **Keamanan CA (P2):** Private key Root CA (`certs/spoorf-ca-key.pem`) kini (a) **di-gitignore** (tak pernah ter-commit) dan (b) izin file-nya **diperketat saat generate** — `chmod 600` (POSIX) / `icacls` grant hanya user aktif (Windows), via `_restrict_key_permissions` di `certs.py`. **Roadmap:** enkripsi passphrase at-rest (`serialization.BestAvailableEncryption`) & autentikasi endpoint download CA. CA ini di-install ke trust store perangkat korban, jadi kebocoran key = kemampuan MITM.
 
 ---
 

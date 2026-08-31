@@ -8,6 +8,7 @@ Menyediakan pengelolaan Root CA dan pembuatan sertifikat SSL/TLS dinamis on-the-
 
 import os
 import sys
+import subprocess
 import datetime
 import threading
 from pathlib import Path
@@ -118,6 +119,9 @@ class SpoorfCertEngine:
                 serialization.PrivateFormat.TraditionalOpenSSL,
                 serialization.NoEncryption()
             ))
+        # KEAMANAN (P2): batasi izin file private key ke pemilik saja (best-effort).
+        # Catatan: enkripsi passphrase at-rest tetap Roadmap (butuh manajemen passphrase).
+        self._restrict_key_permissions(self.ca_key_path)
 
         # Simpan PEM Certificate
         pem_bytes = self.ca_cert.public_bytes(serialization.Encoding.PEM)
@@ -129,6 +133,25 @@ class SpoorfCertEngine:
             f.write(pem_bytes)
 
         logger.info(f"✨ [CertEngine] NetCut Sentinel Root CA tersimpan di {self.ca_cert_path}")
+
+    def _restrict_key_permissions(self, key_path: Path) -> None:
+        """
+        KEAMANAN (P2): Batasi izin file private key ke pemilik saja (best-effort).
+        POSIX: chmod 0600. Windows: icacls (hapus inheritance, grant hanya user aktif).
+        """
+        try:
+            if sys.platform == "win32":
+                user = os.environ.get("USERNAME") or ""
+                if user:
+                    subprocess.run(
+                        ["icacls", str(key_path), "/inheritance:r", "/grant:r", f"{user}:F"],
+                        shell=False, capture_output=True, timeout=5,
+                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                    )
+            else:
+                os.chmod(key_path, 0o600)
+        except Exception as e:
+            logger.debug(f"Notice restricting CA key permissions: {e}")
 
     def generate_leaf_cert(self, domain: str) -> Tuple[bytes, bytes]:
         """

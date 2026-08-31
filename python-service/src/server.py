@@ -18,6 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Response, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from pydantic import BaseModel
 
 from .core.scanner import NetworkScanner
@@ -80,6 +81,16 @@ async def api_token_guard(request: Request, call_next):
                     content={"success": False, "error": "Unauthorized: missing or invalid API token."}
                 )
     return await call_next(request)
+
+# KEAMANAN (P2): Sanitasi respons error. Detail 5xx (mis. `detail=str(e)`) berpotensi
+# membocorkan internal → di-log penuh di server, tapi klien hanya menerima pesan generik.
+# Pesan 4xx (validasi, mis. RFC1918) dipertahankan karena bersifat operasional.
+@app.exception_handler(StarletteHTTPException)
+async def sanitized_http_exception_handler(request: Request, exc: StarletteHTTPException):
+    if exc.status_code >= 500:
+        logger.error(f"[API {exc.status_code}] {request.method} {request.url.path}: {exc.detail}")
+        return JSONResponse(status_code=exc.status_code, content={"success": False, "error": "Internal server error"})
+    return JSONResponse(status_code=exc.status_code, content={"success": False, "error": exc.detail})
 
 scanner = NetworkScanner()
 spoofer = ARPSpoofer()

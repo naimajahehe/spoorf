@@ -39,10 +39,10 @@
 | 4 | 🟠 HIGH | **[FIXED]** | `shield.py` | `shell=True` dengan `gw_ip`/`gw_mac`/`iface_alias` | Validasi + arg-list + escape alias PowerShell |
 | 5 | 🟡 MEDIUM | **[FIXED]** | `desktop-electron/src/main.ts` | Path `stop-all` (404) → ARP korban tak dipulihkan saat exit | Perbaiki ke `stop_all` (+ header token) |
 | 6 | 🟡 MEDIUM | **[FIXED]** | `spoofer.py` | `subprocess` tak di-import → gateway ARP lock selalu `NameError` senyap | `import subprocess` |
-| 7 | 🟠 HIGH | **[OPEN]** | `portal_server.py` `_render_landing_html` | `redirect_url`/username direfleksikan tanpa escape ke HTML/JS; `redirect_url` tak divalidasi http(s) → HTML/JS injection ke korban LAN | `html.escape()` + `json.dumps()` untuk JS + whitelist skema |
-| 8 | 🟠 HIGH | **[OPEN]** | `licenseManager.ts` `activateLicenseKey` | Aktivasi menaikkan tier hanya dari prefix string (`PRO`/`SENTINEL`), tanpa kripto | Verifikasi tanda tangan server (RS256/Ed25519) |
-| 9 | 🟡 MEDIUM | **[OPEN]** | `interceptor/certs.py` | Private key Root CA disimpan tanpa enkripsi (`NoEncryption()`) | Batasi ACL / enkripsi at-rest / auth download CA |
-| 10 | 🟡 MEDIUM | **[OPEN]** | `routes.ts`, `server.py` | `error.message`/`str(e)` bocor ke response | Pesan generik ke klien, detail hanya di log |
+| 7 | 🟠 HIGH | **[FIXED]** (P2) | `portal_server.py` `_render_landing_html` | `redirect_url`/username direfleksikan tanpa escape ke HTML/JS; `redirect_url` tak divalidasi http(s) → HTML/JS injection ke korban LAN | `sanitize_redirect_url` (whitelist http/https) + `html.escape` (atribut/teks) + `js_string_literal` (escape `< > &` untuk konteks `<script>`, cegah `</script>` breakout) |
+| 8 | 🟠 HIGH | **[OPEN]** | `licenseManager.ts` `activateLicenseKey` | Aktivasi menaikkan tier hanya dari prefix string (`PRO`/`SENTINEL`), tanpa kripto | Verifikasi tanda tangan server (RS256/Ed25519) — butuh Cloud API (Roadmap) |
+| 9 | 🟡 MEDIUM | **[PARTIAL]** (P2) | `interceptor/certs.py` | Private key Root CA disimpan tanpa enkripsi (`NoEncryption()`) | ✅ Izin file diperketat saat tulis (POSIX `chmod 600` / Windows `icacls`) + gitignore. 🧭 Enkripsi passphrase at-rest tetap Roadmap |
+| 10 | 🟡 MEDIUM | **[FIXED]** (P2) | `routes.ts`, `server.py` | `error.message`/`str(e)` bocor ke response | Node `respondError()` (log penuh, pesan generik utk error tak terduga, pertahankan pesan operasional); Python `@app.exception_handler` men-scrub semua 5xx |
 
 ---
 
@@ -60,8 +60,9 @@
 **Sebelum:** `start()` memvalidasi `victim_ip`/`victim_mac` saja; `gateway_ip`/`gateway_mac` mengalir ke `f'netsh ... {gateway_ip} {norm_mac}'` dengan `shell=True`. Karena :8001 tanpa auth & engine admin → eksekusi perintah admin dari proses lokal.
 **Perbaikan:** Validasi RFC1918/MAC untuk gateway di `start()` dan di dalam fungsi OS; seluruh `netsh`/PowerShell memakai argument-list (`shell=False`). Pola sama di `shield.py`. Test: `test_unit_spoofer.py` (`test_spoof_invalid_gateway_*`, `test_host_gateway_lock_skips_invalid_input`).
 
-### 🟠 [OPEN] Reflected HTML/JS injection di captive portal
-`_render_landing_html` menyisipkan `target_url` (=`redirect_url`) tanpa escape ke `<meta refresh>`, `window.location.href="{deep_link}"`, `<a href>`, dan `<title>`. `redirect_url` tidak divalidasi skema. Perangkat korban di LAN menerima halaman ini → operator (atau penyerang via API) dapat menyuntik JS ke korban. **Rekomendasi:** `html.escape()`, `json.dumps()` untuk konteks JS, whitelist `http/https`.
+### 🟠 [FIXED] (P2) Reflected HTML/JS injection di captive portal
+**Sebelum:** `_render_landing_html` menyisipkan `target_url` (=`redirect_url`) & username tanpa escape ke `<meta refresh>`, `window.location.href="{deep_link}"`, `<a href>`, dan `<title>`; `redirect_url` tak divalidasi skema.
+**Perbaikan:** `sanitize_redirect_url()` mem-whitelist skema `http/https` (set-time + render + header `Location`); `html.escape(..., quote=True)` untuk konteks atribut/teks; `js_string_literal()` untuk konteks `<script>` — meng-escape `< > &` sehingga `</script>` di dalam URL valid pun tidak dapat menutup blok script (mencegah *script-breakout* yang lolos dari `json.dumps` biasa). Test: `test_redirector.py` (`test_landing_html_*`, `test_sanitize_redirect_url_*`).
 
 ### 🟟 [INFO] Sudah benar (positif)
 - **SQL 100% parameterized** (`database.ts`) — tidak ada SQL injection (satu-satunya nilai non-parameter = konstanta numerik `OFFLINE_GRACE_SECONDS`).
@@ -92,7 +93,7 @@
 | Architecture | 8/10 | Pemisahan proses jelas; modular |
 | Maintainability | 7/10 | `deviceManager.ts` (1408) & `App.tsx` (1944) besar; duplikasi wrapper |
 | Readability | 8/10 | Penamaan deskriptif, komentar dwibahasa |
-| **Security** | **4 → 7/10** | Drive-by ditutup, control-plane ber-auth, injeksi shell dihilangkan; sisa: XSS portal, lisensi, CA key |
+| **Security** | **4 → 8/10** | P1: drive-by ditutup, control-plane ber-auth, injeksi shell dihilangkan. P2: XSS portal ditutup, error di-sanitasi, izin CA key diperketat. Sisa: verifikasi lisensi kriptografis, enkripsi CA key at-rest, rate-limit/clock-tamper (Roadmap) |
 | Performance | 8/10 | Prepared statements, transaksi, single-flight scan, debounce |
 | Error Handling | 6/10 | Konsisten di API tapi bocor `error.message`; `except` telanjang |
 | Testing | 7/10 | Suite luas (145 Python + 27 Node); kini ada test keamanan |
@@ -101,12 +102,12 @@
 
 ## 7. Rekomendasi (Roadmap sisa)
 
-### Prioritas 2 — Important (belum dikerjakan)
-1. **Escape captive portal** + whitelist skema `redirect_url` (`portal_server.py`).
-2. **Lisensi:** verifikasi tanda tangan server-side (hentikan aktivasi berbasis prefix string).
-3. **Root CA key:** batasi ACL / enkripsi at-rest / auth download CA.
-4. **Jangan bocorkan** `error.message`/`str(e)` ke klien.
-5. **`.gitignore`** sebelum `git init` (kecualikan `.env`, `certs/`, `venv/`, `data/*.db`, `dist-installer/`); hapus `DB_PASSWORD` usang dari `.env`.
+### Prioritas 2 — Important
+1. ✅ **[FIXED]** Escape captive portal + whitelist skema `redirect_url` (`portal_server.py`).
+2. 🧭 **[OPEN/Roadmap]** Lisensi: verifikasi tanda tangan server-side (hentikan aktivasi prefix string) — **butuh Cloud API + public key** yang belum ada di repo; tidak diterapkan agar tidak memblokir aktivasi offline user.
+3. 🟡 **[PARTIAL]** Root CA key: ✅ izin file diperketat + gitignore; 🧭 enkripsi passphrase at-rest masih Roadmap; auth download CA masih Roadmap.
+4. ✅ **[FIXED]** Jangan bocorkan `error.message`/`str(e)` ke klien (Node `respondError`, Python 5xx scrubber).
+5. ✅ **[DONE]** `.gitignore` sudah lengkap & benar (secrets/artefak tak ter-track). Sisa opsional: hapus `DB_PASSWORD` usang dari `.env` lokal (gitignored, bukan risiko GitHub).
 
 ### Prioritas 3 — Improvement
 6. Pecah `deviceManager.ts` & `App.tsx`; hapus duplikasi handler; guard NaN `parseInt`; `encodeURIComponent`; ganti `except:` telanjang dengan logging.
@@ -115,9 +116,16 @@
 
 ---
 
-## 8. Verifikasi Perbaikan P1 (2026-08-31)
+## 8. Verifikasi Perbaikan (2026-08-31)
 
+**P1:**
 - `tsc --noEmit` bersih: `backend-node`, `frontend-react`, `desktop-electron`.
 - `python -m py_compile` bersih untuk file yang diubah.
-- **145/145** unit test Python lulus (`unittest discover`), termasuk 3 test gateway baru.
-- **27/27** unit test Node lulus, termasuk `unit_security.test.ts` (exact-origin menolak `localhost.evil.com`, host allowlist, `apiTokenGuard`).
+- Unit test Node termasuk `unit_security.test.ts` (exact-origin menolak `localhost.evil.com`, host allowlist, `apiTokenGuard`); Python termasuk 3 test validasi gateway.
+
+**P2:**
+- Portal: 4 test baru di `test_redirector.py` (sanitasi skema, escape HTML, tolak `javascript:`, cegah `</script>` breakout di URL https valid).
+- CA key: izin diperketat saat generate (`_restrict_key_permissions`).
+- Error sanitization: 48 situs Node → `respondError`; Python 5xx di-scrub via `@app.exception_handler`.
+
+**Status akhir test:** **149/149** Python lulus · **27/27** Node lulus · `tsc` bersih di 3 proyek.

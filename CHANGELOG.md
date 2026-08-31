@@ -2,6 +2,21 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.30.0] - 2026-08-31
+
+### Security Hardening (Perbaikan Prioritas-2)
+- **[HIGH] Captive Portal XSS / Open-Redirect — `python-service/src/core/redirector/portal_server.py`**:
+  - `sanitize_redirect_url()`: whitelist skema `http/https` (tolak `javascript:`/`data:`/dsb.) di set-time, render, & header `Location`.
+  - `_render_landing_html` kini meng-`html.escape` semua nilai dinamis (URL di `href`/`meta`, username di `<title>`/teks) dan memakai `js_string_literal()` untuk konteks `<script>` — meng-escape `< > &` sehingga `</script>` di dalam URL https valid pun **tidak** bisa menutup blok script (menutup *script-breakout* yang lolos dari `json.dumps` biasa).
+  - 4 test baru di `test_redirector.py`.
+- **[MEDIUM] Proteksi izin Root CA key — `interceptor/certs.py`**:
+  - `_restrict_key_permissions()` memperketat izin `spoorf-ca-key.pem` saat generate: `chmod 600` (POSIX) / `icacls` grant hanya user aktif (Windows). Enkripsi passphrase at-rest tetap Roadmap.
+- **[MEDIUM] Sanitasi pesan error (anti info-disclosure)**:
+  - Node: helper `respondError()` di `routes.ts` — log detail penuh ke server, kirim pesan **operasional** (validasi/feature-gate/"not found") ke klien, selebihnya generik. 48 situs `res.status(500)...error.message` diseragamkan.
+  - Python: `@app.exception_handler(StarletteHTTPException)` di `server.py` men-scrub seluruh detail 5xx (log penuh, balas "Internal server error"); pesan 4xx operasional dipertahankan.
+- **Ditunda (Roadmap, dengan alasan):** verifikasi lisensi kriptografis (butuh Cloud API/public-key), rate-limit leaky-bucket & anti clock-tamper (SPEC-010).
+- **Verifikasi:** **149/149** test Python + **27/27** test Node lulus; `tsc --noEmit` bersih (backend/frontend/electron). Detail: `docs/SECURITY_AUDIT.md`.
+
 ## [v2.29.0] - 2026-08-31
 
 ### Security Hardening (Audit Defensif & Perbaikan Prioritas-1)

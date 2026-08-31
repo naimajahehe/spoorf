@@ -23,6 +23,9 @@ Spoorf adalah alat kontrol akses jaringan Layer‑2 (ARP spoofing, DNS spoof, tr
 | **SQL parameterized** (better‑sqlite3, tanpa string‑interpolation) | `backend-node/src/services/database.ts` |
 | **Electron hardening** (`contextIsolation: true`, `nodeIntegration: false`) | `desktop-electron/src/main.ts`, `preload.ts` |
 | **Gateway/Self immunity** (anti self‑cut) & isolasi subnet | `spoofer.py`, `deviceManager.ts` |
+| **Captive portal escaping** (whitelist skema + `html.escape` + JS‑safe literal) — P2 | `python-service/src/core/redirector/portal_server.py` |
+| **Sanitasi error** (log penuh, pesan generik utk error tak terduga) — P2 | `backend-node/src/api/routes.ts` (`respondError`), `server.py` (5xx scrubber) |
+| **Proteksi izin Root CA key** (chmod 600 / icacls saat generate) — P2 | `python-service/src/core/interceptor/certs.py` |
 
 ### IPC Bearer Token — cara kerja
 Aktif **hanya bila** env `SENTINEL_API_TOKEN` diset. Aplikasi Electron meng‑generate token (`crypto.randomBytes(32)`) tiap sesi dan menyuntikkannya ke Node, Python, dan renderer. Saat aktif, setiap request `/api/*` (kecuali `/health`, `/api/health`) wajib header `x-sentinel-token`; WebSocket mengirimnya via `auth`/header. Di mode dev tanpa Electron token tidak diset → guard nonaktif (kompatibel).
@@ -31,10 +34,9 @@ Aktif **hanya bila** env `SENTINEL_API_TOKEN` diset. Aplikasi Electron meng‑ge
 
 Lihat [`docs/SECURITY_AUDIT.md`](docs/SECURITY_AUDIT.md) untuk detail. Ringkas:
 
-- **Root CA key tanpa enkripsi at‑rest** (`python-service/certs/spoorf-ca-key.pem`) — lindungi ACL / enkripsi.
-- **Verifikasi lisensi kriptografis** (RS256/Ed25519) belum ada; aktivasi key berbasis prefix string (dev/demo).
+- **Enkripsi Root CA key at‑rest** — izin file sudah diperketat (P2), namun enkripsi passphrase belum (butuh manajemen passphrase). Key tetap di‑gitignore.
+- **Verifikasi lisensi kriptografis** (RS256/Ed25519) belum ada; aktivasi key berbasis prefix string (dev/demo) — butuh Cloud API.
 - **Anti clock‑tamper** (monotonic + NTP), **rate‑limit leaky‑bucket** eksplisit — belum ada.
-- **Kebocoran pesan error** (`error.message`/`str(e)`) ke response — sebaiknya digeneralisasi.
 
 ## Melaporkan Kerentanan
 

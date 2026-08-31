@@ -14,11 +14,57 @@ import time
 from unittest.mock import MagicMock, patch
 
 from src.core.redirector.dns_spoofer import DNSSpoofer
-from src.core.redirector.portal_server import CaptivePortalServer
+from src.core.redirector.portal_server import (
+    CaptivePortalServer,
+    PortalRequestHandler,
+    sanitize_redirect_url,
+    DEFAULT_REDIRECT_URL,
+)
 from src.core.redirector.manager import RedirectManager
 from src.exceptions.custom import SpoofError
 
 class TestRedirector(unittest.TestCase):
+    # ===== P2: Captive Portal XSS / Open-Redirect Hardening =====
+    def test_sanitize_redirect_url_rejects_dangerous_schemes(self):
+        """P2: hanya http/https absolut yang lolos; skema berbahaya → fallback aman."""
+        self.assertEqual(sanitize_redirect_url("javascript:alert(1)"), DEFAULT_REDIRECT_URL)
+        self.assertEqual(sanitize_redirect_url("data:text/html,<script>"), DEFAULT_REDIRECT_URL)
+        self.assertEqual(sanitize_redirect_url(""), DEFAULT_REDIRECT_URL)
+        self.assertEqual(sanitize_redirect_url("not-a-url"), DEFAULT_REDIRECT_URL)
+        # URL sah dipertahankan
+        self.assertEqual(sanitize_redirect_url("http://192.168.1.1/login"), "http://192.168.1.1/login")
+        self.assertEqual(sanitize_redirect_url("https://example.com/x"), "https://example.com/x")
+
+    def test_landing_html_escapes_injection(self):
+        """P2: payload XSS pada URL & username tidak boleh lolos sebagai HTML/JS aktif."""
+        # _render_landing_html tidak memakai `self`, aman dipanggil dengan None.
+        body = PortalRequestHandler._render_landing_html(
+            None,
+            'https://evil.com/"><script>alert(1)</script>',
+            '"><img src=x onerror=alert(1)>'
+        ).decode("utf-8")
+        # Tidak ada tag script mentah dari input yang tersuntik
+        self.assertNotIn("<script>alert(1)</script>", body)
+        self.assertNotIn("<img src=x onerror=alert(1)>", body)
+        # Karakter berbahaya ter-escape
+        self.assertIn("&lt;", body)
+        self.assertIn("&gt;", body)
+
+    def test_landing_html_rejects_js_scheme_url(self):
+        """P2: redirect_url ber-skema javascript: di-fallback ke default (tidak muncul di output)."""
+        body = PortalRequestHandler._render_landing_html(None, "javascript:alert(1)", "").decode("utf-8")
+        self.assertNotIn("javascript:alert(1)", body)
+        self.assertIn(DEFAULT_REDIRECT_URL, body)
+
+    def test_landing_html_prevents_script_breakout_in_valid_https(self):
+        """P2: `</script>` di dalam URL https VALID tidak boleh menutup blok <script>."""
+        malicious = "https://evil.com/x</script><script>alert(1)</script>"
+        body = PortalRequestHandler._render_landing_html(None, malicious, "").decode("utf-8")
+        # Tidak ada </script> atau <script>alert mentah dari input di dalam konteks JS
+        self.assertNotIn("</script><script>alert(1)", body)
+        # Di konteks JS harus ter-escape menjadi \u003c/script...
+        self.assertIn("\\u003c/script", body)
+
     def test_dns_whitelist_matching(self):
         """Uji apakah domain Instagram di-whitelist dan domain lain di-spoof."""
         # Whitelisted domains
