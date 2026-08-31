@@ -28,7 +28,8 @@ import {
     RefreshCw,
     Trash2,
     Laptop,
-    CheckCircle2
+    CheckCircle2,
+    BookOpen
 } from 'lucide-react';
 import { Select, SelectTrigger, SelectContent, SelectItem } from './components/motion/select';
 import { AnimatedSidebar, AnimatedSidebarProvider } from './components/AnimatedSidebar';
@@ -42,6 +43,7 @@ import { TransparentGatewayView } from './components/TransparentGatewayView';
 import { BettercapArsenalView } from './components/BettercapArsenalView';
 import { ActivityLogView } from './components/ActivityLogView';
 import { SettingsView } from './components/SettingsView';
+import { DocumentationView } from './components/DocumentationView';
 import { NewDeviceToast, ToastDeviceItem } from './components/NewDeviceToast';
 import { DisconnectedDeviceToast } from './components/DisconnectedDeviceToast';
 import { OnlineDeviceToast } from './components/OnlineDeviceToast';
@@ -307,6 +309,15 @@ function App() {
                 hint: 'Audit Log',
                 keywords: ['activity', 'log', 'aktivitas', 'events', 'feed'],
                 onSelect: () => setActiveNav('activity')
+            },
+            {
+                id: 'nav-documentation',
+                label: 'Dokumentasi — Panduan Penggunaan, Cara Kerja & Diagram Alir',
+                group: 'Navigasi Menu',
+                icon: BookOpen,
+                hint: 'Dokumentasi Interaktif',
+                keywords: ['docs', 'dokumentasi', 'panduan', 'cara kerja', 'diagram', 'flow', 'npcap', 'arp', 'pwm', 'throttling', 'help', 'tutorial'],
+                onSelect: () => setActiveNav('documentation')
             },
             {
                 id: 'nav-settings',
@@ -1083,7 +1094,7 @@ function App() {
                                 <span className="text-zinc-500">Sentinel</span>
                                 <span className="text-zinc-600">/</span>
                                 <span className="text-zinc-200 font-semibold">
-                                    {activeNav === 'dashboard' ? 'Dashboard' : activeNav === 'netcut' ? 'NetCut Targets' : activeNav === 'gateway' ? 'Smart Gateway' : activeNav === 'arsenal' ? 'Security Arsenal' : activeNav === 'shield' ? 'Sentinel Shield' : activeNav === 'activity' ? 'Aktivitas Langsung' : 'Settings'}
+                                    {activeNav === 'dashboard' ? 'Dashboard' : activeNav === 'netcut' ? 'NetCut Targets' : activeNav === 'gateway' ? 'Smart Gateway' : activeNav === 'arsenal' ? 'Security Arsenal' : activeNav === 'shield' ? 'Sentinel Shield' : activeNav === 'activity' ? 'Aktivitas Langsung' : activeNav === 'documentation' ? 'Dokumentasi' : 'Settings'}
                                 </span>
                             </div>
                         </div>
@@ -1238,6 +1249,11 @@ function App() {
                             />
                         ) : activeNav === 'activity' ? (
                             <ActivityLogView events={activityLog} onClear={clearActivityLog} />
+                        ) : activeNav === 'documentation' ? (
+                            <DocumentationView
+                                onNavigate={(nav) => setActiveNav(nav as any)}
+                                onTriggerScan={() => scan()}
+                            />
                         ) : activeNav === 'gateway' ? (
                             <TransparentGatewayView
                                 devices={devices}

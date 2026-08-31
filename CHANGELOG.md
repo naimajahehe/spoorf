@@ -2,6 +2,16 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.31.0] - 2026-08-31
+
+### Quality & Reliability (Perbaikan Prioritas-3)
+- **Validasi input angka API — `backend-node/src/api/routes.ts`**: helper `parsePositiveInt()` memberi nilai default aman untuk query `?limit=` yang tidak valid (mis. `?limit=abc`), mencegah `NaN` diteruskan ke engine.
+- **Transparansi status database — `database.ts` + `deviceManager.ts` + `routes.ts`**: bila file DB gagal dibuka & sistem jatuh ke SQLite in-memory, kini di-set flag `usingMemoryFallback`, log peringatan jelas, dan dilaporkan di `GET /health` (`services.database_persistent: false` + `warnings[]`) — sebelumnya senyap sehingga operator tidak sadar data tidak tersimpan.
+- **Keamanan URL frontend — `frontend-react/src/api/client.ts`**: parameter path `ip`/`id` dibungkus `encodeURIComponent`.
+- **Bersih-bersih — `pythonBridge.ts`**: menghapus penangan `ws.on('error')` ganda.
+- **Ditunda sengaja:** pembersihan `except:` telanjang di engine Python (bare-except sering disengaja untuk ketahanan daemon; perubahan blanket berisiko) dan refactor pemecahan file besar (`deviceManager.ts`, `App.tsx`) — diperlakukan sebagai peningkatan arsitektur terpisah.
+- **Verifikasi:** 27/27 test Node lulus; `tsc --noEmit` bersih untuk backend & file yang diubah.
+
 ## [v2.30.0] - 2026-08-31
 
 ### Security Hardening (Perbaikan Prioritas-2)

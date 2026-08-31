@@ -78,11 +78,11 @@
 
 1. **[FIXED]** Restorasi ARP saat exit gagal — `main.ts` path `stop-all` (404) → `stop_all`.
 2. **[FIXED]** `spoofer.py` `subprocess` tak di-import → gateway kernel lock selalu gagal senyap.
-3. **[OPEN]** `parseInt(req.query.limit)` tanpa guard NaN di beberapa handler (`routes.ts`).
-4. **[OPEN]** `database.ts` fallback diam ke `:memory:` bila file gagal dibuka → data hilang tanpa peringatan ke UI.
-5. **[OPEN]** Duplikasi handler `ws.on('error')` di `pythonBridge.ts` (kosmetik).
-6. **[OPEN]** Frontend `client.ts` interpolasi `ip`/`id` ke URL tanpa `encodeURIComponent`.
-7. **[OPEN]** Banyak `except:`/`except Exception` telanjang di engine Python (reliability/observability).
+3. **[FIXED]** (P3) `parseInt(req.query.limit)` tanpa guard NaN → helper `parsePositiveInt(value, fallback)` di `routes.ts`.
+4. **[FIXED]** (P3) `database.ts` fallback diam ke `:memory:` → kini set flag `usingMemoryFallback`, log peringatan jelas, & di-surface di `GET /health` (`database_persistent: false` + `warnings[]`).
+5. **[FIXED]** (P3) Duplikasi handler `ws.on('error')` di `pythonBridge.ts` dihapus.
+6. **[FIXED]** (P3) Frontend `client.ts` kini membungkus `ip`/`id` path dengan `encodeURIComponent`.
+7. **[OPEN]** Banyak `except:`/`except Exception` telanjang di engine Python. **Ditunda sengaja:** pada daemon jaringan, bare-except sering disengaja untuk ketahanan; perubahan blanket berisiko mengubah perilaku. Sebaiknya ditangani per-kasus dengan `logger.debug`.
 
 ---
 

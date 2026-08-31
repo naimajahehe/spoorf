@@ -1,5 +1,5 @@
 import { SlicedText } from "./kokonutui/sliced-text";
-import { ChevronRight, Command, LayoutDashboard, GlobeOff, Terminal, Settings, Search, PanelLeft, Radio, Zap, ShieldCheck, Gamepad2 } from "lucide-react";
+import { ChevronRight, Command, LayoutDashboard, GlobeOff, Terminal, Settings, Search, PanelLeft, Radio, Zap, ShieldCheck, Gamepad2, BookOpen } from "lucide-react";
 import {
   AnimatePresence,
   type HTMLMotionProps,
@@ -677,6 +677,16 @@ export const AnimatedSidebar = forwardRef<HTMLElement, AnimatedSidebarProps>(
             <AnimatedSidebarGroupLabel>PREFERENCES</AnimatedSidebarGroupLabel>
             <AnimatedSidebarGroupContent>
               <AnimatedSidebarMenu>
+                <AnimatedSidebarMenuItem>
+                  <AnimatedSidebarMenuButton
+                    isActive={activeNav === "documentation"}
+                    onSelect={() => onNavSelect?.("documentation")}
+                    icon={<BookOpen size={18} />}
+                  >
+                    Dokumentasi
+                  </AnimatedSidebarMenuButton>
+                </AnimatedSidebarMenuItem>
+
                 <AnimatedSidebarMenuItem>
                   <AnimatedSidebarMenuButton
                     isActive={activeNav === "settings"}

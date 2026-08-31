@@ -381,6 +381,11 @@ export class DeviceManager extends EventEmitter {
         return this.scanning;
     }
 
+    /** True bila DB memakai fallback in-memory (data tidak tersimpan permanen) — P3. */
+    isUsingMemoryFallback(): boolean {
+        return this.db.usingMemoryFallback === true;
+    }
+
     async scanNetwork(): Promise<Device[]> {
         // Single-Flight Coalescing: bila scan sedang berjalan, bagikan promise yang sama tanpa antre ulang.
         if (this.inFlightScan) {

@@ -184,6 +184,12 @@ export class DatabaseService {
     private db: Database.Database;
     private initialized: boolean = false;
     private dbPath: string;
+    /**
+     * True bila file DB gagal dibuka & sistem memakai SQLite in-memory (data TIDAK
+     * persist). Di-surface agar kondisi ini tidak "senyap" (P3). Bisa dibaca oleh
+     * layer atas untuk memperingatkan operator.
+     */
+    public usingMemoryFallback: boolean = false;
 
     constructor(customDbPath?: string) {
         if (customDbPath) {
@@ -211,7 +217,13 @@ export class DatabaseService {
             this.db.pragma('foreign_keys = ON');
             this.db.pragma('busy_timeout = 5000');
         } catch (err: any) {
-            console.warn(`⚠️ [DatabaseService] Cannot open ${this.dbPath} (${err.message}), falling back to in-memory SQLite.`);
+            this.usingMemoryFallback = true;
+            console.error(
+                `\n❌❌❌ [DatabaseService] GAGAL membuka file DB ${this.dbPath} (${err.message}).\n` +
+                `   → Beralih ke SQLite IN-MEMORY. PERINGATAN: seluruh data perangkat & lisensi\n` +
+                `     TIDAK akan tersimpan permanen dan hilang saat aplikasi ditutup.\n` +
+                `   → Periksa izin tulis folder data/ atau kunci file DB.\n`
+            );
             this.db = new Database(':memory:');
         }
     }

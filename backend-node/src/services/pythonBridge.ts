@@ -191,10 +191,6 @@ export class PythonBridge extends EventEmitter {
                 }
             });
 
-            this.ws.on('error', (err) => {
-                console.warn('Python WS connection warning:', err.message);
-            });
-
             this.ws.on('close', () => {
                 // Reconnect after 3 seconds if Python is still active
                 if (this.ready) {

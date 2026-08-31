@@ -59,12 +59,12 @@ export const apiClient = {
     },
 
     async blockDevice(ip: string, gatewayIp: string) {
-        const response = await http.post(`/api/devices/${ip}/block`, { gatewayIp });
+        const response = await http.post(`/api/devices/${encodeURIComponent(ip)}/block`, { gatewayIp });
         return response.data;
     },
 
     async unblockDevice(ip: string) {
-        const response = await http.post(`/api/devices/${ip}/unblock`);
+        const response = await http.post(`/api/devices/${encodeURIComponent(ip)}/unblock`);
         return response.data;
     },
 
@@ -95,12 +95,12 @@ export const apiClient = {
     },
 
     async updateBettercapDnsRule(id: string, updates: { domain?: string; target_ip?: string; action?: string; is_enabled?: boolean }) {
-        const response = await http.put(`/api/bettercap/dns/rules/${id}`, updates);
+        const response = await http.put(`/api/bettercap/dns/rules/${encodeURIComponent(id)}`, updates);
         return response.data;
     },
 
     async deleteBettercapDnsRule(id: string) {
-        const response = await http.delete(`/api/bettercap/dns/rules/${id}`);
+        const response = await http.delete(`/api/bettercap/dns/rules/${encodeURIComponent(id)}`);
         return response.data;
     },
 

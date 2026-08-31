@@ -23,18 +23,33 @@ function respondError(res: Response, err: any, status = 500): void {
     });
 }
 
+/**
+ * Parse integer positif dari query param dengan fallback aman (P3).
+ * Mencegah `NaN` diteruskan ke engine saat input tidak valid (mis. ?limit=abc).
+ */
+function parsePositiveInt(value: unknown, fallback: number): number {
+    const n = parseInt(String(value ?? ''), 10);
+    return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
 export const createRouter = (deviceManager: DeviceManager, licenseManager?: LicenseManager) => {
     const router = Router();
 
     // Health check with service readiness
     router.get(['/health', '/api/health'], (req: Request, res: Response) => {
+        const memoryFallback = deviceManager.isUsingMemoryFallback();
         res.json({
             status: 'ok',
             services: {
                 backend: true,
                 database: true,
+                // Jujur soal persistensi: false bila DB jatuh ke mode in-memory (P3).
+                database_persistent: !memoryFallback,
                 python_engine: true
             },
+            warnings: memoryFallback
+                ? ['Database berjalan in-memory: data perangkat & lisensi tidak tersimpan permanen.']
+                : [],
             timestamp: new Date().toISOString()
         });
     });
@@ -325,7 +340,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
 
     router.get('/api/gateway/logs', async (req: Request, res: Response) => {
         try {
-            const limit = parseInt(req.query.limit as string || '100', 10);
+            const limit = parsePositiveInt(req.query.limit, 100);
             const logs = await deviceManager.getGatewayDnsLogs(limit);
             res.json({ success: true, logs });
         } catch (err: any) {
@@ -409,7 +424,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
 
     router.get('/api/interceptor/flows', async (req: Request, res: Response) => {
         try {
-            const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 100;
+            const limit = parsePositiveInt(req.query.limit, 100);
             const search = req.query.search as string;
             const scheme = req.query.scheme as string;
             const method = req.query.method as string;
@@ -532,7 +547,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
 
     router.get('/api/bettercap/credentials', async (req: Request, res: Response) => {
         try {
-            const limit = parseInt(req.query.limit as string || '100', 10);
+            const limit = parsePositiveInt(req.query.limit, 100);
             const credentials = await deviceManager.getBettercapCredentials(limit);
             res.json({ success: true, credentials });
         } catch (err: any) {
