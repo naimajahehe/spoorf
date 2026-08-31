@@ -35,14 +35,10 @@ When modifying or refactoring code in this repository, you **MUST NEVER VIOLATE*
    - Boundary addresses like `0.0.0.0` or `255.255.255.255` must evaluate to `False` in `is_valid_private_ip()`.
 5. **API & Event Contract Backward Compatibility**:
    - Never alter or rename REST endpoint paths or WebSocket event payload keys without updating all 3 layers.
-6. **Knowledge Graph Synchronization**:
-   - After modifying code files in this session, always execute:
-     `.env\Scripts\python.exe -m graphify.cli update .`
-
-7. **Input Validation Before OS/Packet Ops (P1)**:
+6. **Input Validation Before OS/Packet Ops (P1)**:
    - Validate **both** victim AND gateway params (`is_valid_private_ip`, `is_valid_mac`) before building packets or shell commands.
    - **NEVER** use `subprocess(..., shell=True)` with interpolated IP/MAC/interface values. Use argument-list (`shell=False`). Applies to `spoofer.py` and `shield.py`.
-8. **Control-Plane Guards (P1)**:
+7. **Control-Plane Guards (P1)**:
    - Origin/Host checks in `backend-node/src/security.ts` must be **exact-match** (parse URL / exact set), never `startsWith` prefix.
    - When `SENTINEL_API_TOKEN` is set, all `/api/*` (except `/health`, `/api/health`) require header `x-sentinel-token` on both Node & Python; keep this guard intact when adding routes.
 

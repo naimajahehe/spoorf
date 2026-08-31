@@ -1,4 +1,4 @@
-﻿# ==========================================
+# ==========================================
 # NetCut Sentinel (Spoorf) — Git Ignore Rules
 # ==========================================
 
@@ -89,7 +89,7 @@ Thumbs.db
 ehthumbs.db
 Desktop.ini
 
-# 8. Graphify Transient Caches & Dated Runs
-graphify-out/cache/
-graphify-out/2026-*/
-graphify-out/*.sig
+# 8. Graphify Artifacts & Transient Data
+graphify-out/
+**/graphify-out/
+.graphify*

@@ -31,6 +31,5 @@ This project strictly enforces **Spec-Driven Development**. Every command, actio
    - If a new bug pattern is resolved, record the root cause in `docs/TROUBLESHOOTING.md`.
 
 4. **After Code or Feature Modifications**:
-   - Run the 53 automated tests per `docs/specs/SPEC-007_AUTOMATED_TESTING_SUITE.md`.
+   - Run the automated test suites per `docs/specs/SPEC-007_AUTOMATED_TESTING_SUITE.md`.
    - Update `CHANGELOG.md` with a summary of the change.
-   - Run `graphify update .` to keep the AST knowledge graph synchronized.
