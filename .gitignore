@@ -1,0 +1,95 @@
+﻿# ==========================================
+# NetCut Sentinel (Spoorf) — Git Ignore Rules
+# ==========================================
+
+# 1. Environment Variables & Local Secrets
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# 2. TLS Certificates & Private Keys (Generated dynamically at runtime)
+certs/
+**/certs/*.pem
+**/certs/*.crt
+**/certs/*.key
+*.pem
+*.crt
+*.key
+*.p12
+*.pfx
+
+# 3. Dependencies
+node_modules/
+**/node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# 4. Python Virtual Environments & Bytecode Caches
+venv/
+**/venv/
+.venv/
+**/__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# 5. Compiled Outputs, Binaries & Installers
+dist/
+**/dist/
+python-service/build/
+dist-installer/
+**/dist-installer/
+spoorf-engine/
+**/spoorf-engine/
+*.egg-info/
+.eggs/
+*.exe
+*.msi
+*.dll
+
+# Electron installer configuration & build templates
+!desktop-electron/build/
+!desktop-electron/build/**
+
+# 6. Runtime SQLite Database & WAL Logs
+data/
+**/data/*.db
+**/data/*.db-wal
+**/data/*.db-shm
+**/data/*.sqlite
+**/data/*.sqlite3
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# 7. IDE & OS Generated Files
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# 8. Graphify Transient Caches & Dated Runs
+graphify-out/cache/
+graphify-out/2026-*/
+graphify-out/*.sig

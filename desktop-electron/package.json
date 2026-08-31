@@ -1,0 +1,73 @@
+{
+  "name": "spoorf-sentinel",
+  "version": "2.21.0",
+  "description": "Next-Gen Layer 2 Network Discovery & Control Suite",
+  "author": "Spoorf Sentinel Team",
+  "main": "dist/main.js",
+  "scripts": {
+    "build:backend": "cd ../backend-node && npm run build",
+    "build:ts": "npm run build:backend && tsc && powershell -Command \"if (Test-Path ./dist/backend) { Remove-Item -Recurse -Force ./dist/backend }; Copy-Item -Recurse -Force ../backend-node/dist ./dist/backend\"",
+    "rebuild:native": "electron-builder install-app-deps",
+    "build:exe": "npm run build:ts && npm run rebuild:native && electron-builder --win nsis",
+    "build:portable": "npm run build:ts && npm run rebuild:native && electron-builder --win portable",
+    "package": "npm run build:exe"
+  },
+  "dependencies": {
+    "better-sqlite3": "11.10.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "electron-updater": "^6.3.9",
+    "express": "^4.18.2",
+    "socket.io": "^4.7.2",
+    "ws": "^8.21.3"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/cors": "^2.8.14",
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.8.0",
+    "electron": "^28.2.0",
+    "electron-builder": "^24.13.3",
+    "typescript": "^5.2.2"
+  },
+  "build": {
+    "appId": "com.spoorf.sentinel",
+    "productName": "Spoorf Sentinel",
+    "copyright": "Copyright © 2026 Spoorf Sentinel",
+    "asar": false,
+    "directories": {
+      "output": "dist-installer"
+    },
+    "files": [
+      "dist/**/*",
+      "node_modules/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ],
+      "requestedExecutionLevel": "requireAdministrator"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": true,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Spoorf Sentinel",
+      "include": "build/installer.nsh"
+    },
+    "extraResources": [
+      {
+        "from": "../python-service/dist/spoorf-engine",
+        "to": "engine"
+      },
+      {
+        "from": "../frontend-react/dist",
+        "to": "ui"
+      }
+    ]
+  }
+}

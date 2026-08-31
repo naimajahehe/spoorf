@@ -1,0 +1,827 @@
+import { spawn, ChildProcess } from 'child_process';
+import { EventEmitter } from 'events';
+import * as path from 'path';
+import * as fs from 'fs';
+import WebSocket from 'ws';
+import { Device } from '../types';
+
+export class PythonBridge extends EventEmitter {
+    private process: ChildProcess | null = null;
+    private baseUrl: string;
+    private wsUrl: string;
+    private ws: WebSocket | null = null;
+    private ready: boolean = false;
+    private isInternalSpawn: boolean = false;
+
+    constructor() {
+        super();
+        this.baseUrl = process.env.PYTHON_SERVICE_URL || 'http://127.0.0.1:8001';
+        this.wsUrl = this.baseUrl.replace(/^http/, 'ws') + '/ws/events';
+    }
+
+    private getPythonPath(): string {
+        if (process.env.PYTHON_PATH && fs.existsSync(process.env.PYTHON_PATH)) {
+            return process.env.PYTHON_PATH;
+        }
+        const isWindows = process.platform === 'win32';
+        const venvPython = isWindows
+            ? path.resolve(__dirname, '../../../python-service/venv/Scripts/python.exe')
+            : path.resolve(__dirname, '../../../python-service/venv/bin/python');
+        if (fs.existsSync(venvPython)) {
+            return venvPython;
+        }
+        return isWindows ? 'python' : 'python3';
+    }
+
+    private getServicePath(): string {
+        if (process.env.PYTHON_SERVICE_PATH) {
+            return path.resolve(process.env.PYTHON_SERVICE_PATH);
+        }
+        return path.resolve(__dirname, '../../../python-service');
+    }
+
+    /**
+     * KEAMANAN (P1): Sisipkan token bearer lokal ke header bila SENTINEL_API_TOKEN
+     * diset, agar Python engine (:8001) menolak request dari proses lokal lain.
+     */
+    private authHeaders(base: HeadersInit = {}): HeadersInit {
+        const token = process.env.SENTINEL_API_TOKEN;
+        if (!token) return base;
+        return { ...(base as Record<string, string>), 'x-sentinel-token': token };
+    }
+
+    /**
+     * fetch dengan timeout + cancel (AbortController) agar panggilan Node->Python
+     * tidak pernah menggantung tanpa batas bila engine Python hang.
+     * Header token disuntik terpusat di sini (mencakup seluruh panggilan HTTP).
+     */
+    private async fetchWithTimeout(url: string, options: RequestInit = {}, timeoutMs = 10000): Promise<Response> {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
+        try {
+            return await fetch(url, {
+                ...options,
+                headers: this.authHeaders(options.headers),
+                signal: controller.signal
+            });
+        } finally {
+            clearTimeout(timer);
+        }
+    }
+
+    private async checkHealth(): Promise<boolean> {
+        try {
+            const res = await this.fetchWithTimeout(`${this.baseUrl}/health`, {}, 1000);
+            return res.ok;
+        } catch {
+            return false;
+        }
+    }
+
+    async start(): Promise<void> {
+        console.log(`🔍 Checking Python FastAPI microservice at ${this.baseUrl}...`);
+        
+        let attempts = 0;
+        const maxAttempts = 20; // 10 detik
+        while (attempts < maxAttempts) {
+            const ok = await this.checkHealth();
+            if (ok) {
+                console.log(`✅ Python FastAPI microservice is ready on ${this.baseUrl} (in ${attempts * 0.5}s)`);
+                this.ready = true;
+                this.connectWebSocket();
+                return;
+            }
+
+            // In dev mode only (when explicitly not managed by electron supervisor), attempt spawn on attempt 1
+            if (attempts === 0 && process.env.AUTO_SPAWN_PYTHON === 'true') {
+                const pythonPath = this.getPythonPath();
+                const servicePath = this.getServicePath();
+                if (fs.existsSync(servicePath)) {
+                    try {
+                        console.log(`🚀 Spawning Python FastAPI: ${pythonPath} -m src.main`);
+                        this.process = spawn(pythonPath, ['-m', 'src.main'], {
+                            cwd: servicePath,
+                            env: { ...process.env, PYTHONUNBUFFERED: '1', PYTHONIOENCODING: 'utf-8' },
+                            stdio: ['ignore', 'inherit', 'inherit']
+                        });
+
+                        this.isInternalSpawn = true;
+
+                        this.process.on('error', (err) => {
+                            console.warn(`⚠️ [PythonBridge] Process spawn error (handled): ${err.message}`);
+                        });
+
+                        this.process.on('exit', (code, signal) => {
+                            console.log(`Python process exited with code ${code} (signal: ${signal})`);
+                            this.ready = false;
+                            this.emit('exit', code);
+                        });
+                    } catch (err: any) {
+                        console.warn(`⚠️ [PythonBridge] Could not spawn Python: ${err.message}`);
+                    }
+                }
+            }
+
+            await new Promise(r => setTimeout(r, 500));
+            attempts++;
+        }
+
+        console.warn(`⚠️ Python FastAPI microservice not responding on ${this.baseUrl} after ${maxAttempts * 0.5}s. Continuing in offline mode.`);
+    }
+
+    private latestTelemetry: any = null;
+    private latestWifiInfo: any = null;
+
+    private connectWebSocket(): void {
+        try {
+            const token = process.env.SENTINEL_API_TOKEN;
+            this.ws = new WebSocket(this.wsUrl, token ? { headers: { 'x-sentinel-token': token } } : undefined);
+
+            this.ws.on('error', (err) => {
+                console.warn(`⚠️ [PythonBridge] WebSocket error (handled): ${err.message}`);
+            });
+
+            this.ws.on('open', () => {
+                console.log(`🔌 Connected to Python event stream via WebSocket (${this.wsUrl})`);
+            });
+
+            this.ws.on('message', (raw: string | Buffer) => {
+                try {
+                    const event = JSON.parse(raw.toString());
+                    if (event.event === 'network_changed' || event.error === 'NETWORK_CHANGED') {
+                        console.log('📡 Python Broadcast: Network Changed', event.data);
+                        this.emit('networkChanged', event.data);
+                    } else if (event.event === 'telemetry') {
+                        this.latestTelemetry = event.data;
+                        if (event.data) {
+                            this.latestWifiInfo = {
+                                connected: Boolean(event.data.connected),
+                                ssid: event.data.ssid || '',
+                                signal: event.data.signal || '',
+                                interface_type: event.data.interface_type || 'wifi',
+                                state: event.data.connected ? 'connected' : 'disconnected'
+                            };
+                        }
+                        this.emit('telemetry', event.data);
+                    } else if (event.event === 'dhcp_device_discovered') {
+                        console.log('📱 [DHCP Sniffer 3B] Perangkat Baru Tertangkap:', event.data);
+                        this.emit('dhcpDevice', event.data);
+                    } else if (event.event === 'rogue_dhcp_detected') {
+                        console.warn('🚨 [DHCP Sniffer 3B] ROGUE DHCP SERVER TERDETEKSI:', event.data);
+                        this.emit('rogueDhcp', event.data);
+                    } else if (event.event === 'gateway_dns_query') {
+                        this.emit('gatewayDnsQuery', event.data);
+                    } else if (event.event === 'gateway_status_changed') {
+                        this.emit('gatewayStatusChanged', event.data);
+                    } else if (event.event === 'traffic_l7_flow') {
+                        this.emit('l7Flow', event.data);
+                    } else if (event.event === 'bettercap_dns_spoofed') {
+                        this.emit('bettercapDnsSpoofed', event.data);
+                    } else if (event.event === 'bettercap_credential_sniffed') {
+                        this.emit('bettercapCredentialSniffed', event.data);
+                    } else if (event.event === 'device_liveness_changed') {
+                        this.emit('deviceLivenessChanged', event.data);
+                    } else if (event.event === 'gaming_status_changed') {
+                        this.emit('gamingStatusChanged', event.data);
+                    } else if (event.event === 'gaming_telemetry') {
+                        this.emit('gamingTelemetry', event.data);
+                    }
+                } catch (e) {
+                    console.debug('Failed to parse Python WS event:', e);
+                }
+            });
+
+            this.ws.on('error', (err) => {
+                console.warn('Python WS connection warning:', err.message);
+            });
+
+            this.ws.on('close', () => {
+                // Reconnect after 3 seconds if Python is still active
+                if (this.ready) {
+                    setTimeout(() => this.connectWebSocket(), 3000);
+                }
+            });
+        } catch (e) {
+            console.warn('Error initiating Python WebSocket connection:', e);
+        }
+    }
+
+    async scan(): Promise<Device[]> {
+        console.log('📡 [HTTP Call -> Python] POST /api/scan (Non-Blocking)...');
+        const res = await this.fetchWithTimeout(`${this.baseUrl}/api/scan`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' }
+        }, 30000);
+
+        if (!res.ok) {
+            const err = await res.text();
+            throw new Error(`Python scan error (${res.status}): ${err}`);
+        }
+
+        const data: any = await res.json();
+        if (!data.success) {
+            throw new Error(data.error || 'Scan failed');
+        }
+
+        return data.data.devices;
+    }
+
+    async startSpoof(
+        victimIp: string,
+        victimMac: string,
+        gatewayIp: string,
+        gatewayMac: string,
+        speedLimit: number = 0,
+        victimIpv6?: string,
+        gatewayIpv6?: string,
+        blackhole: boolean = false
+    ): Promise<string> {
+        console.log(`📡 [HTTP Call -> Python] POST /api/spoof/start for ${victimIp} (limit: ${speedLimit}%, IPv6: ${victimIpv6 || 'none'}, blackhole: ${blackhole})...`);
+        const res = await this.fetchWithTimeout(`${this.baseUrl}/api/spoof/start`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                victim_ip: victimIp,
+                victim_mac: victimMac,
+                gateway_ip: gatewayIp,
+                gateway_mac: gatewayMac,
+                speed_limit: speedLimit,
+                victim_ipv6: victimIpv6,
+                gateway_ipv6: gatewayIpv6,
+                blackhole
+            })
+        });
+
+        if (!res.ok) {
+            const err = await res.text();
+            throw new Error(`Start spoof error (${res.status}): ${err}`);
+        }
+
+        const data: any = await res.json();
+        if (!data.success) {
+            throw new Error(data.error || 'Failed to start spoof');
+        }
+
+        return data.data.session_id;
+    }
+
+    async setSpoofLimit(sessionId: string, speedLimit: number): Promise<void> {
+        console.log(`📡 [HTTP Call -> Python] POST /api/spoof/limit for session ${sessionId} (${speedLimit}%)...`);
+        const res = await this.fetchWithTimeout(`${this.baseUrl}/api/spoof/limit`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ session_id: sessionId, speed_limit: speedLimit })
+        });
+
+        if (!res.ok) {
+            const err = await res.text();
+            throw new Error(`Set spoof limit error (${res.status}): ${err}`);
+        }
+    }
+
+    async stopSpoof(sessionId: string): Promise<void> {
+        console.log(`📡 [HTTP Call -> Python] POST /api/spoof/stop for session ${sessionId}...`);
+        const res = await this.fetchWithTimeout(`${this.baseUrl}/api/spoof/stop`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ session_id: sessionId })
+        });
+
+        if (!res.ok) {
+            const err = await res.text();
+            throw new Error(`Stop spoof error (${res.status}): ${err}`);
+        }
+    }
+
+    async stopAll(): Promise<void> {
+        try {
+            console.log('📡 [HTTP Call -> Python] POST /api/spoof/stop_all...');
+            await this.fetchWithTimeout(`${this.baseUrl}/api/spoof/stop_all`, { method: 'POST' });
+        } catch (e) {
+            console.warn('Error during stopAll HTTP call:', e);
+        }
+    }
+
+    async startRedirect(victimIp: string, victimMac: string, gatewayIp: string, gatewayMac: string, redirectUrl: string, instagramUsername: string = ''): Promise<any> {
+        console.log(`📡 [HTTP Call -> Python] POST /api/redirect/start for ${victimIp} -> ${redirectUrl}...`);
+        const res = await this.fetchWithTimeout(`${this.baseUrl}/api/redirect/start`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                victim_ip: victimIp,
+                victim_mac: victimMac,
+                gateway_ip: gatewayIp,
+                gateway_mac: gatewayMac,
+                redirect_url: redirectUrl,
+                instagram_username: instagramUsername
+            })
+        });
+
+        if (!res.ok) {
+            const err = await res.text();
+            throw new Error(`Start redirect error (${res.status}): ${err}`);
+        }
+
+        const data: any = await res.json();
+        if (!data.success) {
+            throw new Error(data.error || 'Failed to start redirect');
+        }
+
+        return data.data;
+    }
+
+    async stopRedirect(victimIp: string): Promise<void> {
+        console.log(`📡 [HTTP Call -> Python] POST /api/redirect/stop for ${victimIp}...`);
+        const res = await this.fetchWithTimeout(`${this.baseUrl}/api/redirect/stop`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ victim_ip: victimIp })
+        });
+
+        if (!res.ok) {
+            const err = await res.text();
+            throw new Error(`Stop redirect error (${res.status}): ${err}`);
+        }
+    }
+
+    async getRedirectStatus(): Promise<any> {
+        try {
+            const res = await this.fetchWithTimeout(`${this.baseUrl}/api/redirect/status`);
+            if (!res.ok) throw new Error('Failed to get redirect status');
+            const data: any = await res.json();
+            return data.sessions || {};
+        } catch {
+            return {};
+        }
+    }
+
+    async startTransparentGateway(victimIp: string, victimMac: string, gatewayIp: string, gatewayMac: string): Promise<any> {
+        console.log(`📡 [HTTP Call -> Python] POST /api/gateway/start for ${victimIp}...`);
+        const res = await this.fetchWithTimeout(`${this.baseUrl}/api/gateway/start`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                victim_ip: victimIp,
+                victim_mac: victimMac,
+                gateway_ip: gatewayIp,
+                gateway_mac: gatewayMac
+            })
+        });
+
+        if (!res.ok) {
+            const err = await res.text();
+            throw new Error(`Start gateway error (${res.status}): ${err}`);
+        }
+
+        const data: any = await res.json();
+        if (!data.success) {
+            throw new Error(data.error || 'Failed to start transparent gateway');
+        }
+
+        return data.data;
+    }
+
+    async stopTransparentGateway(victimIp: string): Promise<void> {
+        console.log(`📡 [HTTP Call -> Python] POST /api/gateway/stop for ${victimIp}...`);
+        const res = await this.fetchWithTimeout(`${this.baseUrl}/api/gateway/stop`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ victim_ip: victimIp })
+        });
+
+        if (!res.ok) {
+            const err = await res.text();
+            throw new Error(`Stop gateway error (${res.status}): ${err}`);
+        }
+    }
+
+    async getTransparentGatewayStatus(): Promise<any> {
+        try {
+            const res = await this.fetchWithTimeout(`${this.baseUrl}/api/gateway/status`);
+            if (!res.ok) throw new Error('Failed to get gateway status');
+            const data: any = await res.json();
+            return data.data || { active_sessions: {}, active_count: 0, sinkhole_count: 0, sinkhole_domains: [], total_logs: 0 };
+        } catch {
+            return { active_sessions: {}, active_count: 0, sinkhole_count: 0, sinkhole_domains: [], total_logs: 0 };
+        }
+    }
+
+    async getSinkholeDomains(): Promise<string[]> {
+        try {
+            const res = await this.fetchWithTimeout(`${this.baseUrl}/api/gateway/sinkhole`);
+            if (!res.ok) throw new Error('Failed to get sinkholes');
+            const data: any = await res.json();
+            return data.domains || [];
+        } catch {
+            return [];
+        }
+    }
+
+    async addSinkholeDomain(domain: string): Promise<string[]> {
+        const res = await this.fetchWithTimeout(`${this.baseUrl}/api/gateway/sinkhole/add`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ domain })
+        });
+        if (!res.ok) throw new Error(`Add sinkhole error: ${res.statusText}`);
+        const data: any = await res.json();
+        return data.domains || [];
+    }
+
+    async removeSinkholeDomain(domain: string): Promise<string[]> {
+        const res = await this.fetchWithTimeout(`${this.baseUrl}/api/gateway/sinkhole/remove`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ domain })
+        });
+        if (!res.ok) throw new Error(`Remove sinkhole error: ${res.statusText}`);
+        const data: any = await res.json();
+        return data.domains || [];
+    }
+
+    async getGatewayDnsLogs(limit: number = 100): Promise<any[]> {
+        try {
+            const res = await this.fetchWithTimeout(`${this.baseUrl}/api/gateway/dns-logs?limit=${limit}`);
+            if (!res.ok) throw new Error('Failed to get DNS logs');
+            const data: any = await res.json();
+            return data.logs || [];
+        } catch {
+            return [];
+        }
+    }
+
+    async clearGatewayDnsLogs(): Promise<void> {
+        await this.fetchWithTimeout(`${this.baseUrl}/api/gateway/dns-logs`, { method: 'DELETE' });
+    }
+
+    async getTelemetry(): Promise<any> {
+        if (this.latestTelemetry) return this.latestTelemetry;
+        try {
+            const res = await this.fetchWithTimeout(`${this.baseUrl}/api/telemetry`);
+            if (!res.ok) throw new Error('Failed to get telemetry');
+            const data: any = await res.json();
+            this.latestTelemetry = data.telemetry || null;
+            return this.latestTelemetry;
+        } catch {
+            return this.latestTelemetry || null;
+        }
+    }
+
+    async getWifiInfo(): Promise<{ connected: boolean; ssid: string; signal: string; state: string; interface_type?: string }> {
+        if (this.latestWifiInfo) return this.latestWifiInfo;
+        try {
+            const res = await this.fetchWithTimeout(`${this.baseUrl}/api/wifi`);
+            if (!res.ok) throw new Error('Failed to get wifi info');
+            const data: any = await res.json();
+            this.latestWifiInfo = data.wifi || { connected: false, ssid: '', signal: '', state: 'disconnected', interface_type: 'unknown' };
+            return this.latestWifiInfo;
+        } catch {
+            return this.latestWifiInfo || { connected: false, ssid: '', signal: '', state: 'error', interface_type: 'unknown' };
+        }
+    }
+
+    async deepScanPorts(ip: string, ports?: number[]): Promise<any> {
+        console.log(`📡 [HTTP Call -> Python] POST /api/scan/ports for ${ip}...`);
+        const res = await this.fetchWithTimeout(`${this.baseUrl}/api/scan/ports`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ip, ports })
+        }, 30000);
+
+        if (!res.ok) {
+            const err = await res.text();
+            throw new Error(`Deep scan ports error (${res.status}): ${err}`);
+        }
+
+        const data: any = await res.json();
+        return data.data;
+    }
+
+    async optimizeDhcpProfiling(): Promise<{ success: boolean; message?: string; data?: any }> {
+        console.log('📡 [HTTP Call -> Python] POST /api/dhcp/wakeup (Teknik 3B Optimization)...');
+        const res = await this.fetchWithTimeout(`${this.baseUrl}/api/dhcp/wakeup`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' }
+        }, 30000);
+
+        if (!res.ok) {
+            const err = await res.text();
+            throw new Error(`Optimize DHCP error (${res.status}): ${err}`);
+        }
+
+        const data: any = await res.json();
+        return data;
+    }
+
+    async quickReauth(targets: any[], holdMs: number = 1500): Promise<any> {
+        console.log(`📡 [HTTP Call -> Python] POST /api/network/quick-reauth untuk ${targets.length} target...`);
+        const res = await this.fetchWithTimeout(`${this.baseUrl}/api/network/quick-reauth`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ targets, hold_ms: holdMs })
+        }, holdMs + 20000);
+
+        if (!res.ok) {
+            const err = await res.text();
+            throw new Error(`Quick re-auth error (${res.status}): ${err}`);
+        }
+        const data: any = await res.json();
+        return data.data;
+    }
+
+    async getDhcpStats(): Promise<any> {
+        try {
+            const res = await this.fetchWithTimeout(`${this.baseUrl}/api/dhcp/stats`);
+            if (!res.ok) throw new Error('Failed to get DHCP stats');
+            const data: any = await res.json();
+            return data.data;
+        } catch {
+            return { count: 0, snapshot: {} };
+        }
+    }
+
+    async getCAInfo(): Promise<any> {
+        const res = await this.fetchWithTimeout(`${this.baseUrl}/api/interceptor/ca`);
+        if (!res.ok) throw new Error('Failed to get CA info');
+        const data: any = await res.json();
+        return data.data;
+    }
+
+    async getCACertPem(): Promise<string> {
+        const res = await this.fetchWithTimeout(`${this.baseUrl}/api/interceptor/ca/cert`);
+        if (!res.ok) throw new Error('Failed to fetch CA cert');
+        return await res.text();
+    }
+
+    async getL7Flows(query?: { limit?: number; search?: string; scheme?: string; method?: string; is_blocked?: boolean }): Promise<any> {
+        const params = new URLSearchParams();
+        if (query?.limit) params.set('limit', String(query.limit));
+        if (query?.search) params.set('search', query.search);
+        if (query?.scheme) params.set('scheme', query.scheme);
+        if (query?.method) params.set('method', query.method);
+        if (query?.is_blocked !== undefined) params.set('is_blocked', String(query.is_blocked));
+
+        const res = await this.fetchWithTimeout(`${this.baseUrl}/api/interceptor/flows?${params.toString()}`);
+        if (!res.ok) throw new Error('Failed to get L7 flows');
+        return await res.json();
+    }
+
+    async clearL7Flows(): Promise<void> {
+        const res = await this.fetchWithTimeout(`${this.baseUrl}/api/interceptor/flows`, { method: 'DELETE' });
+        if (!res.ok) throw new Error('Failed to clear L7 flows');
+    }
+
+    async generateLeafCert(domain: string): Promise<any> {
+        const res = await this.fetchWithTimeout(`${this.baseUrl}/api/interceptor/cert/leaf`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ domain })
+        });
+        if (!res.ok) throw new Error('Failed to generate leaf certificate');
+        return await res.json();
+    }
+
+    // ===== BETTERCAP SECURITY SUITE BRIDGE METHODS =====
+    async getBettercapStatus(): Promise<any> {
+        const res = await this.fetchWithTimeout(`${this.baseUrl}/api/bettercap/status`);
+        if (!res.ok) throw new Error('Failed to get Bettercap status');
+        const data: any = await res.json();
+        return data;
+    }
+
+    async getBettercapDnsRules(): Promise<any[]> {
+        const res = await this.fetchWithTimeout(`${this.baseUrl}/api/bettercap/dns/rules`);
+        if (!res.ok) throw new Error('Failed to get Bettercap DNS rules');
+        const data: any = await res.json();
+        return data.rules || [];
+    }
+
+    async addBettercapDnsRule(domain: string, target_ip: string, action: string = 'spoof', is_enabled: boolean = true): Promise<any> {
+        const res = await this.fetchWithTimeout(`${this.baseUrl}/api/bettercap/dns/rules`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ domain, target_ip, action, is_enabled })
+        });
+        if (!res.ok) throw new Error('Failed to add Bettercap DNS rule');
+        return await res.json();
+    }
+
+    async updateBettercapDnsRule(ruleId: string, updates: { domain?: string; target_ip?: string; action?: string; is_enabled?: boolean }): Promise<any> {
+        const res = await this.fetchWithTimeout(`${this.baseUrl}/api/bettercap/dns/rules/${ruleId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(updates)
+        });
+        if (!res.ok) throw new Error(`Failed to update Bettercap DNS rule ${ruleId}`);
+        return await res.json();
+    }
+
+    async deleteBettercapDnsRule(ruleId: string): Promise<any> {
+        const res = await this.fetchWithTimeout(`${this.baseUrl}/api/bettercap/dns/rules/${ruleId}`, {
+            method: 'DELETE'
+        });
+        if (!res.ok) throw new Error(`Failed to delete Bettercap DNS rule ${ruleId}`);
+        return await res.json();
+    }
+
+    async setBettercapDnsSpoofAll(enabled: boolean, address: string = ''): Promise<any> {
+        const res = await this.fetchWithTimeout(`${this.baseUrl}/api/bettercap/dns/spoof-all`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled, address })
+        });
+        if (!res.ok) throw new Error('Failed to set Bettercap DNS spoof-all');
+        return await res.json();
+    }
+
+    async loadBettercapDnsHosts(content: string, default_address: string = '', action: string = 'spoof'): Promise<any> {
+        const res = await this.fetchWithTimeout(`${this.baseUrl}/api/bettercap/dns/hosts`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ content, default_address, action })
+        });
+        if (!res.ok) throw new Error('Failed to load Bettercap DNS hosts');
+        return await res.json();
+    }
+
+    async setBettercapDnsTtl(ttl: number): Promise<any> {
+        const res = await this.fetchWithTimeout(`${this.baseUrl}/api/bettercap/dns/ttl`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ttl })
+        });
+        if (!res.ok) throw new Error('Failed to set Bettercap DNS ttl');
+        return await res.json();
+    }
+
+    async getBettercapCredentials(limit: number = 100): Promise<any[]> {
+        const res = await this.fetchWithTimeout(`${this.baseUrl}/api/bettercap/credentials?limit=${limit}`);
+        if (!res.ok) throw new Error('Failed to get Bettercap credentials');
+        const data: any = await res.json();
+        return data.credentials || [];
+    }
+
+    async clearBettercapCredentials(): Promise<void> {
+        const res = await this.fetchWithTimeout(`${this.baseUrl}/api/bettercap/credentials`, {
+            method: 'DELETE'
+        });
+        if (!res.ok) throw new Error('Failed to clear Bettercap credentials');
+    }
+
+    async runBettercapSynScan(targetIp: string, ports?: number[], profile: string = 'top-20'): Promise<any> {
+        const res = await this.fetchWithTimeout(`${this.baseUrl}/api/bettercap/syn-scan`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ target_ip: targetIp, ports, profile })
+        }, 30000);
+        if (!res.ok) {
+            const err = await res.text();
+            throw new Error(`Bettercap SYN scan error: ${err}`);
+        }
+        const data: any = await res.json();
+        return data.data;
+    }
+
+    async pulseLiveness(targets: Array<{ ip: string; mac: string; ipv6_link_local?: string; ipv6_global?: string }>, gatewayIp?: string): Promise<Record<string, any>> {
+        const res = await this.fetchWithTimeout(`${this.baseUrl}/api/liveness/pulse`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ targets, gateway_ip: gatewayIp, timeout: 3.0 })
+        }, 8000);
+        if (!res.ok) {
+            const err = await res.text();
+            throw new Error(`Liveness pulse error: ${err}`);
+        }
+        const data: any = await res.json();
+        return data.data?.results || {};
+    }
+
+    async getApIsolationStatus(): Promise<any> {
+        try {
+            const res = await this.fetchWithTimeout(`${this.baseUrl}/api/network/ap-isolation`);
+            if (!res.ok) throw new Error('Failed to get AP isolation status');
+            const data: any = await res.json();
+            return data.data || { is_isolated: false, confidence: 0.0, percentage: 0, status: 'normal', reason: 'Normal' };
+        } catch {
+            return { is_isolated: false, confidence: 0.0, percentage: 0, status: 'normal', reason: 'Normal' };
+        }
+    }
+
+    async getStatus(): Promise<any> {
+        const res = await this.fetchWithTimeout(`${this.baseUrl}/api/status`);
+        if (!res.ok) {
+            throw new Error(`Get status error: ${res.statusText}`);
+        }
+        const data: any = await res.json();
+        return data.status;
+    }
+
+    async getShieldStatus(): Promise<any> {
+        try {
+            const res = await this.fetchWithTimeout(`${this.baseUrl}/api/shield/status`);
+            if (!res.ok) throw new Error('Failed to get shield status');
+            const data: any = await res.json();
+            return data.data;
+        } catch (e) {
+            return { is_enabled: false, mode: 'host_lock', gateway_ip: '', gateway_mac: '', threats_count: 0 };
+        }
+    }
+
+    async toggleShield(enabled: boolean, mode: string = 'host_lock', autoRetaliate: boolean = false, lanTargets: any[] = []): Promise<any> {
+        const res = await this.fetchWithTimeout(`${this.baseUrl}/api/shield/toggle`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                enabled,
+                mode,
+                auto_retaliate: autoRetaliate,
+                lan_targets: lanTargets
+            })
+        });
+        if (!res.ok) {
+            const err = await res.text();
+            throw new Error(`Toggle shield error: ${err}`);
+        }
+        const data: any = await res.json();
+        return data.data;
+    }
+
+    async setShieldMode(mode: string, autoRetaliate: boolean = false): Promise<any> {
+        const res = await this.fetchWithTimeout(`${this.baseUrl}/api/shield/mode`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                mode,
+                auto_retaliate: autoRetaliate
+            })
+        });
+        if (!res.ok) {
+            const err = await res.text();
+            throw new Error(`Set shield mode error: ${err}`);
+        }
+        const data: any = await res.json();
+        return data.data;
+    }
+
+    async getShieldThreats(): Promise<any[]> {
+        try {
+            const res = await this.fetchWithTimeout(`${this.baseUrl}/api/shield/threats`);
+            if (!res.ok) throw new Error('Failed to get shield threats');
+            const data: any = await res.json();
+            return data.data || [];
+        } catch {
+            return [];
+        }
+    }
+
+    async clearShieldThreats(): Promise<boolean> {
+        try {
+            const res = await this.fetchWithTimeout(`${this.baseUrl}/api/shield/threats`, { method: 'DELETE' });
+            return res.ok;
+        } catch {
+            return false;
+        }
+    }
+
+
+    async getGamingStatus(): Promise<any> {
+        try {
+            const res = await this.fetchWithTimeout(`${this.baseUrl}/api/gaming/status`);
+            if (!res.ok) throw new Error('Failed to get gaming status');
+            const data: any = await res.json();
+            return data.data || { is_enabled: false, mode: 'auto_airtime', ping_ms: 0, jitter_ms: 0 };
+        } catch {
+            return { is_enabled: false, mode: 'auto_airtime', ping_ms: 0, jitter_ms: 0, packet_loss_pct: 0, uptime_seconds: 0 };
+        }
+    }
+
+    async toggleGamingMode(enabled: boolean, mode: string = 'auto_airtime', targetPingMs: number = 25.0): Promise<any> {
+        const res = await this.fetchWithTimeout(`${this.baseUrl}/api/gaming/toggle`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                enabled,
+                mode,
+                target_ping_ms: targetPingMs
+            })
+        });
+        if (!res.ok) {
+            const err = await res.text();
+            throw new Error(`Toggle gaming mode error: ${err}`);
+        }
+        const data: any = await res.json();
+        return data.data;
+    }
+
+    stop(): void {
+        if (this.ws) {
+            try { this.ws.close(); } catch {}
+        }
+        if (this.isInternalSpawn && this.process) {
+            console.log('🛑 Terminating Python child process...');
+            this.process.kill('SIGTERM');
+            this.process = null;
+        }
+        this.ready = false;
+    }
+}

@@ -1,0 +1,18 @@
+# NetCut Sentinel (Spoorf) — Python network engine dependencies.
+# Versi di-pin ke yang tervalidasi di lingkungan pengembangan (Windows + Npcap).
+
+# Injeksi & sniffing paket Layer 2/3 (butuh driver Npcap di Windows).
+scapy==2.5.0
+# Enumerasi adapter jaringan & gateway.
+netifaces==0.11.0
+# Muat konfigurasi dari .env.
+python-dotenv==1.0.0
+
+# Server API & WebSocket (:8001).
+fastapi==0.141.1
+uvicorn==0.52.4
+pydantic==2.13.4
+
+# Telemetri throughput/latensi (psutil) & MitM CA / leaf cert (cryptography).
+psutil==7.2.2
+cryptography==50.0.1
