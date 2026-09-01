@@ -228,6 +228,18 @@ export class DatabaseService {
         }
     }
 
+    getDbPath(): string {
+        return this.dbPath;
+    }
+
+    getJournalMode(): string {
+        try {
+            return (this.db.pragma('journal_mode', { simple: true }) as string) || 'unknown';
+        } catch {
+            return 'unknown';
+        }
+    }
+
     async init(): Promise<void> {
         if (this.initialized) return;
 

@@ -2,6 +2,24 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.32.0] - 2026-09-01
+
+### Real System Diagnostics & True Npcap Initialization Bootstrap
+- **Real Hardware & Npcap Kernel Driver Probe — `python-service/src/core/diagnostics.py`**:
+  - Menggantikan simulasi awal/dummy dengan inspeksi hardware dan kernel driver sesungguhnya.
+  - Memverifikasi status service Windows `npcap` (`sc query npcap` -> `STATE : 4 RUNNING`), keberadaan DLL `wpcap.dll` dan `Packet.dll` (di System32/SysWOW64), Scapy L2 binding (`conf.use_pcap`), dan jumlah interface fisik Layer 2 yang terikat.
+  - Menguji hak akses Administrator OS (`IsUserAnAdmin`), adapter jaringan aktif (Wi-Fi SSID, sinyal, IP privat RFC 1918), dan latensi koneksi ke Default Gateway secara real-time.
+  - Endpoint baru: `GET /api/system/diagnostics` dan pembaruan `GET /health` di FastAPI.
+- **Node.js Diagnostics Orchestrator — `backend-node` (`deviceManager.ts`, `pythonBridge.ts`, `routes.ts`)**:
+  - Mengintegrasikan diagnosa Python dengan verifikasi integritas SQLite WAL (`PRAGMA integrity_check`, `journal_mode`, path database, dan jumlah perangkat tersimpan).
+  - Mengekspos route `GET /api/system/diagnostics` dan memperbarui `GET /health` dengan status kesiapan Python Engine secara jujur.
+- **Frontend Live EngineReadinessGate & Terminal Bootstrap — `frontend-react` (`EngineReadinessGate.tsx`, `types/index.ts`, `api/client.ts`)**:
+  - Menghapus total timer `setTimeout` palsu di `EngineReadinessGateContent`.
+  - Inisialisasi kini memanggil `apiClient.getDiagnostics()` dan memvalidasi setiap subsistem (Python Engine, Npcap Driver, Physical Adapter, SQLite WAL) berdasarkan hasil inspeksi nyata.
+  - Jika driver Npcap tidak ditemukan atau service STOPPED, gerbang menampilkan banner peringatan kritis interaktif dengan instruksi perbaikan serta tombol *"Periksa Ulang (Retry Check)"* dan *"Lanjutkan Mode Terbatas (Bypass)"*.
+  - Terminal bootstrap menyiarkan log hardware nyata dengan timestamp, nama adapter, IP gateway, dan status L2 binding langsung dari kernel.
+- **Verifikasi:** 149/149 test Python + 28/28 test Node lulus; `npm run build` di frontend lulus 100% bersih.
+
 ## [v2.31.0] - 2026-08-31
 
 ### Quality & Reliability (Perbaikan Prioritas-3)

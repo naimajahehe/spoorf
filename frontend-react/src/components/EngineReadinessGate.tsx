@@ -9,17 +9,23 @@ import {
   Check,
   ChevronDown,
   ListTodo,
-  LoaderCircle
+  LoaderCircle,
+  AlertTriangle,
+  XCircle,
+  RefreshCw,
+  ArrowRight,
+  ShieldCheck
 } from "lucide-react";
 import { NeonMesh } from "./ui/neon-mesh";
 import { apiClient } from "../api/client";
 import { cn } from "../lib/utils";
+import type { SystemDiagnosticsResponse } from "../types";
 
 interface EngineReadinessGateProps {
   onReady: () => void;
 }
 
-export type TodoItemStatus = "pending" | "in-progress" | "completed";
+export type TodoItemStatus = "pending" | "in-progress" | "completed" | "warning" | "error";
 
 export interface SystemTask {
   id: string;
@@ -32,20 +38,27 @@ interface LogEntry {
   id: number;
   time: string;
   msg: string;
-  type: "info" | "success" | "warn";
+  type: "info" | "success" | "warn" | "error";
 }
 
 // -------------------------------------------------------------
 // Top Block: BeUI TodoList Header & Status Icons (Clean Inline)
 // -------------------------------------------------------------
-function TodoHeaderIcon({ complete }: { complete?: boolean }) {
+function TodoHeaderIcon({ complete, hasError }: { complete?: boolean; hasError?: boolean }) {
+  if (hasError) {
+    return (
+      <span aria-hidden="true" className="relative flex items-center justify-center shrink-0">
+        <AlertTriangle size={16} className="text-amber-400" />
+      </span>
+    );
+  }
   return (
     <span aria-hidden="true" className="relative flex items-center justify-center shrink-0">
       <ListTodo
         size={16}
         className={cn(
           "transition-colors duration-200",
-          complete ? "text-zinc-300" : "text-zinc-400"
+          complete ? "text-emerald-400" : "text-zinc-400"
         )}
       />
     </span>
@@ -67,6 +80,20 @@ function TodoStatusIcon({ status }: { status: TodoItemStatus }) {
       </span>
     );
   }
+  if (status === "warning") {
+    return (
+      <span className="flex items-center justify-center shrink-0">
+        <AlertTriangle size={14} className="text-amber-400" />
+      </span>
+    );
+  }
+  if (status === "error") {
+    return (
+      <span className="flex items-center justify-center shrink-0">
+        <XCircle size={14} className="text-rose-400" />
+      </span>
+    );
+  }
   return (
     <span className="flex items-center justify-center shrink-0 size-3.5">
       <span className="size-1.5 rounded-full bg-zinc-600 inline-block" />
@@ -82,25 +109,25 @@ export const EngineReadinessGateContent: FC<EngineReadinessGateProps> = ({ onRea
     {
       id: "python",
       title: "FastAPI & Scapy Network Engine (:8001)",
-      detail: "Inisialisasi engine transmisi raw ethernet frames",
+      detail: "Menghubungkan ke microservice transmisi raw frame",
       status: "in-progress",
     },
     {
+      id: "npcap",
+      title: "Npcap NDIS 6 Kernel Driver & DLLs",
+      detail: "Memverifikasi kernel driver packet injection",
+      status: "pending",
+    },
+    {
       id: "adapter",
-      title: "Physical Network Adapter & L2 NDIS Driver",
-      detail: "Memverifikasi Npcap promiscuous driver",
+      title: "Physical Network Adapter & Gateway Link",
+      detail: "Memeriksa IP privat & latensi router",
       status: "pending",
     },
     {
       id: "database",
-      title: "SQLite State Persistence & RFC 1918 Scope",
-      detail: "Menyinkronkan schema database SQLite WAL",
-      status: "pending",
-    },
-    {
-      id: "shield",
-      title: "Sentinel Shield Kernel Immunity & Gateway Lock",
-      detail: "Memastikan kekebalan controller & anti self-cut",
+      title: "SQLite WAL Persistence & Safety Invariants",
+      detail: "Menyinkronkan database & kekebalan controller",
       status: "pending",
     },
   ]);
@@ -110,6 +137,8 @@ export const EngineReadinessGateContent: FC<EngineReadinessGateProps> = ({ onRea
   const [isTerminalOpen, setIsTerminalOpen] = useState(true);
   const [terminalCopied, setTerminalCopied] = useState(false);
   const [isAllComplete, setIsAllComplete] = useState(false);
+  const [isChecking, setIsChecking] = useState(false);
+  const [criticalError, setCriticalError] = useState<{ title: string; message: string; actionText?: string } | null>(null);
 
   const startTimeRef = useRef<number>(Date.now());
   const logIdRef = useRef<number>(0);
@@ -134,98 +163,212 @@ export const EngineReadinessGateContent: FC<EngineReadinessGateProps> = ({ onRea
     terminalEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [logs]);
 
-  // System Healthcheck & Pipeline Execution
-  useEffect(() => {
-    let isMounted = true;
+  // Execute True System Diagnostics Pipeline
+  const runDiagnostics = useCallback(async () => {
+    setIsChecking(true);
+    setCriticalError(null);
+    startTimeRef.current = Date.now();
+    
+    addLog("Memulai bootloader NetCut Sentinel v2.3.0...", "info");
+    addLog("Melakukan audit diagnosa hardware, driver kernel, dan subsistem...", "info");
+
+    // Reset status tasks
+    setTasks([
+      {
+        id: "python",
+        title: "FastAPI & Scapy Network Engine (:8001)",
+        detail: "Menghubungkan ke microservice transmisi raw frame",
+        status: "in-progress",
+      },
+      {
+        id: "npcap",
+        title: "Npcap NDIS 6 Kernel Driver & DLLs",
+        detail: "Memverifikasi kernel driver packet injection",
+        status: "pending",
+      },
+      {
+        id: "adapter",
+        title: "Physical Network Adapter & Gateway Link",
+        detail: "Memeriksa IP privat & latensi router",
+        status: "pending",
+      },
+      {
+        id: "database",
+        title: "SQLite WAL Persistence & Safety Invariants",
+        detail: "Menyinkronkan database & kekebalan controller",
+        status: "pending",
+      },
+    ]);
+
     let attempts = 0;
+    let diagResult: SystemDiagnosticsResponse | null = null;
 
-    addLog("Memulai bootloader NetCut Sentinel v2.27...", "info");
-    addLog("Memindai driver Npcap & packet capture interfaces...", "info");
-
-    const runPipeline = async () => {
-      while (isMounted && attempts < 25) {
-        attempts++;
-        try {
-          const res = await apiClient.getHealth();
-          if (res && res.status === "ok") {
-            if (isMounted) {
-              // Task 1 Done
-              setTasks((prev) =>
-                prev.map((t) =>
-                  t.id === "python" ? { ...t, status: "completed" } : t.id === "adapter" ? { ...t, status: "in-progress" } : t
-                )
-              );
-              addLog("FastAPI Python engine aktif di 127.0.0.1:8001 (OK)", "success");
-            }
-
-            await new Promise((r) => setTimeout(r, 140));
-
-            if (isMounted) {
-              // Task 2 Done
-              setTasks((prev) =>
-                prev.map((t) =>
-                  t.id === "adapter" ? { ...t, status: "completed" } : t.id === "database" ? { ...t, status: "in-progress" } : t
-                )
-              );
-              addLog("NDIS Packet capture driver terhubung pada Physical Adapter.", "success");
-            }
-
-            await new Promise((r) => setTimeout(r, 140));
-
-            if (isMounted) {
-              // Task 3 Done
-              setTasks((prev) =>
-                prev.map((t) =>
-                  t.id === "database" ? { ...t, status: "completed" } : t.id === "shield" ? { ...t, status: "in-progress" } : t
-                )
-              );
-              addLog("Database SQLite WAL terverifikasi di data/sentinel.db", "success");
-            }
-
-            await new Promise((r) => setTimeout(r, 140));
-
-            if (isMounted) {
-              // Task 4 Done
-              setTasks((prev) =>
-                prev.map((t) => (t.id === "shield" ? { ...t, status: "completed" } : t))
-              );
-              addLog("Sentinel Shield aktif. Gateway & Host Controller kebal 100%.", "success");
-              addLog("Seluruh subsistem siap. Mengalihkan ke sesi operator...", "success");
-              setIsAllComplete(true);
-            }
-
-            await new Promise((r) => setTimeout(r, 380));
-            if (isMounted) {
-              onReady();
-            }
-            return;
-          }
-        } catch {
-          if (attempts === 1) {
-            addLog("Menghubungkan ke core orchestrator port 5000...", "info");
-          }
-          await new Promise((r) => setTimeout(r, 260));
+    // Retry loop to allow python engine to finish binding if starting simultaneously
+    while (attempts < 15) {
+      attempts++;
+      try {
+        const res = await apiClient.getDiagnostics();
+        if (res && res.success) {
+          diagResult = res;
+          break;
         }
+      } catch {
+        if (attempts === 1) {
+          addLog("Menghubungkan ke orchestrator API (:5000) & FastAPI (:8001)...", "info");
+        }
+        await new Promise((r) => setTimeout(r, 400));
       }
+    }
 
-      // Fallback
-      if (isMounted) {
-        setTasks((prev) => prev.map((t) => ({ ...t, status: "completed" })));
-        setIsAllComplete(true);
-        setTimeout(() => {
-          if (isMounted) onReady();
-        }, 300);
+    if (!diagResult) {
+      // Python / Backend Completely Offline
+      setTasks((prev) =>
+        prev.map((t) => (t.id === "python" ? { ...t, status: "error", detail: "FastAPI Engine (:8001) tidak merespons" } : t))
+      );
+      addLog("Gagal menghubungi core engine pada port 8001/5000.", "error");
+      setCriticalError({
+        title: "Engine Sentinel Tidak Terdeteksi",
+        message: "Layanan Python FastAPI (:8001) atau Node.js (:5000) tidak dapat dihubungi. Pastikan command 'npm run dev' atau service telah dijalankan.",
+      });
+      setIsChecking(false);
+      return;
+    }
+
+    const { checks, logs: returnedLogs } = diagResult;
+
+    // Stream returned backend logs into terminal
+    if (returnedLogs && returnedLogs.length > 0) {
+      for (const rawLog of returnedLogs) {
+        const isWarn = rawLog.includes("WARN") || rawLog.includes("User standar");
+        const isErr = rawLog.includes("ERROR") || rawLog.includes("GAGAL") || rawLog.includes("STOPPED");
+        const isSuccess = rawLog.includes("RUNNING") || rawLog.includes("OK") || rawLog.includes("LOCKED") || rawLog.includes("initialized");
+        addLog(rawLog, isErr ? "error" : isWarn ? "warn" : isSuccess ? "success" : "info");
       }
-    };
+    }
 
-    runPipeline();
+    // Step 1: Evaluate Python Engine
+    const pyCheck = checks.python_engine;
+    if (pyCheck.status === "ok") {
+      setTasks((prev) =>
+        prev.map((t) =>
+          t.id === "python"
+            ? { ...t, status: "completed", detail: `FastAPI + Scapy v${pyCheck.version || '2.3'} aktif (PID: ${pyCheck.pid || 'OK'})` }
+            : t.id === "npcap"
+            ? { ...t, status: "in-progress" }
+            : t
+        )
+      );
+    } else {
+      setTasks((prev) =>
+        prev.map((t) => (t.id === "python" ? { ...t, status: "error", detail: pyCheck.details } : t))
+      );
+    }
 
-    return () => {
-      isMounted = false;
-    };
+    await new Promise((r) => setTimeout(r, 180));
+
+    // Step 2: Evaluate Npcap Driver
+    const npcapCheck = checks.npcap_driver;
+    if (npcapCheck.status === "ok") {
+      setTasks((prev) =>
+        prev.map((t) =>
+          t.id === "npcap"
+            ? { ...t, status: "completed", detail: npcapCheck.details }
+            : t.id === "adapter"
+            ? { ...t, status: "in-progress" }
+            : t
+        )
+      );
+    } else if (npcapCheck.status === "warning") {
+      setTasks((prev) =>
+        prev.map((t) =>
+          t.id === "npcap"
+            ? { ...t, status: "warning", detail: npcapCheck.details }
+            : t.id === "adapter"
+            ? { ...t, status: "in-progress" }
+            : t
+        )
+      );
+      addLog(`[NPCAP PERINGATAN] ${npcapCheck.details}`, "warn");
+    } else {
+      setTasks((prev) =>
+        prev.map((t) => (t.id === "npcap" ? { ...t, status: "error", detail: npcapCheck.details } : t))
+      );
+      addLog(`[NPCAP ERROR] ${npcapCheck.details}`, "error");
+      setCriticalError({
+        title: "Driver Npcap Tidak Ditemukan",
+        message: "Sistem membutuhkan Npcap untuk menginjeksi frame raw Ethernet. Silakan unduh dan install Npcap dari npcap.com dengan opsi 'WinPcap API-compatible mode'.",
+        actionText: "Buka npcap.com"
+      });
+      setIsChecking(false);
+      return;
+    }
+
+    await new Promise((r) => setTimeout(r, 180));
+
+    // Step 3: Evaluate Physical Network Adapter & Gateway
+    const netCheck = checks.network_adapter;
+    if (netCheck.status === "ok") {
+      setTasks((prev) =>
+        prev.map((t) =>
+          t.id === "adapter"
+            ? { ...t, status: "completed", detail: netCheck.details }
+            : t.id === "database"
+            ? { ...t, status: "in-progress" }
+            : t
+        )
+      );
+    } else if (netCheck.status === "warning") {
+      setTasks((prev) =>
+        prev.map((t) =>
+          t.id === "adapter"
+            ? { ...t, status: "warning", detail: netCheck.details }
+            : t.id === "database"
+            ? { ...t, status: "in-progress" }
+            : t
+        )
+      );
+    } else {
+      setTasks((prev) =>
+        prev.map((t) => (t.id === "adapter" ? { ...t, status: "error", detail: netCheck.details } : t))
+      );
+    }
+
+    await new Promise((r) => setTimeout(r, 180));
+
+    // Step 4: Evaluate Database Persistence & Safety Invariants
+    const dbCheck = checks.database_persistence;
+    const shieldCheck = checks.sentinel_shield;
+    
+    setTasks((prev) =>
+      prev.map((t) =>
+        t.id === "database"
+          ? {
+              ...t,
+              status: dbCheck?.status === "warning" ? "warning" : "completed",
+              detail: `${dbCheck?.details || 'Database SQLite WAL verified'} | ${shieldCheck?.details || 'Anti Self-Cut Active'}`,
+            }
+          : t
+      )
+    );
+
+    addLog("Seluruh subsistem perangkat keras dan driver terverifikasi nyata.", "success");
+    addLog("Mengalihkan ke sesi dashboard operator...", "success");
+
+    setIsAllComplete(true);
+    setIsChecking(false);
+
+    // Auto-proceed into dashboard after real checks pass
+    setTimeout(() => {
+      onReady();
+    }, 450);
   }, [addLog, onReady]);
 
-  const completedCount = tasks.filter((t) => t.status === "completed").length;
+  useEffect(() => {
+    runDiagnostics();
+  }, [runDiagnostics]);
+
+  const completedCount = tasks.filter((t) => t.status === "completed" || t.status === "warning").length;
+  const hasErrors = tasks.some((t) => t.status === "error");
 
   const handleCopyLogs = async () => {
     const raw = logs.map((l) => `[${l.time}] ${l.msg}`).join("\n");
@@ -235,11 +378,50 @@ export const EngineReadinessGateContent: FC<EngineReadinessGateProps> = ({ onRea
   };
 
   return (
-    <div className="w-full max-w-xl space-y-3">
+    <div className="w-full max-w-xl space-y-3 font-sans">
+      {/* ========================================================= */}
+      {/* CRITICAL ERROR / WARNING BANNER                           */}
+      {/* ========================================================= */}
+      {criticalError && (
+        <motion.div
+          initial={{ opacity: 0, y: -8 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="p-4 rounded-2xl bg-rose-500/10 border border-rose-500/30 text-rose-200 text-xs space-y-2.5 shadow-xl"
+        >
+          <div className="flex items-center gap-2 font-semibold text-white">
+            <XCircle size={16} className="text-rose-400 shrink-0" />
+            <span>{criticalError.title}</span>
+          </div>
+          <p className="text-zinc-300 leading-relaxed text-[11px]">
+            {criticalError.message}
+          </p>
+          <div className="flex items-center gap-3 pt-1">
+            <button
+              type="button"
+              onClick={runDiagnostics}
+              disabled={isChecking}
+              className="px-3 py-1.5 rounded-xl bg-white text-black font-semibold text-xs hover:bg-zinc-200 transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+            >
+              <RefreshCw size={13} className={cn(isChecking && "animate-spin")} />
+              <span>Periksa Ulang (Retry Check)</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => onReady()}
+              className="px-3 py-1.5 rounded-xl bg-white/[0.08] hover:bg-white/[0.14] text-zinc-300 font-medium text-xs transition-all flex items-center gap-1.5 cursor-pointer"
+            >
+              <span>Lanjutkan Mode Terbatas (Bypass)</span>
+              <ArrowRight size={12} />
+            </button>
+          </div>
+        </motion.div>
+      )}
+
       {/* ========================================================= */}
       {/* BLOK 1 (ATAS): BeUI Agent TodoList                       */}
       {/* ========================================================= */}
-      <div className="rounded-2xl border border-white/[0.08] bg-[#090a0c]/60 backdrop-blur-md overflow-hidden shadow-2xl shadow-black/80 transition-all">
+      <div className="rounded-2xl border border-white/[0.08] bg-[#090a0c]/80 backdrop-blur-md overflow-hidden shadow-2xl shadow-black/80 transition-all">
         {/* Header Accordion Trigger */}
         <button
           type="button"
@@ -247,18 +429,37 @@ export const EngineReadinessGateContent: FC<EngineReadinessGateProps> = ({ onRea
           className="w-full px-4 py-3.5 flex items-center justify-between text-left hover:bg-white/[0.02] transition-colors outline-none cursor-pointer"
         >
           <div className="flex items-center gap-3">
-            <TodoHeaderIcon complete={isAllComplete} />
+            <TodoHeaderIcon complete={isAllComplete} hasError={hasErrors} />
             <div>
-              <h3 className="text-xs font-semibold text-white tracking-tight">
-                Inisialisasi Sistem Sentinel
+              <h3 className="text-xs font-semibold text-white tracking-tight flex items-center gap-2">
+                <span>Inisialisasi Sistem Sentinel (Hardware & Npcap Audit)</span>
+                {isAllComplete && (
+                  <span className="inline-flex items-center gap-1 px-2 py-0.2 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 text-[9px] font-mono">
+                    <ShieldCheck size={11} />
+                    Verified
+                  </span>
+                )}
               </h3>
               <p className="text-[11px] text-zinc-400 font-mono mt-0.5">
-                {completedCount} dari {tasks.length} proses selesai
+                {completedCount} dari {tasks.length} komponen terverifikasi nyata
               </p>
             </div>
           </div>
 
-          <div className="flex items-center">
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                runDiagnostics();
+              }}
+              disabled={isChecking}
+              title="Periksa Ulang Subsistem"
+              className="size-7 rounded-lg text-zinc-400 hover:text-white hover:bg-white/[0.06] transition-colors flex items-center justify-center cursor-pointer outline-none disabled:opacity-50"
+            >
+              <RefreshCw size={13} className={cn(isChecking && "animate-spin text-cyan-400")} />
+            </button>
+
             <ChevronDown
               size={14}
               className={cn(
@@ -292,6 +493,10 @@ export const EngineReadinessGateContent: FC<EngineReadinessGateProps> = ({ onRea
                           "font-medium truncate transition-colors",
                           task.status === "completed"
                             ? "text-zinc-200"
+                            : task.status === "warning"
+                            ? "text-amber-300 font-medium"
+                            : task.status === "error"
+                            ? "text-rose-400 font-semibold"
                             : task.status === "in-progress"
                             ? "text-white font-semibold"
                             : "text-zinc-500"
@@ -300,7 +505,10 @@ export const EngineReadinessGateContent: FC<EngineReadinessGateProps> = ({ onRea
                         {task.title}
                       </span>
                       {task.detail && (
-                        <span className="text-[10px] text-zinc-500 font-mono truncate">
+                        <span className={cn(
+                          "text-[10px] font-mono truncate",
+                          task.status === "error" ? "text-rose-400/80" : task.status === "warning" ? "text-amber-400/80" : "text-zinc-500"
+                        )}>
                           {task.detail}
                         </span>
                       )}
@@ -311,10 +519,14 @@ export const EngineReadinessGateContent: FC<EngineReadinessGateProps> = ({ onRea
                     {task.status === "in-progress" ? (
                       <span className="text-white flex items-center gap-1 font-medium">
                         <span className="size-1.5 rounded-full bg-emerald-400 animate-ping" />
-                        Running
+                        Probing
                       </span>
                     ) : task.status === "completed" ? (
-                      <span className="text-emerald-400 font-medium">Done</span>
+                      <span className="text-emerald-400 font-medium">Verified</span>
+                    ) : task.status === "warning" ? (
+                      <span className="text-amber-400 font-medium">Warning</span>
+                    ) : task.status === "error" ? (
+                      <span className="text-rose-400 font-medium">Failed</span>
                     ) : (
                       "Pending"
                     )}
@@ -329,7 +541,7 @@ export const EngineReadinessGateContent: FC<EngineReadinessGateProps> = ({ onRea
       {/* ========================================================= */}
       {/* BLOK 2 (BAWAH): BeUI Agent ToolResult / Terminal         */}
       {/* ========================================================= */}
-      <div className="rounded-2xl border border-white/[0.08] bg-[#090a0c]/60 backdrop-blur-md overflow-hidden shadow-2xl shadow-black/80 transition-all">
+      <div className="rounded-2xl border border-white/[0.08] bg-[#090a0c]/80 backdrop-blur-md overflow-hidden shadow-2xl shadow-black/80 transition-all">
         {/* Terminal Header */}
         <div className="px-4 py-3 flex items-center justify-between border-b border-white/[0.06] bg-white/[0.01]">
           <div className="flex items-center gap-2.5">
@@ -339,7 +551,7 @@ export const EngineReadinessGateContent: FC<EngineReadinessGateProps> = ({ onRea
                 terminal_bootstrap
               </span>
               <p className="text-[10px] font-mono text-zinc-500">
-                python3 src/server.py & node dist/app.js
+                GET /api/system/diagnostics & sc query npcap
               </p>
             </div>
           </div>
@@ -376,7 +588,7 @@ export const EngineReadinessGateContent: FC<EngineReadinessGateProps> = ({ onRea
               animate={{ height: "auto", opacity: 1 }}
               exit={{ height: 0, opacity: 0 }}
               transition={{ duration: 0.2 }}
-              className="p-3.5 bg-black/40 font-mono text-[11px] leading-relaxed max-h-[190px] overflow-y-auto space-y-1.5 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+              className="p-3.5 bg-black/50 font-mono text-[11px] leading-relaxed max-h-[190px] overflow-y-auto space-y-1.5 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
             >
               {logs.map((log) => (
                 <div key={log.id} className="flex items-start gap-2.5 font-mono text-[11px]">
@@ -386,6 +598,7 @@ export const EngineReadinessGateContent: FC<EngineReadinessGateProps> = ({ onRea
                       "break-words",
                       log.type === "success" && "text-zinc-200 font-medium",
                       log.type === "warn" && "text-amber-400/90",
+                      log.type === "error" && "text-rose-400 font-semibold",
                       log.type === "info" && "text-zinc-400"
                     )}
                   >

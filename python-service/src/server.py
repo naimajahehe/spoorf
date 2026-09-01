@@ -31,6 +31,7 @@ from .core.interceptor import SpoorfCertEngine, L7FlowManager, L7Flow
 from .core.bettercap import BettercapDNSEngine, BettercapPacketDissector, FastSYNScanner
 from .core.shield import shield_engine
 from .core.gaming import gaming_engine
+from .core.diagnostics import run_system_diagnostics, check_npcap_driver
 from .utils.logger import logger
 import warnings
 # Redam peringatan kompatibilitas internal Scapy & Cryptography (TripleDES deprecation warning)
@@ -398,11 +399,20 @@ class SynScanRequest(BaseModel):
 # ===== REST API Routes =====
 @app.get("/health")
 def health_check():
+    npcap = check_npcap_driver()
     return {
         "status": "ok",
-        "engine": "FastAPI Microservice (Modular v2.1)",
+        "engine": "FastAPI Microservice (Modular v2.3)",
+        "npcap_ready": npcap["status"] == "ok",
+        "npcap_installed": npcap["installed"],
+        "npcap_service_running": npcap["service_running"],
+        "interfaces_count": npcap.get("interfaces_count", 0),
         "timestamp": time.time()
     }
+
+@app.get("/api/system/diagnostics")
+def get_system_diagnostics():
+    return run_system_diagnostics()
 
 @app.get("/api/wifi")
 def get_wifi_status():

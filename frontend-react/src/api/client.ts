@@ -48,6 +48,11 @@ export const apiClient = {
         return response.data;
     },
 
+    async getDiagnostics() {
+        const response = await http.get('/api/system/diagnostics');
+        return response.data;
+    },
+
     async scan() {
         const response = await http.get('/api/scan');
         return response.data;

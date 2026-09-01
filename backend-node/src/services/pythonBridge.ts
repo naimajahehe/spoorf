@@ -809,6 +809,49 @@ export class PythonBridge extends EventEmitter {
         return data.data;
     }
 
+    isReady(): boolean {
+        return this.ready;
+    }
+
+    async getDiagnostics(): Promise<any> {
+        try {
+            const res = await this.fetchWithTimeout(`${this.baseUrl}/api/system/diagnostics`, {}, 2500);
+            if (res.ok) {
+                return await res.json();
+            }
+        } catch (e: any) {
+            console.debug('Failed to fetch Python diagnostics:', e.message);
+        }
+
+        // Fallback saat engine Python offline
+        return {
+            success: false,
+            status: 'error',
+            elapsed_ms: 0,
+            checks: {
+                python_engine: {
+                    status: 'error',
+                    version: 'N/A',
+                    details: 'FastAPI Python Engine (:8001) tidak merespons atau belum aktif.'
+                },
+                npcap_driver: {
+                    status: 'warning',
+                    installed: false,
+                    service_running: false,
+                    details: 'Pemeriksaan driver Npcap tertunda (Python Engine Offline).'
+                },
+                network_adapter: {
+                    status: 'warning',
+                    connected: false,
+                    details: 'Pemeriksaan adapter jaringan tertunda (Python Engine Offline).'
+                }
+            },
+            logs: [
+                '[ERROR] Gagal menghubungi Python FastAPI Engine di http://127.0.0.1:8001'
+            ]
+        };
+    }
+
     stop(): void {
         if (this.ws) {
             try { this.ws.close(); } catch {}

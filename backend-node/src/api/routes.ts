@@ -38,20 +38,32 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
     // Health check with service readiness
     router.get(['/health', '/api/health'], (req: Request, res: Response) => {
         const memoryFallback = deviceManager.isUsingMemoryFallback();
+        const pythonReady = deviceManager.isPythonReady();
         res.json({
-            status: 'ok',
+            status: pythonReady ? 'ok' : 'degraded',
             services: {
                 backend: true,
                 database: true,
                 // Jujur soal persistensi: false bila DB jatuh ke mode in-memory (P3).
                 database_persistent: !memoryFallback,
-                python_engine: true
+                python_engine: pythonReady
             },
-            warnings: memoryFallback
-                ? ['Database berjalan in-memory: data perangkat & lisensi tidak tersimpan permanen.']
-                : [],
+            warnings: [
+                ...(memoryFallback ? ['Database berjalan in-memory: data perangkat & lisensi tidak tersimpan permanen.'] : []),
+                ...(!pythonReady ? ['Python FastAPI Engine (:8001) belum terhubung atau sedang booting.'] : [])
+            ],
             timestamp: new Date().toISOString()
         });
+    });
+
+    // Real System Diagnostics & Hardware Verification Route
+    router.get('/api/system/diagnostics', async (req: Request, res: Response) => {
+        try {
+            const diag = await deviceManager.getSystemDiagnostics();
+            res.json(diag);
+        } catch (error: any) {
+            respondError(res, error);
+        }
     });
 
     // Scan network

@@ -214,3 +214,70 @@ export interface GamingTelemetry {
     is_optimal: boolean;
     timestamp: number;
 }
+
+export interface SystemCheckNpcap {
+    status: 'ok' | 'warning' | 'error';
+    installed: boolean;
+    service_running: boolean;
+    service_state?: string;
+    dlls_present?: boolean;
+    scapy_bound?: boolean;
+    interfaces_count?: number;
+    default_iface?: string;
+    default_iface_desc?: string;
+    details: string;
+}
+
+export interface SystemCheckAdapter {
+    status: 'ok' | 'warning' | 'error';
+    connected: boolean;
+    interface?: string;
+    interface_type?: string;
+    ssid?: string;
+    signal?: string;
+    ip?: string;
+    gateway?: string;
+    gateway_reachable?: boolean;
+    gateway_latency_ms?: number;
+    self_mac?: string;
+    details: string;
+}
+
+export interface SystemCheckDatabase {
+    status: 'ok' | 'warning' | 'error';
+    persistent: boolean;
+    mode?: string;
+    path?: string;
+    device_count?: number;
+    details: string;
+}
+
+export interface SystemDiagnosticsResponse {
+    success: boolean;
+    status: 'ok' | 'warning' | 'error';
+    timestamp?: string;
+    elapsed_ms?: number;
+    checks: {
+        python_engine: {
+            status: 'ok' | 'warning' | 'error';
+            version?: string;
+            pid?: number;
+            details: string;
+        };
+        npcap_driver: SystemCheckNpcap;
+        admin_privileges?: {
+            status: 'ok' | 'warning';
+            is_admin: boolean;
+            details: string;
+        };
+        network_adapter: SystemCheckAdapter;
+        database_persistence?: SystemCheckDatabase;
+        sentinel_shield?: {
+            status: 'ok' | 'warning';
+            gateway_immune: boolean;
+            self_immune: boolean;
+            details: string;
+        };
+    };
+    logs: string[];
+}
