@@ -67,25 +67,12 @@ const INITIAL_TASKS: SystemTask[] = [
 ];
 
 // -------------------------------------------------------------
-// Top Block: BeUI TodoList Header & Status Icons (Clean Inline)
+// Top Block: BeUI TodoList Header & Status Icons (Clean Static Logo)
 // -------------------------------------------------------------
-function TodoHeaderIcon({ complete, hasError }: { complete?: boolean; hasError?: boolean }) {
-  if (hasError) {
-    return (
-      <span aria-hidden="true" className="relative flex items-center justify-center shrink-0">
-        <AlertTriangle size={16} className="text-amber-400" />
-      </span>
-    );
-  }
+function TodoHeaderIcon() {
   return (
     <span aria-hidden="true" className="relative flex items-center justify-center shrink-0">
-      <ListTodo
-        size={16}
-        className={cn(
-          "transition-colors duration-200",
-          complete ? "text-emerald-400" : "text-zinc-400"
-        )}
-      />
+      <ListTodo size={16} className="text-zinc-400" />
     </span>
   );
 }
@@ -135,7 +122,6 @@ export const EngineReadinessGateContent: FC<EngineReadinessGateProps> = ({ onRea
   const [isProcessOpen, setIsProcessOpen] = useState(true);
   const [isTerminalOpen, setIsTerminalOpen] = useState(true);
   const [terminalCopied, setTerminalCopied] = useState(false);
-  const [isAllComplete, setIsAllComplete] = useState(false);
   const [isChecking, setIsChecking] = useState(false);
 
   const startTimeRef = useRef<number>(Date.now());
@@ -164,7 +150,6 @@ export const EngineReadinessGateContent: FC<EngineReadinessGateProps> = ({ onRea
   // Execute Strict Sequential System Diagnostics Pipeline (4 Combined Tasks)
   const runDiagnostics = useCallback(async () => {
     setIsChecking(true);
-    setIsAllComplete(false);
     startTimeRef.current = Date.now();
     
     addLog("Memulai bootloader NetCut Sentinel v2.3.0...", "info");
@@ -352,7 +337,6 @@ export const EngineReadinessGateContent: FC<EngineReadinessGateProps> = ({ onRea
 
     addLog("Seluruh persyaratan subsistem terpenuhi. Mengalihkan ke dashboard...", "success");
 
-    setIsAllComplete(true);
     setIsChecking(false);
 
     // Auto-proceed ONLY after all phases are Done
@@ -367,7 +351,6 @@ export const EngineReadinessGateContent: FC<EngineReadinessGateProps> = ({ onRea
   }, []);
 
   const completedCount = tasks.filter((t) => t.status === "completed" || t.status === "warning").length;
-  const hasErrors = tasks.some((t) => t.status === "error");
 
   const handleCopyLogs = async () => {
     const raw = logs.map((l) => `[${l.time}] ${l.msg}`).join("\n");
@@ -389,7 +372,7 @@ export const EngineReadinessGateContent: FC<EngineReadinessGateProps> = ({ onRea
           className="w-full px-4 py-3.5 flex items-center justify-between text-left hover:bg-white/[0.02] transition-colors outline-none cursor-pointer"
         >
           <div className="flex items-center gap-3">
-            <TodoHeaderIcon complete={isAllComplete} hasError={hasErrors} />
+            <TodoHeaderIcon />
             <div>
               <h3 className="text-xs font-semibold text-white tracking-tight flex items-center gap-2">
                 <span>Inisialisasi Sistem</span>
@@ -445,31 +428,22 @@ export const EngineReadinessGateContent: FC<EngineReadinessGateProps> = ({ onRea
                       <span
                         className={cn(
                           "font-medium truncate transition-colors",
-                          task.status === "completed"
-                            ? "text-zinc-200"
-                            : task.status === "warning"
-                            ? "text-amber-300 font-medium"
-                            : task.status === "error"
-                            ? "text-rose-400 font-semibold"
-                            : task.status === "in-progress"
+                          task.status === "in-progress"
                             ? "text-white font-semibold"
-                            : "text-zinc-500"
+                            : "text-zinc-200"
                         )}
                       >
                         {task.title}
                       </span>
                       {task.detail && (
-                        <span className={cn(
-                          "text-[10px] font-mono truncate",
-                          task.status === "error" ? "text-rose-400/80" : task.status === "warning" ? "text-amber-400/80" : "text-zinc-500"
-                        )}>
+                        <span className="text-[10px] font-mono truncate text-zinc-500">
                           {task.detail}
                         </span>
                       )}
                     </div>
                   </div>
 
-                  <span className="text-[10px] font-mono capitalize shrink-0 text-zinc-500">
+                  <span className="text-[10px] font-mono capitalize shrink-0">
                     {task.status === "in-progress" ? (
                       <span className="text-white flex items-center gap-1 font-medium">
                         <span className="size-1.5 rounded-full bg-emerald-400 animate-ping" />
@@ -482,7 +456,7 @@ export const EngineReadinessGateContent: FC<EngineReadinessGateProps> = ({ onRea
                     ) : task.status === "error" ? (
                       <span className="text-rose-400 font-medium">Failed</span>
                     ) : (
-                      "Pending"
+                      <span className="text-zinc-500">Pending</span>
                     )}
                   </span>
                 </div>
