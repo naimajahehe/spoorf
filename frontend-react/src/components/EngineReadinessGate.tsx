@@ -147,7 +147,7 @@ export const EngineReadinessGateContent: FC<EngineReadinessGateProps> = ({ onRea
     terminalEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [logs]);
 
-  // Execute Strict Sequential System Diagnostics Pipeline (4 Combined Tasks)
+  // Execute Strict Sequential System Diagnostics Pipeline with 1.25s per-phase pacing (Total 5.0s)
   const runDiagnostics = useCallback(async () => {
     setIsChecking(true);
     startTimeRef.current = Date.now();
@@ -159,8 +159,9 @@ export const EngineReadinessGateContent: FC<EngineReadinessGateProps> = ({ onRea
     setTasks(INITIAL_TASKS);
 
     // =========================================================================
-    // TAHAP 1: Core Engine & Orchestrator Services (:5000 & :8001)
+    // TAHAP 1: Core Engine & Orchestrator Services (:5000 & :8001) (~1.25s)
     // =========================================================================
+    const t1Start = Date.now();
     let healthOk = false;
     try {
       const healthRes = await apiClient.getHealth();
@@ -196,7 +197,7 @@ export const EngineReadinessGateContent: FC<EngineReadinessGateProps> = ({ onRea
           break;
         }
       } catch {
-        await new Promise((r) => setTimeout(r, 350));
+        await new Promise((r) => setTimeout(r, 200));
       }
     }
 
@@ -216,6 +217,12 @@ export const EngineReadinessGateContent: FC<EngineReadinessGateProps> = ({ onRea
     const { checks, logs: returnedLogs } = diagResult;
     const pyCheck = checks.python_engine;
 
+    // Pastikan durasi tahap 1 mencapai ~1.25 detik untuk visualisasi natural
+    const elapsedT1 = Date.now() - t1Start;
+    if (elapsedT1 < 1250) {
+      await new Promise((r) => setTimeout(r, 1250 - elapsedT1));
+    }
+
     // Tahap 1 Selesai -> Lanjut Tahap 2
     setTasks((prev) =>
       prev.map((t) =>
@@ -229,14 +236,15 @@ export const EngineReadinessGateContent: FC<EngineReadinessGateProps> = ({ onRea
     addLog("[NODE] Node.js Orchestrator listening di 127.0.0.1:5000 (OK)", "success");
     addLog(`[PYTHON] FastAPI & Scapy Engine aktif di 127.0.0.1:8001 (PID: ${pyCheck.pid || 'OK'})`, "success");
 
-    await new Promise((r) => setTimeout(r, 180));
-
     // =========================================================================
-    // TAHAP 2: Npcap NDIS 6 Kernel Driver & Packet Injection (Driver + DLLs + Admin)
+    // TAHAP 2: Npcap NDIS 6 Kernel Driver & Packet Injection (~1.25s)
     // =========================================================================
     const npcapCheck = checks.npcap_driver;
     const adminCheck = checks.admin_privileges;
     const isAdmin = adminCheck?.is_admin ?? false;
+
+    // Tunggu alokasi waktu tahap 2
+    await new Promise((r) => setTimeout(r, 1200));
 
     if (npcapCheck.status === "error" || (!npcapCheck.installed && !npcapCheck.service_running)) {
       setTasks((prev) =>
@@ -268,12 +276,13 @@ export const EngineReadinessGateContent: FC<EngineReadinessGateProps> = ({ onRea
     addLog(`[NPCAP] ${npcapCheck.details}`, npcapCheck.status === "warning" ? "warn" : "success");
     addLog(`[AUTH] Hak Akses: ${isAdmin ? 'Administrator (Elevated)' : 'User Standar (UAC Notice)'}`, isAdmin ? "success" : "warn");
 
-    await new Promise((r) => setTimeout(r, 180));
-
     // =========================================================================
-    // TAHAP 3: Physical Network Adapter & Gateway Link
+    // TAHAP 3: Physical Network Adapter & Gateway Link (~1.25s)
     // =========================================================================
     const netCheck = checks.network_adapter;
+
+    // Tunggu alokasi waktu tahap 3
+    await new Promise((r) => setTimeout(r, 1200));
 
     if (netCheck.status === "error" || !netCheck.ip || !netCheck.gateway) {
       setTasks((prev) =>
@@ -304,13 +313,14 @@ export const EngineReadinessGateContent: FC<EngineReadinessGateProps> = ({ onRea
     );
     addLog(`[NET] ${netCheck.details}`, "success");
 
-    await new Promise((r) => setTimeout(r, 180));
-
     // =========================================================================
-    // TAHAP 4: State Persistence & Core Safety Invariants (SQLite WAL + Shield)
+    // TAHAP 4: State Persistence & Core Safety Invariants (~1.25s)
     // =========================================================================
     const dbCheck = checks.database_persistence;
     const shieldCheck = checks.sentinel_shield;
+
+    // Tunggu alokasi waktu tahap 4
+    await new Promise((r) => setTimeout(r, 1200));
 
     setTasks((prev) =>
       prev.map((t) =>
@@ -339,7 +349,7 @@ export const EngineReadinessGateContent: FC<EngineReadinessGateProps> = ({ onRea
 
     setIsChecking(false);
 
-    // Auto-proceed ONLY after all phases are Done
+    // Auto-proceed ke dashboard
     setTimeout(() => {
       onReady();
     }, 450);
