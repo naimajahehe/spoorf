@@ -42,39 +42,27 @@ interface LogEntry {
 
 const INITIAL_TASKS: SystemTask[] = [
   {
-    id: "orchestrator",
-    title: "Node.js Orchestrator & Local API (:5000)",
-    detail: "Memverifikasi service orchestrator dan control-plane",
+    id: "engine",
+    title: "Core Engine & Orchestrator Services (:5000 & :8001)",
+    detail: "Memverifikasi Node.js Orchestrator & Python FastAPI Engine",
     status: "in-progress",
   },
   {
-    id: "python",
-    title: "FastAPI & Scapy Network Engine (:8001)",
-    detail: "Menghubungkan ke microservice transmisi raw frame L2",
-    status: "pending",
-  },
-  {
     id: "npcap",
-    title: "Npcap NDIS 6 Kernel Driver & Packet Capture",
-    detail: "Memverifikasi service 'npcap' RUNNING & packet injection DLLs",
-    status: "pending",
-  },
-  {
-    id: "privileges",
-    title: "Windows Administrator Privileges & UAC",
-    detail: "Memeriksa hak akses raw packet injection kernel",
+    title: "Npcap NDIS 6 Kernel Driver & Packet Injection",
+    detail: "Memverifikasi driver kernel Npcap, DLLs, dan hak akses raw socket",
     status: "pending",
   },
   {
     id: "network",
     title: "Physical Network Adapter & Gateway Link",
-    detail: "Memvalidasi IP privat RFC 1918 & latensi default gateway",
+    detail: "Memvalidasi adapter Wi-Fi/LAN, IP privat & latensi router",
     status: "pending",
   },
   {
-    id: "database",
-    title: "SQLite 3 WAL Persistence & Safety Invariants",
-    detail: "Memverifikasi database sentinel.db & kekebalan anti self-cut",
+    id: "persistence",
+    title: "State Persistence & Core Safety Invariants",
+    detail: "Memverifikasi SQLite WAL database & proteksi anti self-cut",
     status: "pending",
   },
 ];
@@ -175,7 +163,7 @@ export const EngineReadinessGateContent: FC<EngineReadinessGateProps> = ({ onRea
     terminalEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [logs]);
 
-  // Execute Strict Sequential System Diagnostics Pipeline
+  // Execute Strict Sequential System Diagnostics Pipeline (4 Combined Tasks)
   const runDiagnostics = useCallback(async () => {
     setIsChecking(true);
     setCriticalError(null);
@@ -189,7 +177,7 @@ export const EngineReadinessGateContent: FC<EngineReadinessGateProps> = ({ onRea
     setTasks(INITIAL_TASKS);
 
     // =========================================================================
-    // TAHAP 1: Node.js Orchestrator & Local API (:5000)
+    // TAHAP 1: Core Engine & Orchestrator Services (:5000 & :8001)
     // =========================================================================
     let healthOk = false;
     try {
@@ -204,7 +192,7 @@ export const EngineReadinessGateContent: FC<EngineReadinessGateProps> = ({ onRea
     if (!healthOk) {
       setTasks((prev) =>
         prev.map((t) =>
-          t.id === "orchestrator"
+          t.id === "engine"
             ? { ...t, status: "error", detail: "Node.js Orchestrator (:5000) tidak merespons" }
             : t
         )
@@ -215,26 +203,9 @@ export const EngineReadinessGateContent: FC<EngineReadinessGateProps> = ({ onRea
         message: "Layanan backend Express (:5000) tidak dapat dihubungi. Pastikan server Node.js telah berjalan (npm run dev).",
       });
       setIsChecking(false);
-      return; // STOP! Jangan lanjut jika Tahap 1 belum Done.
+      return; // STOP!
     }
 
-    // Tahap 1 Selesai -> Lanjut Tahap 2
-    setTasks((prev) =>
-      prev.map((t) =>
-        t.id === "orchestrator"
-          ? { ...t, status: "completed", detail: "Node.js Express (:5000) aktif & listening di loopback" }
-          : t.id === "python"
-          ? { ...t, status: "in-progress" }
-          : t
-      )
-    );
-    addLog("[NODE] Node.js Orchestrator listening di 127.0.0.1:5000 (OK)", "success");
-
-    await new Promise((r) => setTimeout(r, 160));
-
-    // =========================================================================
-    // TAHAP 2: FastAPI & Scapy Network Engine (:8001)
-    // =========================================================================
     let diagResult: SystemDiagnosticsResponse | null = null;
     let attempts = 0;
 
@@ -254,7 +225,7 @@ export const EngineReadinessGateContent: FC<EngineReadinessGateProps> = ({ onRea
     if (!diagResult || diagResult.checks.python_engine.status === "error") {
       setTasks((prev) =>
         prev.map((t) =>
-          t.id === "python"
+          t.id === "engine"
             ? { ...t, status: "error", detail: "FastAPI Python Engine (:8001) offline atau tidak merespons" }
             : t
         )
@@ -265,30 +236,33 @@ export const EngineReadinessGateContent: FC<EngineReadinessGateProps> = ({ onRea
         message: "Microservice Python FastAPI (:8001) tidak merespons. Pastikan 'python -m src.server' berjalan pada port 8001.",
       });
       setIsChecking(false);
-      return; // STOP! Jangan lanjut jika Tahap 2 belum Done.
+      return; // STOP!
     }
 
     const { checks, logs: returnedLogs } = diagResult;
     const pyCheck = checks.python_engine;
 
-    // Tahap 2 Selesai -> Lanjut Tahap 3
+    // Tahap 1 Selesai -> Lanjut Tahap 2
     setTasks((prev) =>
       prev.map((t) =>
-        t.id === "python"
-          ? { ...t, status: "completed", detail: `FastAPI Python ${pyCheck.version || '3.11'} aktif (PID: ${pyCheck.pid || 'OK'})` }
+        t.id === "engine"
+          ? { ...t, status: "completed", detail: `Node.js (:5000) & FastAPI Python ${pyCheck.version || '3.11'} (:8001) aktif` }
           : t.id === "npcap"
           ? { ...t, status: "in-progress" }
           : t
       )
     );
+    addLog("[NODE] Node.js Orchestrator listening di 127.0.0.1:5000 (OK)", "success");
     addLog(`[PYTHON] FastAPI & Scapy Engine aktif di 127.0.0.1:8001 (PID: ${pyCheck.pid || 'OK'})`, "success");
 
     await new Promise((r) => setTimeout(r, 180));
 
     // =========================================================================
-    // TAHAP 3: Npcap NDIS 6 Kernel Driver & Packet Capture DLLs
+    // TAHAP 2: Npcap NDIS 6 Kernel Driver & Packet Injection (Driver + DLLs + Admin)
     // =========================================================================
     const npcapCheck = checks.npcap_driver;
+    const adminCheck = checks.admin_privileges;
+    const isAdmin = adminCheck?.is_admin ?? false;
 
     if (npcapCheck.status === "error" || (!npcapCheck.installed && !npcapCheck.service_running)) {
       setTasks((prev) =>
@@ -305,52 +279,30 @@ export const EngineReadinessGateContent: FC<EngineReadinessGateProps> = ({ onRea
         actionText: "Buka npcap.com"
       });
       setIsChecking(false);
-      return; // STOP! Jangan lanjut jika Npcap gagal total.
+      return; // STOP!
     }
 
-    // Npcap Terverifikasi -> Lanjut Tahap 4
+    // Tahap 2 Selesai -> Lanjut Tahap 3
     setTasks((prev) =>
       prev.map((t) =>
         t.id === "npcap"
           ? {
               ...t,
               status: npcapCheck.status === "warning" ? "warning" : "completed",
-              detail: npcapCheck.details,
-            }
-          : t.id === "privileges"
-          ? { ...t, status: "in-progress" }
-          : t
-      )
-    );
-    addLog(`[NPCAP] ${npcapCheck.details}`, npcapCheck.status === "warning" ? "warn" : "success");
-
-    await new Promise((r) => setTimeout(r, 180));
-
-    // =========================================================================
-    // TAHAP 4: Administrator Privileges (UAC Elevation)
-    // =========================================================================
-    const adminCheck = checks.admin_privileges;
-    const isAdmin = adminCheck?.is_admin ?? false;
-
-    setTasks((prev) =>
-      prev.map((t) =>
-        t.id === "privileges"
-          ? {
-              ...t,
-              status: isAdmin ? "completed" : "warning",
-              detail: adminCheck?.details || (isAdmin ? "Hak akses Administrator aktif" : "User standar"),
+              detail: `${npcapCheck.details} | Hak Akses: ${isAdmin ? 'Administrator' : 'Standard User'}`,
             }
           : t.id === "network"
           ? { ...t, status: "in-progress" }
           : t
       )
     );
+    addLog(`[NPCAP] ${npcapCheck.details}`, npcapCheck.status === "warning" ? "warn" : "success");
     addLog(`[AUTH] Hak Akses: ${isAdmin ? 'Administrator (Elevated)' : 'User Standar (UAC Notice)'}`, isAdmin ? "success" : "warn");
 
     await new Promise((r) => setTimeout(r, 180));
 
     // =========================================================================
-    // TAHAP 5: Physical Network Adapter & Gateway Link
+    // TAHAP 3: Physical Network Adapter & Gateway Link
     // =========================================================================
     const netCheck = checks.network_adapter;
 
@@ -368,9 +320,10 @@ export const EngineReadinessGateContent: FC<EngineReadinessGateProps> = ({ onRea
         message: "PC tidak terhubung ke jaringan lokal Wi-Fi atau Ethernet LAN dengan IP privat yang sah (RFC 1918). Hubungkan PC ke router untuk melanjutkan.",
       });
       setIsChecking(false);
-      return; // STOP! Jangan lanjut jika jaringan offline.
+      return; // STOP!
     }
 
+    // Tahap 3 Selesai -> Lanjut Tahap 4
     setTasks((prev) =>
       prev.map((t) =>
         t.id === "network"
@@ -379,7 +332,7 @@ export const EngineReadinessGateContent: FC<EngineReadinessGateProps> = ({ onRea
               status: netCheck.status === "warning" ? "warning" : "completed",
               detail: netCheck.details,
             }
-          : t.id === "database"
+          : t.id === "persistence"
           ? { ...t, status: "in-progress" }
           : t
       )
@@ -389,14 +342,14 @@ export const EngineReadinessGateContent: FC<EngineReadinessGateProps> = ({ onRea
     await new Promise((r) => setTimeout(r, 180));
 
     // =========================================================================
-    // TAHAP 6: SQLite 3 WAL Persistence & Safety Invariants
+    // TAHAP 4: State Persistence & Core Safety Invariants (SQLite WAL + Shield)
     // =========================================================================
     const dbCheck = checks.database_persistence;
     const shieldCheck = checks.sentinel_shield;
 
     setTasks((prev) =>
       prev.map((t) =>
-        t.id === "database"
+        t.id === "persistence"
           ? {
               ...t,
               status: dbCheck?.status === "warning" ? "warning" : "completed",
@@ -498,7 +451,7 @@ export const EngineReadinessGateContent: FC<EngineReadinessGateProps> = ({ onRea
             <TodoHeaderIcon complete={isAllComplete} hasError={hasErrors} />
             <div>
               <h3 className="text-xs font-semibold text-white tracking-tight flex items-center gap-2">
-                <span>Inisialisasi Sistem Sentinel (Hardware & Npcap Audit)</span>
+                <span>Inisialisasi Sistem</span>
               </h3>
               <p className="text-[11px] text-zinc-400 font-mono mt-0.5">
                 {completedCount} dari {tasks.length} komponen terverifikasi nyata
