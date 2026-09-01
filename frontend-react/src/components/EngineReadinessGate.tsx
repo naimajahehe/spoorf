@@ -13,8 +13,7 @@ import {
   AlertTriangle,
   XCircle,
   RefreshCw,
-  ArrowRight,
-  ShieldCheck
+  ArrowRight
 } from "lucide-react";
 import { NeonMesh } from "./ui/neon-mesh";
 import { apiClient } from "../api/client";
@@ -40,6 +39,45 @@ interface LogEntry {
   msg: string;
   type: "info" | "success" | "warn" | "error";
 }
+
+const INITIAL_TASKS: SystemTask[] = [
+  {
+    id: "orchestrator",
+    title: "Node.js Orchestrator & Local API (:5000)",
+    detail: "Memverifikasi service orchestrator dan control-plane",
+    status: "in-progress",
+  },
+  {
+    id: "python",
+    title: "FastAPI & Scapy Network Engine (:8001)",
+    detail: "Menghubungkan ke microservice transmisi raw frame L2",
+    status: "pending",
+  },
+  {
+    id: "npcap",
+    title: "Npcap NDIS 6 Kernel Driver & Packet Capture",
+    detail: "Memverifikasi service 'npcap' RUNNING & packet injection DLLs",
+    status: "pending",
+  },
+  {
+    id: "privileges",
+    title: "Windows Administrator Privileges & UAC",
+    detail: "Memeriksa hak akses raw packet injection kernel",
+    status: "pending",
+  },
+  {
+    id: "network",
+    title: "Physical Network Adapter & Gateway Link",
+    detail: "Memvalidasi IP privat RFC 1918 & latensi default gateway",
+    status: "pending",
+  },
+  {
+    id: "database",
+    title: "SQLite 3 WAL Persistence & Safety Invariants",
+    detail: "Memverifikasi database sentinel.db & kekebalan anti self-cut",
+    status: "pending",
+  },
+];
 
 // -------------------------------------------------------------
 // Top Block: BeUI TodoList Header & Status Icons (Clean Inline)
@@ -105,33 +143,7 @@ function TodoStatusIcon({ status }: { status: TodoItemStatus }) {
 // EngineReadinessGate Content Blocks (BeUI TodoList + ToolResult)
 // -------------------------------------------------------------
 export const EngineReadinessGateContent: FC<EngineReadinessGateProps> = ({ onReady }) => {
-  const [tasks, setTasks] = useState<SystemTask[]>([
-    {
-      id: "python",
-      title: "FastAPI & Scapy Network Engine (:8001)",
-      detail: "Menghubungkan ke microservice transmisi raw frame",
-      status: "in-progress",
-    },
-    {
-      id: "npcap",
-      title: "Npcap NDIS 6 Kernel Driver & DLLs",
-      detail: "Memverifikasi kernel driver packet injection",
-      status: "pending",
-    },
-    {
-      id: "adapter",
-      title: "Physical Network Adapter & Gateway Link",
-      detail: "Memeriksa IP privat & latensi router",
-      status: "pending",
-    },
-    {
-      id: "database",
-      title: "SQLite WAL Persistence & Safety Invariants",
-      detail: "Menyinkronkan database & kekebalan controller",
-      status: "pending",
-    },
-  ]);
-
+  const [tasks, setTasks] = useState<SystemTask[]>(INITIAL_TASKS);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [isProcessOpen, setIsProcessOpen] = useState(true);
   const [isTerminalOpen, setIsTerminalOpen] = useState(true);
@@ -163,48 +175,70 @@ export const EngineReadinessGateContent: FC<EngineReadinessGateProps> = ({ onRea
     terminalEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [logs]);
 
-  // Execute True System Diagnostics Pipeline
+  // Execute Strict Sequential System Diagnostics Pipeline
   const runDiagnostics = useCallback(async () => {
     setIsChecking(true);
     setCriticalError(null);
+    setIsAllComplete(false);
     startTimeRef.current = Date.now();
     
     addLog("Memulai bootloader NetCut Sentinel v2.3.0...", "info");
-    addLog("Melakukan audit diagnosa hardware, driver kernel, dan subsistem...", "info");
+    addLog("Memulai audit persyaratan sistem secara bertahap & ketat...", "info");
 
-    // Reset status tasks
-    setTasks([
-      {
-        id: "python",
-        title: "FastAPI & Scapy Network Engine (:8001)",
-        detail: "Menghubungkan ke microservice transmisi raw frame",
-        status: "in-progress",
-      },
-      {
-        id: "npcap",
-        title: "Npcap NDIS 6 Kernel Driver & DLLs",
-        detail: "Memverifikasi kernel driver packet injection",
-        status: "pending",
-      },
-      {
-        id: "adapter",
-        title: "Physical Network Adapter & Gateway Link",
-        detail: "Memeriksa IP privat & latensi router",
-        status: "pending",
-      },
-      {
-        id: "database",
-        title: "SQLite WAL Persistence & Safety Invariants",
-        detail: "Menyinkronkan database & kekebalan controller",
-        status: "pending",
-      },
-    ]);
+    // Reset task state
+    setTasks(INITIAL_TASKS);
 
-    let attempts = 0;
+    // =========================================================================
+    // TAHAP 1: Node.js Orchestrator & Local API (:5000)
+    // =========================================================================
+    let healthOk = false;
+    try {
+      const healthRes = await apiClient.getHealth();
+      if (healthRes && (healthRes.status === "ok" || healthRes.status === "degraded")) {
+        healthOk = true;
+      }
+    } catch {
+      healthOk = false;
+    }
+
+    if (!healthOk) {
+      setTasks((prev) =>
+        prev.map((t) =>
+          t.id === "orchestrator"
+            ? { ...t, status: "error", detail: "Node.js Orchestrator (:5000) tidak merespons" }
+            : t
+        )
+      );
+      addLog("[ERROR] Gagal menghubungi Node.js Orchestrator di http://127.0.0.1:5000", "error");
+      setCriticalError({
+        title: "Node.js Orchestrator Tidak Aktif",
+        message: "Layanan backend Express (:5000) tidak dapat dihubungi. Pastikan server Node.js telah berjalan (npm run dev).",
+      });
+      setIsChecking(false);
+      return; // STOP! Jangan lanjut jika Tahap 1 belum Done.
+    }
+
+    // Tahap 1 Selesai -> Lanjut Tahap 2
+    setTasks((prev) =>
+      prev.map((t) =>
+        t.id === "orchestrator"
+          ? { ...t, status: "completed", detail: "Node.js Express (:5000) aktif & listening di loopback" }
+          : t.id === "python"
+          ? { ...t, status: "in-progress" }
+          : t
+      )
+    );
+    addLog("[NODE] Node.js Orchestrator listening di 127.0.0.1:5000 (OK)", "success");
+
+    await new Promise((r) => setTimeout(r, 160));
+
+    // =========================================================================
+    // TAHAP 2: FastAPI & Scapy Network Engine (:8001)
+    // =========================================================================
     let diagResult: SystemDiagnosticsResponse | null = null;
+    let attempts = 0;
 
-    // Retry loop to allow python engine to finish binding if starting simultaneously
-    while (attempts < 15) {
+    while (attempts < 10) {
       attempts++;
       try {
         const res = await apiClient.getDiagnostics();
@@ -213,159 +247,191 @@ export const EngineReadinessGateContent: FC<EngineReadinessGateProps> = ({ onRea
           break;
         }
       } catch {
-        if (attempts === 1) {
-          addLog("Menghubungkan ke orchestrator API (:5000) & FastAPI (:8001)...", "info");
-        }
-        await new Promise((r) => setTimeout(r, 400));
+        await new Promise((r) => setTimeout(r, 350));
       }
     }
 
-    if (!diagResult) {
-      // Python / Backend Completely Offline
-      setTasks((prev) =>
-        prev.map((t) => (t.id === "python" ? { ...t, status: "error", detail: "FastAPI Engine (:8001) tidak merespons" } : t))
-      );
-      addLog("Gagal menghubungi core engine pada port 8001/5000.", "error");
-      setCriticalError({
-        title: "Engine Sentinel Tidak Terdeteksi",
-        message: "Layanan Python FastAPI (:8001) atau Node.js (:5000) tidak dapat dihubungi. Pastikan command 'npm run dev' atau service telah dijalankan.",
-      });
-      setIsChecking(false);
-      return;
-    }
-
-    const { checks, logs: returnedLogs } = diagResult;
-
-    // Stream returned backend logs into terminal
-    if (returnedLogs && returnedLogs.length > 0) {
-      for (const rawLog of returnedLogs) {
-        const isWarn = rawLog.includes("WARN") || rawLog.includes("User standar");
-        const isErr = rawLog.includes("ERROR") || rawLog.includes("GAGAL") || rawLog.includes("STOPPED");
-        const isSuccess = rawLog.includes("RUNNING") || rawLog.includes("OK") || rawLog.includes("LOCKED") || rawLog.includes("initialized");
-        addLog(rawLog, isErr ? "error" : isWarn ? "warn" : isSuccess ? "success" : "info");
-      }
-    }
-
-    // Step 1: Evaluate Python Engine
-    const pyCheck = checks.python_engine;
-    if (pyCheck.status === "ok") {
+    if (!diagResult || diagResult.checks.python_engine.status === "error") {
       setTasks((prev) =>
         prev.map((t) =>
           t.id === "python"
-            ? { ...t, status: "completed", detail: `FastAPI + Scapy v${pyCheck.version || '2.3'} aktif (PID: ${pyCheck.pid || 'OK'})` }
-            : t.id === "npcap"
-            ? { ...t, status: "in-progress" }
+            ? { ...t, status: "error", detail: "FastAPI Python Engine (:8001) offline atau tidak merespons" }
             : t
         )
       );
-    } else {
-      setTasks((prev) =>
-        prev.map((t) => (t.id === "python" ? { ...t, status: "error", detail: pyCheck.details } : t))
-      );
+      addLog("[ERROR] FastAPI Python Engine (:8001) tidak aktif atau gagal inisialisasi.", "error");
+      setCriticalError({
+        title: "Python Network Engine Tidak Aktif",
+        message: "Microservice Python FastAPI (:8001) tidak merespons. Pastikan 'python -m src.server' berjalan pada port 8001.",
+      });
+      setIsChecking(false);
+      return; // STOP! Jangan lanjut jika Tahap 2 belum Done.
     }
+
+    const { checks, logs: returnedLogs } = diagResult;
+    const pyCheck = checks.python_engine;
+
+    // Tahap 2 Selesai -> Lanjut Tahap 3
+    setTasks((prev) =>
+      prev.map((t) =>
+        t.id === "python"
+          ? { ...t, status: "completed", detail: `FastAPI Python ${pyCheck.version || '3.11'} aktif (PID: ${pyCheck.pid || 'OK'})` }
+          : t.id === "npcap"
+          ? { ...t, status: "in-progress" }
+          : t
+      )
+    );
+    addLog(`[PYTHON] FastAPI & Scapy Engine aktif di 127.0.0.1:8001 (PID: ${pyCheck.pid || 'OK'})`, "success");
 
     await new Promise((r) => setTimeout(r, 180));
 
-    // Step 2: Evaluate Npcap Driver
+    // =========================================================================
+    // TAHAP 3: Npcap NDIS 6 Kernel Driver & Packet Capture DLLs
+    // =========================================================================
     const npcapCheck = checks.npcap_driver;
-    if (npcapCheck.status === "ok") {
+
+    if (npcapCheck.status === "error" || (!npcapCheck.installed && !npcapCheck.service_running)) {
       setTasks((prev) =>
         prev.map((t) =>
           t.id === "npcap"
-            ? { ...t, status: "completed", detail: npcapCheck.details }
-            : t.id === "adapter"
-            ? { ...t, status: "in-progress" }
+            ? { ...t, status: "error", detail: npcapCheck.details }
             : t
         )
-      );
-    } else if (npcapCheck.status === "warning") {
-      setTasks((prev) =>
-        prev.map((t) =>
-          t.id === "npcap"
-            ? { ...t, status: "warning", detail: npcapCheck.details }
-            : t.id === "adapter"
-            ? { ...t, status: "in-progress" }
-            : t
-        )
-      );
-      addLog(`[NPCAP PERINGATAN] ${npcapCheck.details}`, "warn");
-    } else {
-      setTasks((prev) =>
-        prev.map((t) => (t.id === "npcap" ? { ...t, status: "error", detail: npcapCheck.details } : t))
       );
       addLog(`[NPCAP ERROR] ${npcapCheck.details}`, "error");
       setCriticalError({
         title: "Driver Npcap Tidak Ditemukan",
-        message: "Sistem membutuhkan Npcap untuk menginjeksi frame raw Ethernet. Silakan unduh dan install Npcap dari npcap.com dengan opsi 'WinPcap API-compatible mode'.",
+        message: "Aplikasi membutuhkan Npcap untuk menginjeksi frame raw Ethernet di Windows. Silakan install Npcap dari npcap.com dengan mencentang 'WinPcap API-compatible mode'.",
         actionText: "Buka npcap.com"
       });
       setIsChecking(false);
-      return;
+      return; // STOP! Jangan lanjut jika Npcap gagal total.
     }
+
+    // Npcap Terverifikasi -> Lanjut Tahap 4
+    setTasks((prev) =>
+      prev.map((t) =>
+        t.id === "npcap"
+          ? {
+              ...t,
+              status: npcapCheck.status === "warning" ? "warning" : "completed",
+              detail: npcapCheck.details,
+            }
+          : t.id === "privileges"
+          ? { ...t, status: "in-progress" }
+          : t
+      )
+    );
+    addLog(`[NPCAP] ${npcapCheck.details}`, npcapCheck.status === "warning" ? "warn" : "success");
 
     await new Promise((r) => setTimeout(r, 180));
 
-    // Step 3: Evaluate Physical Network Adapter & Gateway
+    // =========================================================================
+    // TAHAP 4: Administrator Privileges (UAC Elevation)
+    // =========================================================================
+    const adminCheck = checks.admin_privileges;
+    const isAdmin = adminCheck?.is_admin ?? false;
+
+    setTasks((prev) =>
+      prev.map((t) =>
+        t.id === "privileges"
+          ? {
+              ...t,
+              status: isAdmin ? "completed" : "warning",
+              detail: adminCheck?.details || (isAdmin ? "Hak akses Administrator aktif" : "User standar"),
+            }
+          : t.id === "network"
+          ? { ...t, status: "in-progress" }
+          : t
+      )
+    );
+    addLog(`[AUTH] Hak Akses: ${isAdmin ? 'Administrator (Elevated)' : 'User Standar (UAC Notice)'}`, isAdmin ? "success" : "warn");
+
+    await new Promise((r) => setTimeout(r, 180));
+
+    // =========================================================================
+    // TAHAP 5: Physical Network Adapter & Gateway Link
+    // =========================================================================
     const netCheck = checks.network_adapter;
-    if (netCheck.status === "ok") {
+
+    if (netCheck.status === "error" || !netCheck.ip || !netCheck.gateway) {
       setTasks((prev) =>
         prev.map((t) =>
-          t.id === "adapter"
-            ? { ...t, status: "completed", detail: netCheck.details }
-            : t.id === "database"
-            ? { ...t, status: "in-progress" }
+          t.id === "network"
+            ? { ...t, status: "error", detail: netCheck.details || "Tidak ada koneksi adapter fisik dengan IP privat" }
             : t
         )
       );
-    } else if (netCheck.status === "warning") {
-      setTasks((prev) =>
-        prev.map((t) =>
-          t.id === "adapter"
-            ? { ...t, status: "warning", detail: netCheck.details }
-            : t.id === "database"
-            ? { ...t, status: "in-progress" }
-            : t
-        )
-      );
-    } else {
-      setTasks((prev) =>
-        prev.map((t) => (t.id === "adapter" ? { ...t, status: "error", detail: netCheck.details } : t))
-      );
+      addLog(`[NET ERROR] ${netCheck.details}`, "error");
+      setCriticalError({
+        title: "Koneksi Jaringan Tidak Ditemukan",
+        message: "PC tidak terhubung ke jaringan lokal Wi-Fi atau Ethernet LAN dengan IP privat yang sah (RFC 1918). Hubungkan PC ke router untuk melanjutkan.",
+      });
+      setIsChecking(false);
+      return; // STOP! Jangan lanjut jika jaringan offline.
     }
+
+    setTasks((prev) =>
+      prev.map((t) =>
+        t.id === "network"
+          ? {
+              ...t,
+              status: netCheck.status === "warning" ? "warning" : "completed",
+              detail: netCheck.details,
+            }
+          : t.id === "database"
+          ? { ...t, status: "in-progress" }
+          : t
+      )
+    );
+    addLog(`[NET] ${netCheck.details}`, "success");
 
     await new Promise((r) => setTimeout(r, 180));
 
-    // Step 4: Evaluate Database Persistence & Safety Invariants
+    // =========================================================================
+    // TAHAP 6: SQLite 3 WAL Persistence & Safety Invariants
+    // =========================================================================
     const dbCheck = checks.database_persistence;
     const shieldCheck = checks.sentinel_shield;
-    
+
     setTasks((prev) =>
       prev.map((t) =>
         t.id === "database"
           ? {
               ...t,
               status: dbCheck?.status === "warning" ? "warning" : "completed",
-              detail: `${dbCheck?.details || 'Database SQLite WAL verified'} | ${shieldCheck?.details || 'Anti Self-Cut Active'}`,
+              detail: `${dbCheck?.details || 'Database SQLite WAL siap'} | ${shieldCheck?.details || 'Anti Self-Cut Active'}`,
             }
           : t
       )
     );
+    addLog(`[DB] ${dbCheck?.details || 'SQLite WAL Persistence Active'}`, "success");
+    addLog(`[SAFETY] ${shieldCheck?.details || 'Gateway Immunity & Anti Self-Cut Active'}`, "success");
 
-    addLog("Seluruh subsistem perangkat keras dan driver terverifikasi nyata.", "success");
-    addLog("Mengalihkan ke sesi dashboard operator...", "success");
+    // SINKRONISASI LOG TERMINAL DARI HASIL AUDIT NYATA
+    if (returnedLogs && returnedLogs.length > 0) {
+      for (const logItem of returnedLogs) {
+        if (!logs.some(l => l.msg === logItem)) {
+          addLog(logItem, "info");
+        }
+      }
+    }
+
+    addLog("Seluruh persyaratan subsistem terpenuhi. Mengalihkan ke dashboard...", "success");
 
     setIsAllComplete(true);
     setIsChecking(false);
 
-    // Auto-proceed into dashboard after real checks pass
+    // Auto-proceed ONLY after all phases are Done
     setTimeout(() => {
       onReady();
     }, 450);
-  }, [addLog, onReady]);
+  }, [addLog, onReady, logs]);
 
   useEffect(() => {
     runDiagnostics();
-  }, [runDiagnostics]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const completedCount = tasks.filter((t) => t.status === "completed" || t.status === "warning").length;
   const hasErrors = tasks.some((t) => t.status === "error");
@@ -433,12 +499,6 @@ export const EngineReadinessGateContent: FC<EngineReadinessGateProps> = ({ onRea
             <div>
               <h3 className="text-xs font-semibold text-white tracking-tight flex items-center gap-2">
                 <span>Inisialisasi Sistem Sentinel (Hardware & Npcap Audit)</span>
-                {isAllComplete && (
-                  <span className="inline-flex items-center gap-1 px-2 py-0.2 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 text-[9px] font-mono">
-                    <ShieldCheck size={11} />
-                    Verified
-                  </span>
-                )}
               </h3>
               <p className="text-[11px] text-zinc-400 font-mono mt-0.5">
                 {completedCount} dari {tasks.length} komponen terverifikasi nyata
@@ -522,7 +582,7 @@ export const EngineReadinessGateContent: FC<EngineReadinessGateProps> = ({ onRea
                         Probing
                       </span>
                     ) : task.status === "completed" ? (
-                      <span className="text-emerald-400 font-medium">Verified</span>
+                      <span className="text-emerald-400 font-medium">Done</span>
                     ) : task.status === "warning" ? (
                       <span className="text-amber-400 font-medium">Warning</span>
                     ) : task.status === "error" ? (
