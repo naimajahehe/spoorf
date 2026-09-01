@@ -12,8 +12,7 @@ import {
   LoaderCircle,
   AlertTriangle,
   XCircle,
-  RefreshCw,
-  ArrowRight
+  RefreshCw
 } from "lucide-react";
 import { NeonMesh } from "./ui/neon-mesh";
 import { apiClient } from "../api/client";
@@ -138,7 +137,6 @@ export const EngineReadinessGateContent: FC<EngineReadinessGateProps> = ({ onRea
   const [terminalCopied, setTerminalCopied] = useState(false);
   const [isAllComplete, setIsAllComplete] = useState(false);
   const [isChecking, setIsChecking] = useState(false);
-  const [criticalError, setCriticalError] = useState<{ title: string; message: string; actionText?: string } | null>(null);
 
   const startTimeRef = useRef<number>(Date.now());
   const logIdRef = useRef<number>(0);
@@ -166,7 +164,6 @@ export const EngineReadinessGateContent: FC<EngineReadinessGateProps> = ({ onRea
   // Execute Strict Sequential System Diagnostics Pipeline (4 Combined Tasks)
   const runDiagnostics = useCallback(async () => {
     setIsChecking(true);
-    setCriticalError(null);
     setIsAllComplete(false);
     startTimeRef.current = Date.now();
     
@@ -198,10 +195,6 @@ export const EngineReadinessGateContent: FC<EngineReadinessGateProps> = ({ onRea
         )
       );
       addLog("[ERROR] Gagal menghubungi Node.js Orchestrator di http://127.0.0.1:5000", "error");
-      setCriticalError({
-        title: "Node.js Orchestrator Tidak Aktif",
-        message: "Layanan backend Express (:5000) tidak dapat dihubungi. Pastikan server Node.js telah berjalan (npm run dev).",
-      });
       setIsChecking(false);
       return; // STOP!
     }
@@ -231,10 +224,6 @@ export const EngineReadinessGateContent: FC<EngineReadinessGateProps> = ({ onRea
         )
       );
       addLog("[ERROR] FastAPI Python Engine (:8001) tidak aktif atau gagal inisialisasi.", "error");
-      setCriticalError({
-        title: "Python Network Engine Tidak Aktif",
-        message: "Microservice Python FastAPI (:8001) tidak merespons. Pastikan 'python -m src.server' berjalan pada port 8001.",
-      });
       setIsChecking(false);
       return; // STOP!
     }
@@ -273,11 +262,6 @@ export const EngineReadinessGateContent: FC<EngineReadinessGateProps> = ({ onRea
         )
       );
       addLog(`[NPCAP ERROR] ${npcapCheck.details}`, "error");
-      setCriticalError({
-        title: "Driver Npcap Tidak Ditemukan",
-        message: "Aplikasi membutuhkan Npcap untuk menginjeksi frame raw Ethernet di Windows. Silakan install Npcap dari npcap.com dengan mencentang 'WinPcap API-compatible mode'.",
-        actionText: "Buka npcap.com"
-      });
       setIsChecking(false);
       return; // STOP!
     }
@@ -315,10 +299,6 @@ export const EngineReadinessGateContent: FC<EngineReadinessGateProps> = ({ onRea
         )
       );
       addLog(`[NET ERROR] ${netCheck.details}`, "error");
-      setCriticalError({
-        title: "Koneksi Jaringan Tidak Ditemukan",
-        message: "PC tidak terhubung ke jaringan lokal Wi-Fi atau Ethernet LAN dengan IP privat yang sah (RFC 1918). Hubungkan PC ke router untuk melanjutkan.",
-      });
       setIsChecking(false);
       return; // STOP!
     }
@@ -398,45 +378,6 @@ export const EngineReadinessGateContent: FC<EngineReadinessGateProps> = ({ onRea
 
   return (
     <div className="w-full max-w-xl space-y-3 font-sans">
-      {/* ========================================================= */}
-      {/* CRITICAL ERROR / WARNING BANNER                           */}
-      {/* ========================================================= */}
-      {criticalError && (
-        <motion.div
-          initial={{ opacity: 0, y: -8 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="p-4 rounded-2xl bg-rose-500/10 border border-rose-500/30 text-rose-200 text-xs space-y-2.5 shadow-xl"
-        >
-          <div className="flex items-center gap-2 font-semibold text-white">
-            <XCircle size={16} className="text-rose-400 shrink-0" />
-            <span>{criticalError.title}</span>
-          </div>
-          <p className="text-zinc-300 leading-relaxed text-[11px]">
-            {criticalError.message}
-          </p>
-          <div className="flex items-center gap-3 pt-1">
-            <button
-              type="button"
-              onClick={runDiagnostics}
-              disabled={isChecking}
-              className="px-3 py-1.5 rounded-xl bg-white text-black font-semibold text-xs hover:bg-zinc-200 transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
-            >
-              <RefreshCw size={13} className={cn(isChecking && "animate-spin")} />
-              <span>Periksa Ulang (Retry Check)</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => onReady()}
-              className="px-3 py-1.5 rounded-xl bg-white/[0.08] hover:bg-white/[0.14] text-zinc-300 font-medium text-xs transition-all flex items-center gap-1.5 cursor-pointer"
-            >
-              <span>Lanjutkan Mode Terbatas (Bypass)</span>
-              <ArrowRight size={12} />
-            </button>
-          </div>
-        </motion.div>
-      )}
-
       {/* ========================================================= */}
       {/* BLOK 1 (ATAS): BeUI Agent TodoList                       */}
       {/* ========================================================= */}
