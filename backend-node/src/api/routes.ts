@@ -10,14 +10,21 @@ import { LicenseManager, FeatureLimitError, FeatureLockedError } from '../servic
 const OPERATIONAL_ERROR_RE = /not found|required|already|invalid|cannot|gateway|tidak valid|tidak ditemukan|diperlukan|dilindungi|kebal|di luar jangkauan|terkunci|format|batas|upgrade/i;
 
 function respondError(res: Response, err: any, status = 500): void {
-    // eslint-disable-next-line no-console
-    console.error('[API Error]', err);
     const msg = typeof err?.message === 'string' ? err.message : '';
+    const isOffline = msg.includes('Offline') || msg.includes('timeout') || msg.includes('tidak dapat dihubungi') || err?.name === 'AbortError';
+    if (isOffline) {
+        // eslint-disable-next-line no-console
+        console.warn(`⚠️ [API Warning] ${msg || 'Python Engine Offline / Aborted'}`);
+    } else {
+        // eslint-disable-next-line no-console
+        console.error('[API Error]', err);
+    }
     const isOperational =
         err instanceof FeatureLimitError ||
         err instanceof FeatureLockedError ||
+        isOffline ||
         (msg !== '' && OPERATIONAL_ERROR_RE.test(msg));
-    res.status(status).json({
+    res.status(isOffline ? 503 : status).json({
         success: false,
         error: isOperational ? msg : 'Terjadi kesalahan internal pada server.'
     });

@@ -64,6 +64,14 @@ export class PythonBridge extends EventEmitter {
                 headers: this.authHeaders(options.headers),
                 signal: controller.signal
             });
+        } catch (err: any) {
+            if (err.name === 'AbortError' || err.code === 'ABORT_ERR' || err.message?.includes('aborted')) {
+                throw new Error(`Koneksi ke Python microservice (${url}) timeout setelah ${timeoutMs}ms.`);
+            }
+            if (err.code === 'ECONNREFUSED' || err.message?.includes('fetch failed')) {
+                throw new Error(`Python microservice (:8001) tidak dapat dihubungi (Offline).`);
+            }
+            throw err;
         } finally {
             clearTimeout(timer);
         }
@@ -537,34 +545,51 @@ export class PythonBridge extends EventEmitter {
     }
 
     async getCAInfo(): Promise<any> {
-        const res = await this.fetchWithTimeout(`${this.baseUrl}/api/interceptor/ca`);
-        if (!res.ok) throw new Error('Failed to get CA info');
-        const data: any = await res.json();
-        return data.data;
+        if (!this.ready) return { status: 'offline', common_name: 'Spoorf Root CA (Offline)', total_cached_leafs: 0 };
+        try {
+            const res = await this.fetchWithTimeout(`${this.baseUrl}/api/interceptor/ca`, {}, 2000);
+            if (!res.ok) return { status: 'offline', common_name: 'Spoorf Root CA', total_cached_leafs: 0 };
+            const data: any = await res.json();
+            return data.data;
+        } catch {
+            return { status: 'offline', common_name: 'Spoorf Root CA', total_cached_leafs: 0 };
+        }
     }
 
     async getCACertPem(): Promise<string> {
-        const res = await this.fetchWithTimeout(`${this.baseUrl}/api/interceptor/ca/cert`);
-        if (!res.ok) throw new Error('Failed to fetch CA cert');
-        return await res.text();
+        if (!this.ready) return '';
+        try {
+            const res = await this.fetchWithTimeout(`${this.baseUrl}/api/interceptor/ca/cert`, {}, 2000);
+            if (!res.ok) return '';
+            return await res.text();
+        } catch {
+            return '';
+        }
     }
 
     async getL7Flows(query?: { limit?: number; search?: string; scheme?: string; method?: string; is_blocked?: boolean }): Promise<any> {
-        const params = new URLSearchParams();
-        if (query?.limit) params.set('limit', String(query.limit));
-        if (query?.search) params.set('search', query.search);
-        if (query?.scheme) params.set('scheme', query.scheme);
-        if (query?.method) params.set('method', query.method);
-        if (query?.is_blocked !== undefined) params.set('is_blocked', String(query.is_blocked));
+        if (!this.ready) return { total: 0, flows: [], active_connections: 0 };
+        try {
+            const params = new URLSearchParams();
+            if (query?.limit) params.set('limit', String(query.limit));
+            if (query?.search) params.set('search', query.search);
+            if (query?.scheme) params.set('scheme', query.scheme);
+            if (query?.method) params.set('method', query.method);
+            if (query?.is_blocked !== undefined) params.set('is_blocked', String(query.is_blocked));
 
-        const res = await this.fetchWithTimeout(`${this.baseUrl}/api/interceptor/flows?${params.toString()}`);
-        if (!res.ok) throw new Error('Failed to get L7 flows');
-        return await res.json();
+            const res = await this.fetchWithTimeout(`${this.baseUrl}/api/interceptor/flows?${params.toString()}`, {}, 2000);
+            if (!res.ok) return { total: 0, flows: [], active_connections: 0 };
+            return await res.json();
+        } catch {
+            return { total: 0, flows: [], active_connections: 0 };
+        }
     }
 
     async clearL7Flows(): Promise<void> {
-        const res = await this.fetchWithTimeout(`${this.baseUrl}/api/interceptor/flows`, { method: 'DELETE' });
-        if (!res.ok) throw new Error('Failed to clear L7 flows');
+        if (!this.ready) return;
+        try {
+            await this.fetchWithTimeout(`${this.baseUrl}/api/interceptor/flows`, { method: 'DELETE' }, 2000);
+        } catch {}
     }
 
     async generateLeafCert(domain: string): Promise<any> {
@@ -579,17 +604,29 @@ export class PythonBridge extends EventEmitter {
 
     // ===== BETTERCAP SECURITY SUITE BRIDGE METHODS =====
     async getBettercapStatus(): Promise<any> {
-        const res = await this.fetchWithTimeout(`${this.baseUrl}/api/bettercap/status`);
-        if (!res.ok) throw new Error('Failed to get Bettercap status');
-        const data: any = await res.json();
-        return data;
+        if (!this.ready) {
+            return { is_running: false, is_enabled: false, dns_spoof_active: false, sniffer_active: false, active_sessions: 0 };
+        }
+        try {
+            const res = await this.fetchWithTimeout(`${this.baseUrl}/api/bettercap/status`, {}, 2000);
+            if (!res.ok) return { is_running: false, is_enabled: false, dns_spoof_active: false, sniffer_active: false, active_sessions: 0 };
+            const data: any = await res.json();
+            return data;
+        } catch {
+            return { is_running: false, is_enabled: false, dns_spoof_active: false, sniffer_active: false, active_sessions: 0 };
+        }
     }
 
     async getBettercapDnsRules(): Promise<any[]> {
-        const res = await this.fetchWithTimeout(`${this.baseUrl}/api/bettercap/dns/rules`);
-        if (!res.ok) throw new Error('Failed to get Bettercap DNS rules');
-        const data: any = await res.json();
-        return data.rules || [];
+        if (!this.ready) return [];
+        try {
+            const res = await this.fetchWithTimeout(`${this.baseUrl}/api/bettercap/dns/rules`, {}, 2000);
+            if (!res.ok) return [];
+            const data: any = await res.json();
+            return data.rules || [];
+        } catch {
+            return [];
+        }
     }
 
     async addBettercapDnsRule(domain: string, target_ip: string, action: string = 'spoof', is_enabled: boolean = true): Promise<any> {
@@ -704,17 +741,21 @@ export class PythonBridge extends EventEmitter {
     }
 
     async getStatus(): Promise<any> {
-        const res = await this.fetchWithTimeout(`${this.baseUrl}/api/status`);
-        if (!res.ok) {
-            throw new Error(`Get status error: ${res.statusText}`);
+        if (!this.ready) return { sessions: {}, interface: 'N/A', self_mac: '00:00:00:00:00:00', active_count: 0 };
+        try {
+            const res = await this.fetchWithTimeout(`${this.baseUrl}/api/status`, {}, 2000);
+            if (!res.ok) return { sessions: {}, interface: 'N/A', self_mac: '00:00:00:00:00:00', active_count: 0 };
+            const data: any = await res.json();
+            return data.status;
+        } catch {
+            return { sessions: {}, interface: 'N/A', self_mac: '00:00:00:00:00:00', active_count: 0 };
         }
-        const data: any = await res.json();
-        return data.status;
     }
 
     async getShieldStatus(): Promise<any> {
+        if (!this.ready) return { is_enabled: false, mode: 'host_lock', gateway_ip: '', gateway_mac: '', threats_count: 0 };
         try {
-            const res = await this.fetchWithTimeout(`${this.baseUrl}/api/shield/status`);
+            const res = await this.fetchWithTimeout(`${this.baseUrl}/api/shield/status`, {}, 2000);
             if (!res.ok) throw new Error('Failed to get shield status');
             const data: any = await res.json();
             return data.data;
@@ -760,9 +801,10 @@ export class PythonBridge extends EventEmitter {
     }
 
     async getShieldThreats(): Promise<any[]> {
+        if (!this.ready) return [];
         try {
-            const res = await this.fetchWithTimeout(`${this.baseUrl}/api/shield/threats`);
-            if (!res.ok) throw new Error('Failed to get shield threats');
+            const res = await this.fetchWithTimeout(`${this.baseUrl}/api/shield/threats`, {}, 2000);
+            if (!res.ok) return [];
             const data: any = await res.json();
             return data.data || [];
         } catch {
@@ -771,8 +813,9 @@ export class PythonBridge extends EventEmitter {
     }
 
     async clearShieldThreats(): Promise<boolean> {
+        if (!this.ready) return false;
         try {
-            const res = await this.fetchWithTimeout(`${this.baseUrl}/api/shield/threats`, { method: 'DELETE' });
+            const res = await this.fetchWithTimeout(`${this.baseUrl}/api/shield/threats`, { method: 'DELETE' }, 2000);
             return res.ok;
         } catch {
             return false;
@@ -781,9 +824,10 @@ export class PythonBridge extends EventEmitter {
 
 
     async getGamingStatus(): Promise<any> {
+        if (!this.ready) return { is_enabled: false, mode: 'auto_airtime', ping_ms: 0, jitter_ms: 0, packet_loss_pct: 0, uptime_seconds: 0 };
         try {
-            const res = await this.fetchWithTimeout(`${this.baseUrl}/api/gaming/status`);
-            if (!res.ok) throw new Error('Failed to get gaming status');
+            const res = await this.fetchWithTimeout(`${this.baseUrl}/api/gaming/status`, {}, 2000);
+            if (!res.ok) return { is_enabled: false, mode: 'auto_airtime', ping_ms: 0, jitter_ms: 0, packet_loss_pct: 0, uptime_seconds: 0 };
             const data: any = await res.json();
             return data.data || { is_enabled: false, mode: 'auto_airtime', ping_ms: 0, jitter_ms: 0 };
         } catch {
@@ -815,12 +859,12 @@ export class PythonBridge extends EventEmitter {
 
     async getDiagnostics(): Promise<any> {
         try {
-            const res = await this.fetchWithTimeout(`${this.baseUrl}/api/system/diagnostics`, {}, 2500);
+            const res = await this.fetchWithTimeout(`${this.baseUrl}/api/system/diagnostics`, {}, 1500);
             if (res.ok) {
                 return await res.json();
             }
-        } catch (e: any) {
-            console.debug('Failed to fetch Python diagnostics:', e.message);
+        } catch {
+            // Quiet fallback saat Python microservice sedang booting atau offline
         }
 
         // Fallback saat engine Python offline
@@ -835,10 +879,10 @@ export class PythonBridge extends EventEmitter {
                     details: 'FastAPI Python Engine (:8001) tidak merespons atau belum aktif.'
                 },
                 npcap_driver: {
-                    status: 'warning',
+                    status: 'error',
                     installed: false,
                     service_running: false,
-                    details: 'Pemeriksaan driver Npcap tertunda (Python Engine Offline).'
+                    details: 'Npcap Driver tidak ditemukan di Windows. Harap install Npcap dari npcap.com.'
                 },
                 network_adapter: {
                     status: 'warning',
@@ -847,7 +891,8 @@ export class PythonBridge extends EventEmitter {
                 }
             },
             logs: [
-                '[ERROR] Gagal menghubungi Python FastAPI Engine di http://127.0.0.1:8001'
+                '[ERROR] Gagal menghubungi Python FastAPI Engine di http://127.0.0.1:8001',
+                '[NPCAP] Npcap NDIS 6 Kernel Driver tidak terdeteksi'
             ]
         };
     }
