@@ -116,6 +116,12 @@ Pada mode dev (`npm run dev` tanpa Electron), `SENTINEL_API_TOKEN` tidak diset โ
 - **`POST /api/spoof/stop`**
   - **Body**: `{ "session_id": "192.168.1.116_1788160000" }`
   - **Response `200 OK`**: `{ "success": true, "message": "Session ... stopped" }`
+  - **Semantik cleanup**: Sesi dihapus hanya setelah restorasi ARP berhasil.
+    Bila restorasi gagal, endpoint mengembalikan error dan mempertahankan sesi
+    nonaktif dengan ID yang sama agar panggilan `stop` berikutnya dapat
+    mengulangi restorasi. Sesi yang tidak pernah ada, atau yang sudah berhasil
+    dibersihkan, tetap menghasilkan `SessionNotFoundError`; endpoint ini bukan
+    operasi sukses generik untuk ID yang tidak dikenal.
 
 - **`POST /api/spoof/restore`**
   - **Body**: `{ "session_id": "192.168.1.116_1788160000" }` (model `SpoofStopRequest` โ€” hanya `session_id`)
@@ -168,10 +174,40 @@ Pada mode dev (`npm run dev` tanpa Electron), `SENTINEL_API_TOKEN` tidak diset โ
 
 > **Catatan:** Endpoint di atas hanyalah subset inti. Terdapat pula rute Shield (`/api/shield/*`), Gaming (`/api/gaming/*`), Transparent Gateway (`/api/gateway/*`), Bettercap Suite (`/api/bettercap/*`), L7 Interceptor (`/api/interceptor/*`), dan Auth/License (`/api/auth/*`). Semua (kecuali `/health` & `/api/health`) tunduk pada IPC token bila aktif (lihat ยง0).
 
+### Bettercap DNS Configuration
+- **`GET /api/bettercap/dns/rules`**
+  - **Deskripsi**: Mengambil rules DNS serta konfigurasi spoof-all saat ini.
+  - **Response `200 OK`**:
+    ```json
+    {
+      "success": true,
+      "rules": [],
+      "spoof_all_enabled": false,
+      "spoof_all_address": "",
+      "default_ttl": 10
+    }
+    ```
+  - Node meneruskan objek konfigurasi Python secara utuh. Field
+    `spoof_all_enabled`, `spoof_all_address`, dan `default_ttl` tidak boleh
+    dihilangkan saat meneruskan respons.
+
 ### Skema Event Socket.IO (`ws://localhost:5000`)
-- **`initialState`**: Dikirim saat klien browser baru terhubung (berisi list perangkat dan gateway).
+- **`devices`**: Dikirim saat klien browser baru terhubung (berisi list perangkat).
 - **`devicesUpdate`**: Dikirim saat ada perubahan daftar perangkat hasil pemindaian.
 - **`deviceUpdate`**: Dikirim saat satu perangkat berubah status (misal: terblokir / dipulihkan).
+- **`deviceDisconnected`**: Dikirim saat perangkat menjadi offline.
 - **`autoReblocked`**: Dikirim saat target terblokir terdeteksi kembali ke jaringan dan dicegat seketika.
+- **`dhcpEvent`**: Aktivitas DHCP yang dinormalisasi; release berbentuk
+  `{ "kind": "release", "mac": "...", "ip": "..." }`.
+- **`shieldStatusChanged`**: Objek status Shield setelah enable/disable.
+- **`arpThreatDetected`**: Objek threat ARP dari Shield.
 - **`telemetryStream`**: Disiarkan setiap 1 detik berisi kecepatan Mbps unduh/unggah & latensi ms.
 - **`wifiStatus`**: Disiarkan saat ada perubahan pada link-state Wi-Fi atau nama SSID.
+
+### Graceful Shutdown
+
+Node menggunakan satu handler cleanup yang sama untuk `SIGINT` dan `SIGTERM`.
+Handler tersebut hanya berjalan sekali, mencoba `pythonBridge.stopAll()` agar
+sesi ARP dipulihkan, lalu menghentikan bridge, menutup SQLite dan HTTP server.
+Kegagalan cleanup saat proses berhenti dicatat sebagai peringatan agar langkah
+cleanup berikutnya tetap dijalankan.
