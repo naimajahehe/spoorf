@@ -78,9 +78,9 @@ Disiarkan Sentinel Shield ketika mendeteksi ARP yang mengklaim gateway.
   "data": {
     "id": "threat_1787823571555",
     "timestamp": "2026-09-04 05:42:50",
-    "attacker_ip": "192.168.110.120",
+    "attacker_ip": null,
     "attacker_mac": "c2:4e:ca:88:04:2d",
-    "target_ip": "192.168.110.1",
+    "target_ip": "192.168.110.99",
     "claimed_ip": "192.168.110.1",
     "type": "gateway_arp_spoof",
     "action_taken": "mitigated_by_shield",
@@ -88,6 +88,12 @@ Disiarkan Sentinel Shield ketika mendeteksi ARP yang mengklaim gateway.
   }
 }
 ```
+`attacker_mac` berasal dari sumber perangkat keras ARP, `claimed_ip` adalah
+alamat protokol sumber yang diklaim (`ARP.psrc`), dan `target_ip` adalah target
+ARP (`ARP.pdst`). Field kompatibilitas `attacker_ip` bernilai `null` ketika
+alamat IP host penyerang tidak dapat ditentukan dari frame dan tidak boleh
+disimpulkan dari `claimed_ip`.
+
 Nama Socket.IO publiknya adalah `arpThreatDetected`, dengan payload yang sama.
 
 ### Event: `shield_status_changed`
@@ -154,4 +160,5 @@ Meneruskan status Shield setelah transisi enable/disable yang berhasil.
 ### Event: `arpThreatDetected`
 Meneruskan peringatan ARP dari Shield.
 * **Payload:** objek threat dengan `attacker_mac`, `attacker_ip`, `target_ip`,
-  `claimed_ip`, `type`, `action_taken`, dan metadata terkait.
+  `claimed_ip`, `type`, `action_taken`, dan metadata terkait. `attacker_ip`
+  dapat bernilai `null` dan tidak boleh disimpulkan dari `claimed_ip`.
