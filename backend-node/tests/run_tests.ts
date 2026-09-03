@@ -67,7 +67,7 @@ async function main() {
 
     try {
         await runGamingModeTests();
-        passed += 4;
+        passed += 7;
     } catch (err: any) {
         console.error('❌ Gaming Mode Test Failed:', err);
         failed++;

@@ -35,6 +35,7 @@ function makeManager() {
     const python: any = new EventEmitter();
     let seq = 0;
     const startCalls: any[] = [];
+    const stopCalls: string[] = [];
     python.startSpoof = async (
         victimIp: string, _vmac: string, _gip: string, _gmac: string,
         speedLimit: number, _v6?: string, _g6?: string, blackhole?: boolean
@@ -42,7 +43,7 @@ function makeManager() {
         startCalls.push({ victimIp, speedLimit, blackhole });
         return `sess-${victimIp}-${++seq}`;
     };
-    python.stopSpoof = async (_sid: string) => { /* noop */ };
+    python.stopSpoof = async (sid: string) => { stopCalls.push(sid); };
     python.toggleGamingMode = async (enabled: boolean, mode: string, targetPingMs: number) => ({
         is_enabled: enabled, mode, target_ping_ms: targetPingMs,
         ping_ms: 18, jitter_ms: 1, packet_loss_pct: 0, uptime_seconds: 0, timestamp: Date.now()
@@ -54,7 +55,7 @@ function makeManager() {
     };
 
     const dm = new DeviceManager(python as any, db as any);
-    return { dm, python, db, startCalls };
+    return { dm, python, db, startCalls, stopCalls };
 }
 
 export async function runGamingModeTests() {
@@ -146,4 +147,67 @@ export async function runGamingModeTests() {
         assert.strictEqual(late.speed_limit, 100, 'perangkat baru pulih ke 100 setelah OFF');
         console.log('  ✓ Perangkat baru saat gaming aktif ikut di-throttle lalu pulih');
     }
+
+    // Test 5 (Lifecycle): saat disable, sesi dihentikan via sessionId tersimpan MESKI
+    // perangkat sudah hilang dari daftar (disconnect) -> tidak ada sesi bocor.
+    {
+        const { dm, stopCalls } = makeManager();
+        const gw = makeDevice({ ip: '192.168.1.1', mac: '00:00:00:00:00:01', is_gateway: true });
+        const t1 = makeDevice({ ip: '192.168.1.130', mac: 'f0:0d:00:00:01:30', speed_limit: 100 });
+        (dm as any).devices.set(gw.ip, gw);
+        (dm as any).devices.set(t1.ip, t1);
+
+        await dm.toggleGamingMode(true, 'auto_airtime', 25);
+        const sid = t1.session_id;
+        assert.ok(sid, 'perangkat harus punya session_id setelah di-throttle');
+
+        // Simulasi perangkat menghilang dari daftar (disconnect) TANPA sempat dibersihkan.
+        (dm as any).devices.delete(t1.ip);
+
+        await dm.toggleGamingMode(false);
+        assert.ok(stopCalls.includes(sid as string),
+            'disable harus menghentikan sesi via sessionId tersimpan walau perangkat sudah hilang');
+        console.log('  ✓ Lifecycle: sesi dihentikan via sessionId tersimpan saat disable meski perangkat hilang');
+    }
+
+    // Test 6 (Reconnect): perangkat yang putus saat gaming -> entri dibersihkan (_stopGamingSession),
+    // saat online lagi ter-throttle kembali (tidak lagi terkunci entri basi).
+    {
+        const { dm, stopCalls, startCalls } = makeManager();
+        const gw = makeDevice({ ip: '192.168.1.1', mac: '00:00:00:00:00:01', is_gateway: true });
+        const t1 = makeDevice({ ip: '192.168.1.131', mac: 'f0:0d:00:00:01:31', speed_limit: 100 });
+        (dm as any).devices.set(gw.ip, gw);
+        (dm as any).devices.set(t1.ip, t1);
+
+        await dm.toggleGamingMode(true, 'auto_airtime', 25);
+        const firstSid = t1.session_id as string;
+
+        // Disconnect: bersihkan sesi gaming untuk MAC ini.
+        await (dm as any)._stopGamingSession(t1.mac.toLowerCase());
+        assert.ok(stopCalls.includes(firstSid), 'sesi harus dihentikan saat disconnect');
+        assert.ok(!(dm as any).gamingManaged.has(t1.mac.toLowerCase()), 'entri MAC harus dibersihkan saat disconnect');
+
+        // Reconnect (MAC sama): harus ter-throttle lagi.
+        const before = startCalls.length;
+        await (dm as any)._maybeApplyGamingToNewDevice(t1);
+        assert.ok(startCalls.length > before, 'perangkat yang reconnect saat gaming aktif harus di-throttle lagi');
+        console.log('  ✓ Reconnect: entri MAC dibersihkan saat disconnect; ter-throttle lagi saat kembali');
+    }
+
+    // Test 7 (Race guard): sweep re-apply scan tidak men-throttle apa pun bila gaming sudah non-aktif.
+    {
+        const { dm, startCalls } = makeManager();
+        const gw = makeDevice({ ip: '192.168.1.1', mac: '00:00:00:00:00:01', is_gateway: true });
+        const t1 = makeDevice({ ip: '192.168.1.132', mac: 'f0:0d:00:00:01:32', speed_limit: 100 });
+        (dm as any).devices.set(gw.ip, gw);
+        (dm as any).devices.set(t1.ip, t1);
+
+        // Gaming TIDAK aktif -> sweep harus no-op (mensimulasikan disable yang mendahului scan).
+        (dm as any).gamingActive = false;
+        const before = startCalls.length;
+        await (dm as any)._reapplyGamingSweep(gw);
+        assert.strictEqual(startCalls.length, before, 'sweep tidak boleh throttle saat gamingActive=false');
+        console.log('  ✓ Race guard: sweep scan no-op saat gaming non-aktif (tak throttle setelah disable)');
+    }
+
 }

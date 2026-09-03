@@ -69,8 +69,10 @@ export class DeviceManager extends EventEmitter {
     private inFlightScan: Promise<Device[]> | null = null;
     private dhcpScanDebounceTimer: NodeJS.Timeout | null = null;
     private offlineCooldownTimers: Map<string, NodeJS.Timeout> = new Map();
-    // Perangkat yang dikelola Gaming Mode + limit sebelumnya agar bisa dipulihkan tepat.
-    private gamingManaged: Map<string, { priorLimit: number; hadSession: boolean }> = new Map();
+    // Perangkat yang dikelola Gaming Mode, DIKUNCI per-MAC (lowercase) agar tahan ganti-IP.
+    // Menyimpan limit sebelumnya (untuk pemulihan tepat) + sessionId aktif (agar sesi bisa
+    // dihentikan saat disable/disconnect meski objek device sudah hilang dari daftar).
+    private gamingManaged: Map<string, { priorLimit: number; hadSession: boolean; sessionId?: string }> = new Map();
     // Status Gaming Mode agar throttle bisa idempoten (re-enter/ganti mode) dan diterapkan
     // ke perangkat yang baru online selagi mode aktif.
     private gamingActive: boolean = false;
@@ -164,6 +166,8 @@ export class DeviceManager extends EventEmitter {
                     for (const [ipKey, dev] of this.devices.entries()) {
                         if (dev.mac.toLowerCase() === normMac) {
                             dev.is_online = false;
+                            // Bersihkan sesi Gaming Mode agar tak bocor & reconnect ter-throttle lagi.
+                            await this._stopGamingSession(normMac);
                             if (dev.ip) {
                                 dev.last_ip = dev.ip;
                                 this.devices.delete(ipKey);
@@ -579,6 +583,8 @@ export class DeviceManager extends EventEmitter {
                     const prev = prevByMac.get(dev.mac.toLowerCase());
                     if (prev && prev.is_online) {
                         console.log(`🔌 [DeviceManager] Device disconnected: ${dev.ip || dev.last_ip || '-'} (${dev.mac})`);
+                        // Bersihkan sesi Gaming Mode agar tak bocor & agar reconnect ter-throttle lagi.
+                        await this._stopGamingSession(dev.mac.toLowerCase());
                         if (prev.ip) {
                             this.devices.delete(prev.ip);
                         }
@@ -768,12 +774,9 @@ export class DeviceManager extends EventEmitter {
 
             // 3. Gaming Mode: throttle perangkat yang baru terdeteksi online selagi mode aktif,
             // agar isolasi airtime tetap menyeluruh untuk perangkat yang bergabung belakangan.
+            // Diserialisasi (runExclusive) + recheck gamingActive agar tak balapan dgn disable.
             if (this.gamingActive && gateway) {
-                for (const dev of Array.from(this.devices.values())) {
-                    if (dev.is_gateway || dev.is_self || !dev.is_online) continue;
-                    if (this.gamingManaged.has(dev.ip)) continue;
-                    await this._applyGamingToDevice(dev, gateway);
-                }
+                await this._reapplyGamingSweep(gateway);
             }
 
             this.emit('devicesUpdated', Array.from(this.devices.values()));
@@ -1443,12 +1446,21 @@ export class DeviceManager extends EventEmitter {
                 // Pulihkan seluruh perangkat yang dikelola oleh Gaming Mode ke kondisi semula
                 this.gamingActive = false;
                 console.log(`🎮 [GAMING MODE NONAKTIF] Memulihkan ${this.gamingManaged.size} perangkat yang dikelola Gaming Mode...`);
-                for (const [ip, meta] of Array.from(this.gamingManaged.entries())) {
-                    const dev = this.devices.get(ip);
-                    if (!dev || !dev.session_id) continue;
+                for (const [macKey, meta] of Array.from(this.gamingManaged.entries())) {
+                    // Cari device berdasarkan MAC; mungkin sudah hilang dari daftar (disconnect).
+                    let dev: Device | undefined;
+                    for (const d of this.devices.values()) {
+                        if (d.mac.toLowerCase() === macKey) { dev = d; break; }
+                    }
                     try {
-                        // Hentikan sesi BLACKHOLE gaming (restore ARP korban ke MAC asli).
-                        await this.python.stopSpoof(dev.session_id);
+                        // Hentikan sesi BLACKHOLE gaming via sessionId TERSIMPAN — bekerja walau
+                        // objek device sudah hilang (mencegah sesi bocor).
+                        const sidToStop = meta.sessionId || dev?.session_id;
+                        if (sidToStop) {
+                            await this.python.stopSpoof(sidToStop);
+                        }
+                        // Pemulihan state hanya bila device masih ada.
+                        if (!dev) continue;
                         dev.session_id = undefined;
 
                         if (meta.hadSession) {
@@ -1479,7 +1491,7 @@ export class DeviceManager extends EventEmitter {
                         this.devices.set(dev.ip, dev);
                         this.emit('deviceUpdated', dev);
                     } catch (err: any) {
-                        console.warn(`Notice memulihkan perangkat ${ip}:`, err.message);
+                        console.warn(`Notice memulihkan perangkat ${macKey}:`, err.message);
                     }
                 }
                 this.gamingManaged.clear();
@@ -1500,8 +1512,9 @@ export class DeviceManager extends EventEmitter {
      */
     private async _applyGamingToDevice(target: Device, gateway: Device): Promise<void> {
         if (target.is_gateway || target.is_self) return;
+        const macKey = target.mac.toLowerCase();
         try {
-            const already = this.gamingManaged.get(target.ip);
+            const already = this.gamingManaged.get(macKey);
             const priorLimit = already ? already.priorLimit : (target.speed_limit ?? 100);
             const hadSession = already ? already.hadSession : Boolean(target.session_id);
 
@@ -1524,7 +1537,7 @@ export class DeviceManager extends EventEmitter {
             target.session_id = sessionId;
             target.speed_limit = this.gamingTargetLimit;
             target.is_blocked = (this.gamingTargetLimit <= 0);
-            this.gamingManaged.set(target.ip, { priorLimit, hadSession });
+            this.gamingManaged.set(macKey, { priorLimit, hadSession, sessionId });
             this.devices.set(target.ip, target);
             this.emit('deviceUpdated', target);
         } catch (err: any) {
@@ -1539,10 +1552,41 @@ export class DeviceManager extends EventEmitter {
     private async _maybeApplyGamingToNewDevice(dev: Device): Promise<void> {
         if (!this.gamingActive) return;
         if (dev.is_gateway || dev.is_self || !dev.is_online) return;
-        if (this.gamingManaged.has(dev.ip)) return;
+        if (this.gamingManaged.has(dev.mac.toLowerCase())) return;
         const gateway = selectGateway(Array.from(this.devices.values()));
         if (!gateway) return;
         await this._applyGamingToDevice(dev, gateway);
+    }
+
+    /**
+     * Hentikan sesi Gaming Mode untuk satu MAC (dipakai saat perangkat disconnect).
+     * Menghentikan sesi Python via sessionId tersimpan lalu menghapus entri agar:
+     *  - sesi tak bocor (loop spoof Python berhenti), dan
+     *  - saat perangkat kembali online, ia di-throttle ulang (bukan terkunci entri basi).
+     */
+    private async _stopGamingSession(macKey: string): Promise<void> {
+        const gm = this.gamingManaged.get(macKey);
+        if (!gm) return;
+        if (gm.sessionId) {
+            try { await this.python.stopSpoof(gm.sessionId); } catch {}
+        }
+        this.gamingManaged.delete(macKey);
+    }
+
+    /**
+     * Terapkan throttle gaming ke semua perangkat online yang belum dikelola.
+     * Diserialisasi via runExclusive agar tak balapan dengan toggle/DHCP, dan mengecek
+     * ulang gamingActive agar tidak men-throttle perangkat SETELAH user menekan disable.
+     */
+    private async _reapplyGamingSweep(gateway: Device): Promise<void> {
+        await this.runExclusive(async () => {
+            if (!this.gamingActive) return;
+            for (const dev of Array.from(this.devices.values())) {
+                if (dev.is_gateway || dev.is_self || !dev.is_online) continue;
+                if (this.gamingManaged.has(dev.mac.toLowerCase())) continue;
+                await this._applyGamingToDevice(dev, gateway);
+            }
+        });
     }
 
 }
