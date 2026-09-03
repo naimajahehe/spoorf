@@ -29,6 +29,7 @@ class RedirectManager:
         self.spoofer = spoofer
         self.portal_server: Optional[CaptivePortalServer] = None
         self._sessions: Dict[str, Dict[str, Any]] = {}
+        self._partial_sessions: Dict[str, Dict[str, Any]] = {}
         self._lock = threading.Lock()
 
     def _get_controller_ip_and_mac(self):
@@ -82,12 +83,17 @@ class RedirectManager:
                 instagram_username = parts[1].split("/")[0].split("?")[0]
 
         with self._lock:
-            # Jika sudah ada sesi aktif untuk IP ini, hentikan terlebih dahulu
             if victim_ip in self._sessions:
-                self._stop_session_unlocked(victim_ip)
+                raise SpoofError(
+                    f"Sesi redirect untuk {victim_ip} masih aktif; hentikan sebelum memulai ulang"
+                )
+
+            if victim_ip in self._partial_sessions:
+                self._stop_partial_session_unlocked(victim_ip)
 
             interface = self.spoofer._interface
             portal_started = False
+            portal_restore_target = None
             arp_session_id = None
             dns_spoofer = None
 
@@ -102,6 +108,10 @@ class RedirectManager:
                     portal_started = True
                     self.portal_server.start()
                 else:
+                    portal_restore_target = (
+                        self.portal_server.redirect_url,
+                        self.portal_server.instagram_username,
+                    )
                     self.portal_server.update_target(redirect_url, instagram_username)
 
                 # B. Jalankan ARP Spoofing Kontinu khusus Mode Redirect (is_redirect=True)
@@ -128,26 +138,28 @@ class RedirectManager:
                     gateway_ip=gateway_ip
                 )
                 dns_spoofer.start()
-            except Exception:
-                if dns_spoofer is not None:
-                    try:
-                        dns_spoofer.stop()
-                    except Exception as rollback_error:
-                        logger.debug(f"Notice rolling back DNS spoofer: {rollback_error}")
-                if arp_session_id is not None:
-                    try:
-                        self.spoofer.stop(arp_session_id)
-                    except Exception as rollback_error:
-                        logger.debug(f"Notice rolling back ARP session: {rollback_error}")
-                if portal_started and self.portal_server is not None:
-                    portal = self.portal_server
-                    try:
-                        portal.stop()
-                    except Exception as rollback_error:
-                        logger.debug(f"Notice rolling back Portal Server: {rollback_error}")
-                    finally:
-                        if self.portal_server is portal:
-                            self.portal_server = None
+            except Exception as startup_error:
+                partial_session = {
+                    "victim_ip": victim_ip,
+                    "victim_mac": victim_mac,
+                    "gateway_ip": gateway_ip,
+                    "gateway_mac": gateway_mac,
+                    "redirect_url": redirect_url,
+                    "instagram_username": instagram_username,
+                    "arp_session_id": arp_session_id,
+                    "dns_spoofer": dns_spoofer,
+                    "portal_restore_target": portal_restore_target,
+                    "stop_portal_when_clean": portal_started,
+                    "started_at": time.time(),
+                }
+                self._partial_sessions[victim_ip] = partial_session
+                try:
+                    self._stop_partial_session_unlocked(victim_ip)
+                except SpoofError as rollback_error:
+                    raise SpoofError(
+                        f"Redirect startup gagal: {startup_error}; "
+                        f"rollback belum selesai: {rollback_error}"
+                    ) from startup_error
                 raise
 
             # Simpan state sesi
@@ -175,51 +187,127 @@ class RedirectManager:
 
     def _stop_session_unlocked(self, victim_ip: str):
         """Hentikan satu sesi tanpa mengambil lock lagi (internal)."""
-        session = self._sessions.pop(victim_ip, None)
+        session = self._sessions.get(victim_ip)
         if not session:
             return
 
-        # 1. Hentikan DNS Spoofer
+        self._cleanup_session_unlocked(victim_ip, session, partial=False)
+        self._sessions.pop(victim_ip, None)
+        logger.info(f"🏁 [Redirect Manager] Sesi redirect untuk {victim_ip} dihentikan.")
+
+    def _stop_partial_session_unlocked(self, victim_ip: str):
+        """Retry cleanup resources retained from a failed redirect startup."""
+        session = self._partial_sessions.get(victim_ip)
+        if not session:
+            return
+
+        self._cleanup_session_unlocked(victim_ip, session, partial=True)
+        self._partial_sessions.pop(victim_ip, None)
+
+    def _cleanup_session_unlocked(
+        self,
+        victim_ip: str,
+        session: Dict[str, Any],
+        *,
+        partial: bool,
+    ):
+        errors = []
+
         dns = session.get("dns_spoofer")
         if dns:
             try:
                 dns.stop()
             except Exception as e:
-                logger.debug(f"Notice stopping DNS spoofer: {e}")
+                errors.append(f"DNS cleanup failed: {e}")
+            else:
+                session["dns_spoofer"] = None
 
-        # 2. Hentikan ARP Spoofing
         arp_sid = session.get("arp_session_id")
         if arp_sid:
             try:
                 self.spoofer.stop(arp_sid)
             except Exception as e:
-                logger.debug(f"Notice stopping ARP session: {e}")
+                errors.append(f"ARP cleanup failed: {e}")
+            else:
+                session["arp_session_id"] = None
 
-        # 3. Jika tidak ada sesi redirect tersisa, matikan Portal Server port 80
-        if len(self._sessions) == 0 and self.portal_server:
+        portal_restore_target = session.get("portal_restore_target")
+        if portal_restore_target and self.portal_server:
             try:
-                self.portal_server.stop()
+                self.portal_server.update_target(*portal_restore_target)
             except Exception as e:
-                logger.debug(f"Notice stopping Portal Server: {e}")
-            self.portal_server = None
+                errors.append(f"Portal target restore failed: {e}")
+            else:
+                session["portal_restore_target"] = None
 
-        logger.info(f"🏁 [Redirect Manager] Sesi redirect untuk {victim_ip} dihentikan.")
+        other_sessions = any(
+            candidate is not session
+            for sessions in (self._sessions, self._partial_sessions)
+            for candidate in sessions.values()
+        )
+        should_stop_portal = session.get("stop_portal_when_clean", not partial)
+        if should_stop_portal and not other_sessions and self.portal_server:
+            portal = self.portal_server
+            try:
+                portal.stop()
+            except Exception as e:
+                errors.append(f"Portal cleanup failed: {e}")
+            else:
+                if self.portal_server is portal:
+                    self.portal_server = None
+                session["stop_portal_when_clean"] = False
+
+        if errors:
+            raise SpoofError(
+                f"Gagal membersihkan redirect {victim_ip}: {'; '.join(errors)}"
+            )
 
     def stop_redirect(self, victim_ip: str):
         """Hentikan sesi redirect untuk target IP."""
         with self._lock:
-            if victim_ip not in self._sessions:
+            if (
+                victim_ip not in self._sessions
+                and victim_ip not in self._partial_sessions
+            ):
                 logger.warning(f"Sesi redirect {victim_ip} tidak ditemukan.")
                 return False
-            self._stop_session_unlocked(victim_ip)
+
+            errors = []
+            if victim_ip in self._sessions:
+                try:
+                    self._stop_session_unlocked(victim_ip)
+                except SpoofError as e:
+                    errors.append(str(e))
+            if victim_ip in self._partial_sessions:
+                try:
+                    self._stop_partial_session_unlocked(victim_ip)
+                except SpoofError as e:
+                    errors.append(str(e))
+
+            if errors:
+                raise SpoofError("; ".join(errors))
             return True
 
     def stop_all(self):
         """Hentikan semua sesi redirect yang aktif."""
         with self._lock:
+            errors = []
             victim_ips = list(self._sessions.keys())
             for ip in victim_ips:
-                self._stop_session_unlocked(ip)
+                try:
+                    self._stop_session_unlocked(ip)
+                except SpoofError as e:
+                    errors.append(str(e))
+
+            partial_ips = list(self._partial_sessions.keys())
+            for ip in partial_ips:
+                try:
+                    self._stop_partial_session_unlocked(ip)
+                except SpoofError as e:
+                    errors.append(str(e))
+
+            if errors:
+                raise SpoofError("; ".join(errors))
 
     def get_sessions(self) -> Dict[str, Any]:
         """Dapatkan ringkasan seluruh sesi redirect yang aktif."""

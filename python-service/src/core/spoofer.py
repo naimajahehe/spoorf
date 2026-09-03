@@ -544,6 +544,7 @@ class ARPSpoofer:
                 raise SessionNotFoundError(f"Session {session_id} tidak ditemukan")
 
             session = dict(self._sessions[session_id])
+            was_restore_retry = bool(session.get('restore_failed'))
             self._sessions[session_id]['active'] = False
             self._sessions[session_id]['restore_failed'] = False
             stop_event = self._stop_events.get(session_id)
@@ -572,8 +573,16 @@ class ARPSpoofer:
         if v6_id and restore_error is None:
             try:
                 ndp_spoofer.stop_spoof(v6_id)
+            except SessionNotFoundError as e:
+                if not was_restore_retry:
+                    restore_error = e
             except Exception as e:
                 restore_error = e
+            if restore_error is None:
+                with self._lock:
+                    retained = self._sessions.get(session_id)
+                    if retained is not None:
+                        retained['v6_session_id'] = None
 
         # Operasi restorasi jaringan DI LUAR LOCK (tidak memblokir thread atau API lain!)
         if restore_error is None:
@@ -608,15 +617,18 @@ class ARPSpoofer:
                 for current in self._sessions.values()
             )
             no_active_sessions = not self._running
+            no_sessions_left = not self._sessions
             forward_target = self._compute_forward_target()
             iface_name = self._win_interface_name
 
         if no_active_sessions and self._fwd_touched:
-            # Sesi terakhir berhenti -> pulihkan forwarding ke baseline asli.
+            # Pulihkan baseline segera untuk safety, tetapi pertahankan snapshot
+            # selama masih ada sesi gagal yang perlu direstore ulang.
             set_ip_forwarding(bool(self._fwd_was_enabled), iface_name)
-            self._fwd_touched = False
-            self._fwd_was_enabled = None
-        else:
+            if no_sessions_left:
+                self._fwd_touched = False
+                self._fwd_was_enabled = None
+        elif not no_active_sessions:
             set_ip_forwarding(forward_target, iface_name)
 
         if restore_error is not None:
@@ -645,15 +657,21 @@ class ARPSpoofer:
             logger.debug(f"Notice stopping all IPv6: {e}")
 
         with self._lock:
-            self._running = False
+            self._running = any(
+                session.get('active', False)
+                for session in self._sessions.values()
+            )
+            no_active_sessions = not self._running
+            no_sessions_left = not self._sessions
             iface_name = self._win_interface_name
 
         # Pulihkan IP forwarding ke BASELINE asli (bukan hard-set True) agar host
         # operator kembali seperti sebelum aplikasi dijalankan (pola bettercap).
-        if self._fwd_touched:
+        if no_active_sessions and self._fwd_touched:
             set_ip_forwarding(bool(self._fwd_was_enabled), iface_name)
-            self._fwd_touched = False
-            self._fwd_was_enabled = None
+            if no_sessions_left:
+                self._fwd_touched = False
+                self._fwd_was_enabled = None
         logger.info("✅ Semua session dihentikan")
 
     def get_sessions(self) -> Dict[str, Dict[str, Any]]:
