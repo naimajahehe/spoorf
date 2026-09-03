@@ -6,6 +6,12 @@ import { DatabaseService } from './database';
 import { LicenseManager, FeatureLimitError, FeatureLockedError } from './licenseManager';
 import { Device } from '../types';
 
+// Retensi: perangkat tamu yang offline lebih lama dari ini diarsipkan (bukan dihapus)
+// agar daftar mencerminkan jaringan nyata, bukan riwayat semua tamu. Lihat
+// DatabaseService.archiveStaleDevices() untuk pagar pengamannya (blokir/alias/sesi/profil).
+export const STALE_DEVICE_RETENTION_DAYS = 14;
+const RETENTION_SWEEP_INTERVAL_MS = 24 * 60 * 60 * 1000; // sekali per hari
+
 export function isIpInSameSubnet(ip: string, gatewayIp: string): boolean {
     if (!ip || !gatewayIp) return true;
     try {
@@ -65,6 +71,11 @@ export class DeviceManager extends EventEmitter {
     private offlineCooldownTimers: Map<string, NodeJS.Timeout> = new Map();
     // Perangkat yang dikelola Gaming Mode + limit sebelumnya agar bisa dipulihkan tepat.
     private gamingManaged: Map<string, { priorLimit: number; hadSession: boolean }> = new Map();
+    // Status Gaming Mode agar throttle bisa idempoten (re-enter/ganti mode) dan diterapkan
+    // ke perangkat yang baru online selagi mode aktif.
+    private gamingActive: boolean = false;
+    private gamingMode: string = 'auto_airtime';
+    private gamingTargetLimit: number = 100;
     // Mutex serialisasi: operasi tulis perangkat (block/unblock/throttle/redirect)
     // diserialisasi untuk mencegah race condition antar-aksi pengguna.
     private opChain: Promise<void> = Promise.resolve();
@@ -220,6 +231,8 @@ export class DeviceManager extends EventEmitter {
                     this.db.updateDeviceIp(dev.mac, data.ip).catch(console.warn);
                     this.emit('deviceUpdated', dev);
                     this.emit('devicesUpdated', Array.from(this.devices.values()));
+                    // Perangkat aktif kembali via DHCP selagi Gaming Mode aktif -> ikut di-throttle.
+                    await this._maybeApplyGamingToNewDevice(dev);
                 } else {
                     isNewDevice = true;
                 }
@@ -356,6 +369,13 @@ export class DeviceManager extends EventEmitter {
         console.log(`📦 Loaded ${storedDevices.length} persistent devices from SQLite`);
         this.emit('devicesUpdated', storedDevices);
 
+        // Retention Sweep: arsipkan perangkat tamu yang lama hilang saat startup, lalu harian.
+        await this._runRetentionSweep();
+        const retentionTimer = setInterval(() => {
+            this._runRetentionSweep().catch(err => console.warn('Notice retention sweep:', err.message));
+        }, RETENTION_SWEEP_INTERVAL_MS);
+        retentionTimer.unref();
+
         // Background Liveness Watchdog: Periodically verify active network state every 25 seconds
         const watchdogTimer = setInterval(() => {
             if (!this.scanning && this.devices.size > 0) {
@@ -363,6 +383,22 @@ export class DeviceManager extends EventEmitter {
             }
         }, 25000);
         watchdogTimer.unref();
+    }
+
+    /**
+     * Arsipkan perangkat basi via DB (berpagar: hanya tamu anonim yang lama offline),
+     * lalu segarkan memori & UI bila ada yang terarsip agar daftar tak menampilkan hantu.
+     */
+    private async _runRetentionSweep(): Promise<void> {
+        const archived = await this.db.archiveStaleDevices(STALE_DEVICE_RETENTION_DAYS);
+        if (archived > 0) {
+            const fresh = await this.db.getAllDevices();
+            const freshMacs = new Set(fresh.map(d => d.mac.toLowerCase()));
+            for (const [ipKey, dev] of this.devices.entries()) {
+                if (!freshMacs.has(dev.mac.toLowerCase())) this.devices.delete(ipKey);
+            }
+            this.emit('devicesUpdated', fresh);
+        }
     }
 
     private debouncedScan(delayMs: number = 8000) {
@@ -727,6 +763,16 @@ export class DeviceManager extends EventEmitter {
                     } catch (err) {
                         console.error(`❌ [AUTO-THROTTLE] Failed to auto-throttle ${target.ip}:`, err);
                     }
+                }
+            }
+
+            // 3. Gaming Mode: throttle perangkat yang baru terdeteksi online selagi mode aktif,
+            // agar isolasi airtime tetap menyeluruh untuk perangkat yang bergabung belakangan.
+            if (this.gamingActive && gateway) {
+                for (const dev of Array.from(this.devices.values())) {
+                    if (dev.is_gateway || dev.is_self || !dev.is_online) continue;
+                    if (this.gamingManaged.has(dev.ip)) continue;
+                    await this._applyGamingToDevice(dev, gateway);
                 }
             }
 
@@ -1380,6 +1426,10 @@ export class DeviceManager extends EventEmitter {
             if (enabled) {
                 // Auto-Isolate / Auto-Throttle seluruh perangkat LAN yang sedang online (kecuali Gateway & This PC)
                 const targetLimit = mode === 'blackhole_priority' ? 0 : 20;
+                this.gamingActive = true;
+                this.gamingMode = mode;
+                this.gamingTargetLimit = targetLimit;
+
                 const onlineTargets = Array.from(this.devices.values()).filter(d =>
                     !d.is_gateway && !d.is_self && d.is_online
                 );
@@ -1387,39 +1437,11 @@ export class DeviceManager extends EventEmitter {
                 console.log(`🎮 [GAMING MODE AKTIF] Mengisolasi otomatis ${onlineTargets.length} perangkat LAN (Mode: ${mode}, Limit: ${targetLimit}%)...`);
 
                 for (const target of onlineTargets) {
-                    try {
-                        // Rekam kondisi SEBELUM diubah gaming, agar bisa dipulihkan tepat.
-                        const priorLimit = target.speed_limit ?? 100;
-                        const hadSession = Boolean(target.session_id);
-
-                        // Gaming SELALU memakai sesi BLACKHOLE (racun ke MAC hantu, bukan MAC operator)
-                        // agar trafik perangkat lain jatuh di AP & tidak membanjiri Wi-Fi operator (anti-lag).
-                        // Hentikan sesi manual lama (self_mac) dulu bila ada.
-                        if (hadSession && target.session_id) {
-                            try { await this.python.stopSpoof(target.session_id); } catch {}
-                        }
-                        const sessionId = await this.python.startSpoof(
-                            target.ip,
-                            target.mac,
-                            gateway.ip,
-                            gateway.mac,
-                            targetLimit,
-                            target.ipv6_link_local,
-                            gateway.ipv6_link_local,
-                            true  // blackhole
-                        );
-                        target.session_id = sessionId;
-                        target.speed_limit = targetLimit;
-                        target.is_blocked = (targetLimit <= 0);
-                        this.gamingManaged.set(target.ip, { priorLimit, hadSession });
-                        this.devices.set(target.ip, target);
-                        this.emit('deviceUpdated', target);
-                    } catch (err: any) {
-                        console.warn(`Notice mengisolasi perangkat ${target.ip} untuk Gaming Mode:`, err.message);
-                    }
+                    await this._applyGamingToDevice(target, gateway);
                 }
             } else {
                 // Pulihkan seluruh perangkat yang dikelola oleh Gaming Mode ke kondisi semula
+                this.gamingActive = false;
                 console.log(`🎮 [GAMING MODE NONAKTIF] Memulihkan ${this.gamingManaged.size} perangkat yang dikelola Gaming Mode...`);
                 for (const [ip, meta] of Array.from(this.gamingManaged.entries())) {
                     const dev = this.devices.get(ip);
@@ -1467,6 +1489,60 @@ export class DeviceManager extends EventEmitter {
             this.emit('gamingStatusChanged', result);
             return result;
         });
+    }
+
+    /**
+     * Terapkan throttle Gaming Mode ke SATU perangkat (sesi blackhole).
+     * Baseline (limit sebelum gaming) hanya direkam SEKALI di gamingManaged; pemanggilan
+     * ulang (ganti target ping / ganti mode / perangkat baru) tidak menimpanya, sehingga
+     * pemulihan saat gaming OFF selalu kembali ke nilai asli — bukan ke 20%/0% milik gaming.
+     * Wajib dipanggil dari konteks yang sudah runExclusive.
+     */
+    private async _applyGamingToDevice(target: Device, gateway: Device): Promise<void> {
+        if (target.is_gateway || target.is_self) return;
+        try {
+            const already = this.gamingManaged.get(target.ip);
+            const priorLimit = already ? already.priorLimit : (target.speed_limit ?? 100);
+            const hadSession = already ? already.hadSession : Boolean(target.session_id);
+
+            // Gaming SELALU memakai sesi BLACKHOLE (racun ke MAC hantu, bukan MAC operator)
+            // agar trafik perangkat lain jatuh di AP & tidak membanjiri Wi-Fi operator (anti-lag).
+            // Hentikan sesi lama (manual atau gaming sebelumnya) dulu bila ada.
+            if (target.session_id) {
+                try { await this.python.stopSpoof(target.session_id); } catch {}
+            }
+            const sessionId = await this.python.startSpoof(
+                target.ip,
+                target.mac,
+                gateway.ip,
+                gateway.mac,
+                this.gamingTargetLimit,
+                target.ipv6_link_local,
+                gateway.ipv6_link_local,
+                true  // blackhole
+            );
+            target.session_id = sessionId;
+            target.speed_limit = this.gamingTargetLimit;
+            target.is_blocked = (this.gamingTargetLimit <= 0);
+            this.gamingManaged.set(target.ip, { priorLimit, hadSession });
+            this.devices.set(target.ip, target);
+            this.emit('deviceUpdated', target);
+        } catch (err: any) {
+            console.warn(`Notice mengisolasi perangkat ${target.ip} untuk Gaming Mode:`, err.message);
+        }
+    }
+
+    /**
+     * Bila Gaming Mode aktif, throttle perangkat yang BARU online (belum dikelola gaming).
+     * Dipanggil dari jalur yang sudah runExclusive (scan merge, liveness, dhcp).
+     */
+    private async _maybeApplyGamingToNewDevice(dev: Device): Promise<void> {
+        if (!this.gamingActive) return;
+        if (dev.is_gateway || dev.is_self || !dev.is_online) return;
+        if (this.gamingManaged.has(dev.ip)) return;
+        const gateway = selectGateway(Array.from(this.devices.values()));
+        if (!gateway) return;
+        await this._applyGamingToDevice(dev, gateway);
     }
 
 }

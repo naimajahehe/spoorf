@@ -4,6 +4,7 @@ import { runApiRoutesTests } from './api_routes.test';
 import { runPythonBridgeTests } from './unit_pythonBridge.test';
 import { runLicenseUnitTests } from './unit_license.test';
 import { runSecurityTests } from './unit_security.test';
+import { runGamingModeTests } from './unit_gamingMode.test';
 
 async function main() {
     console.log('=====================================================');
@@ -61,6 +62,14 @@ async function main() {
         passed += 4;
     } catch (err: any) {
         console.error('❌ Security Guard Test Failed:', err);
+        failed++;
+    }
+
+    try {
+        await runGamingModeTests();
+        passed += 4;
+    } catch (err: any) {
+        console.error('❌ Gaming Mode Test Failed:', err);
         failed++;
     }
 

@@ -734,4 +734,39 @@ export async function runDeviceManagerTests() {
         console.log('  ✓ Gaming Mode: Ultra-Low Latency & Anti-Jitter state management verified');
     }
 
+    // Test 21: init() runs a retention sweep at startup — stale anonymous device archived,
+    // fresh online device preserved.
+    {
+        const { DatabaseService } = await import('../src/services/database');
+        const { DeviceManager } = await import('../src/services/deviceManager');
+        const { PythonBridge } = await import('../src/services/pythonBridge');
+
+        const db = new DatabaseService(':memory:');
+        await db.init();
+
+        const mk = (ip: string, mac: string): Device => ({
+            ip, mac, hostname: 'Guest', vendor: 'Generic', device_type: 'Mobile', os: 'Android',
+            rtt_ms: 10, open_ports: [], services: [], is_blocked: false, is_online: true, is_gateway: false
+        });
+        await db.syncScanResults([
+            mk('192.168.1.20', 'aa:11:11:11:11:11'), // stale-to-be
+            mk('192.168.1.21', 'bb:22:22:22:22:22'), // fresh online
+        ]);
+        // Backdate first device to 30 days offline (test-only internal access).
+        (db as any).db.prepare(
+            "UPDATE devices SET is_online = 0, last_seen = datetime('now','localtime','-30 days') WHERE LOWER(mac) = LOWER(?)"
+        ).run('aa:11:11:11:11:11');
+
+        const dm = new DeviceManager(new PythonBridge(), db);
+        await dm.init();
+
+        const visible = await db.getAllDevices();
+        const macs = new Set(visible.map(d => d.mac.toLowerCase()));
+        assert.ok(!macs.has('aa:11:11:11:11:11'), 'init() must archive the stale anonymous device at startup');
+        assert.ok(macs.has('bb:22:22:22:22:22'), 'init() must keep the fresh online device');
+
+        await db.close();
+        console.log('  ✓ Retention: DeviceManager.init() runs startup archive sweep (stale archived, fresh kept)');
+    }
+
 }
