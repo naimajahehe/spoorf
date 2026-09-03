@@ -14,7 +14,7 @@ import {
     ExternalLink
 } from 'lucide-react';
 import { Device } from '../types';
-import { getApiUrl } from '../api/client';
+import { apiFetch } from '../api/client';
 import { getResolvedDeviceName } from '../lib/deviceSort';
 import { cn } from '../lib/utils';
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from './motion/select';
@@ -114,7 +114,7 @@ export const DeepPortScanModal: FC<Props> = ({
 
         try {
             const ports = getPortsForPreset();
-            const res = await fetch(`${getApiUrl()}/api/devices/${selectedIp}/scan-ports`, {
+            const res = await apiFetch(`/api/devices/${selectedIp}/scan-ports`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ ports })

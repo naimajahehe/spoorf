@@ -17,7 +17,7 @@ import {
     HelpCircle
 } from 'lucide-react';
 import { Device } from '../types';
-import { getApiUrl } from '../api/client';
+import { apiFetch } from '../api/client';
 import { cn } from '../lib/utils';
 
 interface Props {
@@ -76,7 +76,7 @@ export const DhcpReconnectModal: FC<Props> = ({
         setIsOptimizing(true);
         setStatusMessage('Menyiarkan DHCP & Multicast Wake-up Burst...');
         try {
-            const res = await fetch(`${getApiUrl()}/api/network/optimize-dhcp`, {
+            const res = await apiFetch('/api/network/optimize-dhcp', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' }
             });

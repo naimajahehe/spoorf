@@ -68,7 +68,7 @@ import { Device, L7Flow, CAStatus, DnsSpoofRule, SniffedCredential, BettercapSta
 
 const deviceLabel = (d: Partial<Device> | undefined | null): string =>
     (d?.alias && d.alias.trim()) || (d?.hostname && d.hostname.trim()) || d?.ip || 'Perangkat';
-import { apiClient } from '../api/client';
+import { apiClient, apiFetch } from '../api/client';
 import { resolveBackendUrl } from '../lib/backend';
 import { dedupeDevicesByMac } from '../lib/deviceSort';
 
@@ -638,29 +638,29 @@ export function useWebSocket() {
         // atas — duplikatnya dihapus agar tidak set state dua kali per event.)
 
         // Initial fetch gateway status and logs
-        fetch(`${WS_URL}/api/gateway/status`)
+        apiFetch('/api/gateway/status')
             .then(r => r.json())
             .then(d => { if (d && d.data) setGatewayStatus(d.data); })
             .catch(() => {});
 
-        fetch(`${WS_URL}/api/gateway/logs?limit=50`)
+        apiFetch('/api/gateway/logs?limit=50')
             .then(r => r.json())
             .then(d => { if (d && d.logs) setGatewayDnsLogs(d.logs); })
             .catch(() => {});
 
         // Initial fetch CA info and L7 flows
-        fetch(`${WS_URL}/api/interceptor/ca`)
+        apiFetch('/api/interceptor/ca')
             .then(r => r.json())
             .then(d => { if (d && d.data) setCaStatus(d.data); })
             .catch(() => {});
 
-        fetch(`${WS_URL}/api/interceptor/flows?limit=100`)
+        apiFetch('/api/interceptor/flows?limit=100')
             .then(r => r.json())
             .then(d => { if (d && d.flows) setL7Flows(d.flows); })
             .catch(() => {});
 
         // Initial fetch Bettercap data
-        fetch(`${WS_URL}/api/bettercap/dns/rules`)
+        apiFetch('/api/bettercap/dns/rules')
             .then(r => r.json())
             .then(d => {
                 if (d && d.rules) setBettercapDnsRules(d.rules);
@@ -669,12 +669,12 @@ export function useWebSocket() {
             })
             .catch(() => {});
 
-        fetch(`${WS_URL}/api/bettercap/credentials?limit=100`)
+        apiFetch('/api/bettercap/credentials?limit=100')
             .then(r => r.json())
             .then(d => { if (d && d.credentials) setSniffedCredentials(d.credentials); })
             .catch(() => {});
 
-        fetch(`${WS_URL}/api/bettercap/status`)
+        apiFetch('/api/bettercap/status')
             .then(r => r.json())
             .then(d => { if (d) setBettercapStatus(d); })
             .catch(() => {});
@@ -754,7 +754,7 @@ export function useWebSocket() {
         if (socket && socket.connected) {
             socket.emit('updateDeviceAlias', { mac, alias });
         } else {
-            fetch(`${WS_URL}/api/devices/${encodeURIComponent(mac)}/alias`, {
+            apiFetch(`/api/devices/${encodeURIComponent(mac)}/alias`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ alias })
@@ -766,7 +766,7 @@ export function useWebSocket() {
         if (socket && socket.connected) {
             socket.emit('setSpeedLimit', { ip, limit });
         } else {
-            fetch(`${WS_URL}/api/devices/${encodeURIComponent(ip)}/limit`, {
+            apiFetch(`/api/devices/${encodeURIComponent(ip)}/limit`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ limit })
@@ -776,7 +776,7 @@ export function useWebSocket() {
 
     const checkWifi = async () => {
         try {
-            const res = await fetch(`${WS_URL}/api/wifi`);
+            const res = await apiFetch('/api/wifi');
             if (res.ok) {
                 const data = await res.json();
                 if (data && data.wifi) {
@@ -794,7 +794,7 @@ export function useWebSocket() {
 
     const quickReauth = async () => {
         try {
-            const res = await fetch(`${WS_URL}/api/network/quick-reauth`, {
+            const res = await apiFetch('/api/network/quick-reauth', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' }
             });
@@ -811,7 +811,7 @@ export function useWebSocket() {
 
     const startTransparentGateway = async (ip: string, gatewayIp?: string) => {
         try {
-            const res = await fetch(`${WS_URL}/api/gateway/start`, {
+            const res = await apiFetch('/api/gateway/start', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ ip, gatewayIp })
@@ -830,7 +830,7 @@ export function useWebSocket() {
 
     const stopTransparentGateway = async (ip: string) => {
         try {
-            const res = await fetch(`${WS_URL}/api/gateway/stop`, {
+            const res = await apiFetch('/api/gateway/stop', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ ip })
@@ -847,7 +847,7 @@ export function useWebSocket() {
 
     const addSinkholeDomain = async (domain: string) => {
         try {
-            const res = await fetch(`${WS_URL}/api/gateway/sinkhole`, {
+            const res = await apiFetch('/api/gateway/sinkhole', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ domain })
@@ -867,7 +867,7 @@ export function useWebSocket() {
 
     const removeSinkholeDomain = async (domain: string) => {
         try {
-            const res = await fetch(`${WS_URL}/api/gateway/sinkhole/${encodeURIComponent(domain)}`, {
+            const res = await apiFetch(`/api/gateway/sinkhole/${encodeURIComponent(domain)}`, {
                 method: 'DELETE'
             });
             if (!res.ok) {
@@ -885,7 +885,7 @@ export function useWebSocket() {
 
     const startRedirect = async (ip: string, redirectUrl: string, username: string, gatewayIp?: string) => {
         try {
-            const res = await fetch(`${WS_URL}/api/devices/${encodeURIComponent(ip)}/redirect`, {
+            const res = await apiFetch(`/api/devices/${encodeURIComponent(ip)}/redirect`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -906,7 +906,7 @@ export function useWebSocket() {
 
     const stopRedirect = async (ip: string) => {
         try {
-            const res = await fetch(`${WS_URL}/api/devices/${encodeURIComponent(ip)}/stop-redirect`, {
+            const res = await apiFetch(`/api/devices/${encodeURIComponent(ip)}/stop-redirect`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' }
             });
@@ -924,7 +924,7 @@ export function useWebSocket() {
         try {
             // Kosongkan daftar lokal hanya bila server mengonfirmasi. Tanpa cek ini
             // log tampak terhapus lalu muncul lagi saat refresh berikutnya.
-            const res = await fetch(`${WS_URL}/api/gateway/logs`, { method: 'DELETE' });
+            const res = await apiFetch('/api/gateway/logs', { method: 'DELETE' });
             if (!res.ok) {
                 throw new Error(`Gagal menghapus log DNS gateway (HTTP ${res.status})`);
             }
@@ -937,7 +937,7 @@ export function useWebSocket() {
 
     const clearL7Flows = async () => {
         try {
-            const res = await fetch(`${WS_URL}/api/interceptor/flows`, { method: 'DELETE' });
+            const res = await apiFetch('/api/interceptor/flows', { method: 'DELETE' });
             if (!res.ok) {
                 throw new Error(`Gagal menghapus L7 flows (HTTP ${res.status})`);
             }
