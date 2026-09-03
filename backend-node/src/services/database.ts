@@ -347,6 +347,41 @@ export class DatabaseService {
         }
     }
 
+    /**
+     * Retensi: arsipkan (is_archived=1, bukan hapus — reversibel) perangkat "tamu"
+     * yang sudah lama hilang, agar daftar mencerminkan jaringan nyata dan bukan
+     * riwayat semua tamu. Diproteksi ketat: HANYA baris yang offline, last_seen lebih
+     * tua dari `thresholdDays`, DAN tanpa niat pengguna atau identitas yang berharga:
+     *   - tidak diblokir (is_blocked=0) dan tanpa sesi spoof (session_id NULL)
+     *   - tanpa alias, profile_id, maupun candidate_profile_id
+     *   - bukan operator (is_self) maupun gateway
+     * Dengan begitu blokir, nama, profil fingerprint, dan sesi aktif tidak pernah hilang.
+     * Mengembalikan jumlah baris yang diarsipkan.
+     */
+    async archiveStaleDevices(thresholdDays: number = 14): Promise<number> {
+        await this.init();
+        const stmt = this.db.prepare(`
+            UPDATE devices
+            SET is_archived = 1
+            WHERE (is_online = 0 OR is_online IS NULL)
+              AND last_seen IS NOT NULL
+              AND last_seen < datetime('now', 'localtime', '-${Math.max(0, Math.floor(thresholdDays))} days')
+              AND (is_blocked IS NULL OR is_blocked = 0)
+              AND session_id IS NULL
+              AND (alias IS NULL OR alias = '')
+              AND profile_id IS NULL
+              AND candidate_profile_id IS NULL
+              AND (is_self IS NULL OR is_self = 0)
+              AND (is_gateway IS NULL OR is_gateway = 0)
+              AND (is_archived IS NULL OR is_archived = 0)
+        `);
+        const result = stmt.run();
+        if (result.changes > 0) {
+            console.log(`🧹 [Retention] Mengarsipkan ${result.changes} perangkat tamu yang offline > ${thresholdDays} hari.`);
+        }
+        return result.changes;
+    }
+
     async getAllDevices(): Promise<Device[]> {
         await this.init();
         const query = `

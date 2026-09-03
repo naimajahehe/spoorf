@@ -513,6 +513,56 @@ export async function runDatabaseTests() {
         await db.close();
         console.log('  ✓ SQLite Engine: In-memory SQLite DatabaseService CRUD, Auto-Reblock, and JSON arrays verified');
     }
+
+    // Test 13: archiveStaleDevices — only anonymous long-offline devices are archived,
+    // configured/recent/online devices are protected.
+    {
+        const { DatabaseService } = await import('../src/services/database');
+        const db = new DatabaseService(':memory:');
+        await db.init();
+
+        const mk = (ip: string, mac: string, hostname: string): Device => ({
+            ip, mac, hostname, vendor: 'Generic', device_type: 'Mobile', os: 'Android',
+            rtt_ms: 10, open_ports: [], services: [], is_blocked: false, is_online: true, is_gateway: false
+        });
+
+        // Seed 5 devices online.
+        await db.syncScanResults([
+            mk('192.168.1.10', 'aa:00:00:00:00:0a', 'Guest-Anon'),      // A: anonymous, will be stale-offline -> ARCHIVE
+            mk('192.168.1.11', 'bb:00:00:00:00:0b', 'Blocked-Old'),     // B: blocked, stale-offline    -> KEEP
+            mk('192.168.1.12', 'cc:00:00:00:00:0c', 'Named-Old'),       // C: aliased, stale-offline     -> KEEP
+            mk('192.168.1.13', 'dd:00:00:00:00:0d', 'Online-Now'),      // D: anonymous, still online    -> KEEP
+            mk('192.168.1.14', 'ee:00:00:00:00:0e', 'Guest-Recent'),    // G: anonymous, recently offline-> KEEP
+        ]);
+
+        // Configure user-intent on B (block+session) and C (alias).
+        await db.setDeviceBlocked('bb:00:00:00:00:0b', true, 'sess_b');
+        await db.setDeviceAlias('cc:00:00:00:00:0c', 'Laptop Kantor');
+
+        // Deterministically backdate A, B, C to 30 days ago & offline (test-only internal access).
+        const backdate = (db as any).db.prepare(
+            "UPDATE devices SET is_online = 0, last_seen = datetime('now','localtime','-30 days') WHERE LOWER(mac) = LOWER(?)"
+        );
+        for (const mac of ['aa:00:00:00:00:0a', 'bb:00:00:00:00:0b', 'cc:00:00:00:00:0c']) backdate.run(mac);
+        // G: offline but recent (last_seen = now).
+        await db.setDeviceOnlineStatus('ee:00:00:00:00:0e', false);
+
+        // Archive devices stale beyond 14 days.
+        const archivedCount = await db.archiveStaleDevices(14);
+
+        const visible = await db.getAllDevices();
+        const visibleMacs = new Set(visible.map(d => d.mac.toLowerCase()));
+
+        assert.strictEqual(archivedCount, 1, 'Exactly 1 device (anonymous stale-offline) must be archived');
+        assert.ok(!visibleMacs.has('aa:00:00:00:00:0a'), 'A: anonymous stale-offline must be archived (hidden)');
+        assert.ok(visibleMacs.has('bb:00:00:00:00:0b'), 'B: blocked device must NOT be archived (block state protected)');
+        assert.ok(visibleMacs.has('cc:00:00:00:00:0c'), 'C: aliased device must NOT be archived (user name protected)');
+        assert.ok(visibleMacs.has('dd:00:00:00:00:0d'), 'D: online device must NOT be archived');
+        assert.ok(visibleMacs.has('ee:00:00:00:00:0e'), 'G: recently-offline device must NOT be archived (within grace window)');
+
+        await db.close();
+        console.log('  ✓ Retention: archiveStaleDevices archives only anonymous long-offline devices; blocked/aliased/online/recent protected');
+    }
 }
 
 
