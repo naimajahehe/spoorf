@@ -74,6 +74,18 @@ import { dedupeDevicesByMac } from '../lib/deviceSort';
 
 const WS_URL = resolveBackendUrl(import.meta.env.VITE_WS_URL);
 
+async function fetchApiJson<T>(path: string): Promise<T> {
+    const response = await apiFetch(path);
+    if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        const message = typeof data?.error === 'string'
+            ? data.error
+            : `HTTP ${response.status}`;
+        throw new Error(`${path}: ${message}`);
+    }
+    return response.json() as Promise<T>;
+}
+
 export function useWebSocket() {
     const [socket, setSocket] = useState<Socket | null>(null);
     const [devices, setDevices] = useState<Device[]>([]);
@@ -148,6 +160,7 @@ export function useWebSocket() {
     });
     const deviceRef = useRef<Device[]>([]);
     const pendingAliasRef = useRef<Map<string, string | undefined>>(new Map());
+    const refreshGenerationRef = useRef(0);
 
     // ===== Live Activity Feed (event kronologis manusiawi untuk halaman Aktivitas) =====
     const [activityLog, setActivityLog] = useState<ActivityEvent[]>([]);
@@ -169,37 +182,118 @@ export function useWebSocket() {
     }, []);
     const clearActivityLog = useCallback(() => setActivityLog([]), []);
 
+    const detectGateway = useCallback((deviceList: Device[]) => {
+        const gatewayDevice = deviceList.find(d => d.is_gateway === true)
+            ?? deviceList.find(d => d.ip.endsWith('.1') || d.ip.endsWith('.254'))
+            ?? null;
+        setGateway(gatewayDevice);
+    }, []);
+
+    const applyWifiSnapshot = useCallback((wifi: Partial<WifiInfo> | undefined | null) => {
+        if (!wifi) return;
+        const isConn = Boolean(wifi.connected);
+        const ssid = wifi.ssid || '';
+        setWifiInfo({
+            connected: isConn,
+            ssid,
+            signal: wifi.signal || '',
+            interface_type: wifi.interface_type || 'wifi',
+            state: wifi.state || (isConn ? 'connected' : 'disconnected')
+        });
+        if (isConn && ssid) {
+            try { localStorage.setItem('sentinel_last_ssid', ssid); } catch {}
+        }
+    }, []);
+
+    const refreshAuthoritativeState = useCallback(async () => {
+        const generation = ++refreshGenerationRef.current;
+        const applyCurrent = (update: () => void) => {
+            if (refreshGenerationRef.current === generation) update();
+        };
+
+        const requests = [
+            fetchApiJson<{ devices?: Device[] }>('/api/devices').then(data => {
+                if (!Array.isArray(data.devices)) return;
+                const cleanList = dedupeDevicesByMac(data.devices);
+                applyCurrent(() => {
+                    setDevices(cleanList);
+                    deviceRef.current = cleanList;
+                    detectGateway(cleanList);
+                });
+            }),
+            fetchApiJson<{ data?: GatewayStatusData }>('/api/gateway/status').then(data => {
+                if (data?.data) applyCurrent(() => setGatewayStatus(data.data!));
+            }),
+            fetchApiJson<{ logs?: GatewayDnsLog[] }>('/api/gateway/logs?limit=50').then(data => {
+                if (Array.isArray(data.logs)) applyCurrent(() => setGatewayDnsLogs(data.logs!));
+            }),
+            fetchApiJson<{ data?: CAStatus }>('/api/interceptor/ca').then(data => {
+                if (data?.data) applyCurrent(() => setCaStatus(data.data!));
+            }),
+            fetchApiJson<{ flows?: L7Flow[] }>('/api/interceptor/flows?limit=100').then(data => {
+                if (Array.isArray(data.flows)) applyCurrent(() => setL7Flows(data.flows!));
+            }),
+            fetchApiJson<{
+                rules?: DnsSpoofRule[];
+                spoof_all_enabled?: boolean;
+                spoof_all_address?: string;
+                default_ttl?: number;
+            }>('/api/bettercap/dns/rules').then(data => {
+                applyCurrent(() => {
+                    if (Array.isArray(data.rules)) setBettercapDnsRules(data.rules);
+                    if (typeof data.spoof_all_enabled === 'boolean') {
+                        setDnsSpoofAll({
+                            enabled: data.spoof_all_enabled,
+                            address: data.spoof_all_address || ''
+                        });
+                    }
+                    if (typeof data.default_ttl === 'number') setDnsTtl(data.default_ttl);
+                });
+            }),
+            fetchApiJson<{ credentials?: SniffedCredential[] }>('/api/bettercap/credentials?limit=100').then(data => {
+                if (Array.isArray(data.credentials)) applyCurrent(() => setSniffedCredentials(data.credentials!));
+            }),
+            fetchApiJson<BettercapStatus>('/api/bettercap/status').then(data => {
+                applyCurrent(() => setBettercapStatus(data));
+            }),
+            fetchApiJson<{ data?: GamingStatus }>('/api/gaming/status').then(data => {
+                if (data?.data) applyCurrent(() => setGamingStatus(data.data!));
+            }),
+            fetchApiJson<{ data?: any }>('/api/shield/status').then(data => {
+                if (data?.data) applyCurrent(() => setShieldStatus(data.data));
+            }),
+            fetchApiJson<{ data?: any[] }>('/api/shield/threats').then(data => {
+                if (Array.isArray(data.data)) applyCurrent(() => setShieldThreats(data.data!));
+            }),
+            fetchApiJson<{ wifi?: WifiInfo }>('/api/wifi').then(data => {
+                if (data?.wifi) applyCurrent(() => applyWifiSnapshot(data.wifi));
+            }),
+            fetchApiJson<AuthStatusResponse>('/api/auth/status').then(data => {
+                if (data?.license) applyCurrent(() => setAuthStatus(data));
+            })
+        ];
+
+        const results = await Promise.allSettled(requests);
+        if (refreshGenerationRef.current !== generation) return;
+
+        const failures = results.filter(result => result.status === 'rejected');
+        if (failures.length > 0) {
+            console.warn('Authoritative reconnect refresh partially failed:', failures);
+            setError('Koneksi tersambung, tetapi sebagian data gagal disegarkan. Coba sambungkan ulang.');
+        }
+    }, [applyWifiSnapshot, detectGateway]);
+
     useEffect(() => {
         // KEAMANAN (P1): kirim token bearer lokal (Electron) pada handshake bila ada.
         const apiToken = typeof window !== 'undefined' ? window.electronAPI?.apiToken : undefined;
         const newSocket = io(WS_URL, apiToken ? { auth: { token: apiToken } } : undefined);
         setSocket(newSocket);
 
-        // Fetch initial Auth & License Status
-        apiClient.getAuthStatus().then(res => {
-            if (res && res.license) setAuthStatus(res);
-        }).catch(() => {});
-
-        // Instant Parallel Initial Network Fetch
-        apiClient.getWifiInfo().then(res => {
-            if (res && res.wifi) {
-                const isConn = Boolean(res.wifi.connected);
-                setWifiInfo({
-                    connected: isConn,
-                    ssid: res.wifi.ssid || '',
-                    signal: res.wifi.signal || '',
-                    interface_type: res.wifi.interface_type || 'wifi',
-                    state: isConn ? 'connected' : 'disconnected'
-                });
-                if (isConn && res.wifi.ssid) {
-                    try { localStorage.setItem('sentinel_last_ssid', res.wifi.ssid); } catch {}
-                }
-            }
-        }).catch(() => {});
-
         newSocket.on('connect', () => {
             console.log('WebSocket connected to NetCut Sentinel Backend');
             setIsConnected(true);
+            setError(null);
+            void refreshAuthoritativeState();
         });
 
         newSocket.on('licenseStatus', (data: AuthStatusResponse) => {
@@ -209,6 +303,7 @@ export function useWebSocket() {
         });
 
         newSocket.on('disconnect', () => {
+            refreshGenerationRef.current += 1;
             setWifiInfo(prev => ({ ...prev, connected: false, state: 'disconnected' }));
             setTelemetry(prev => ({ ...prev, connected: false, download: 0, upload: 0, latency: 0 }));
             console.log('WebSocket disconnected');
@@ -425,6 +520,21 @@ export function useWebSocket() {
             setError(`Gagal membuka blokir ${data.ip || 'perangkat'}: ${data.error}`);
         });
 
+        newSocket.on('deleteError', (data: { error: string }) => {
+            console.error('Delete error:', data);
+            setError(`Gagal menghapus perangkat: ${data.error}`);
+        });
+
+        newSocket.on('speedLimitError', (data: { error: string; ip?: string }) => {
+            console.error('Speed limit error:', data);
+            setError(`Gagal mengatur batas kecepatan ${data.ip || 'perangkat'}: ${data.error}`);
+        });
+
+        newSocket.on('gamingError', (data: { error: string }) => {
+            console.error('Gaming mode error:', data);
+            setError(`Gagal mengubah status Mode Gaming: ${data.error}`);
+        });
+
         newSocket.on('aliasError', (data: { error: string; mac?: string }) => {
             console.error('Alias error:', data);
             setError(`Gagal memperbarui alias: ${data.error}`);
@@ -634,74 +744,11 @@ export function useWebSocket() {
             });
         });
 
-        // (listener 'licenseStatus' & fetch getAuthStatus awal sudah didaftarkan di
-        // atas — duplikatnya dihapus agar tidak set state dua kali per event.)
-
-        // Initial fetch gateway status and logs
-        apiFetch('/api/gateway/status')
-            .then(r => r.json())
-            .then(d => { if (d && d.data) setGatewayStatus(d.data); })
-            .catch(() => {});
-
-        apiFetch('/api/gateway/logs?limit=50')
-            .then(r => r.json())
-            .then(d => { if (d && d.logs) setGatewayDnsLogs(d.logs); })
-            .catch(() => {});
-
-        // Initial fetch CA info and L7 flows
-        apiFetch('/api/interceptor/ca')
-            .then(r => r.json())
-            .then(d => { if (d && d.data) setCaStatus(d.data); })
-            .catch(() => {});
-
-        apiFetch('/api/interceptor/flows?limit=100')
-            .then(r => r.json())
-            .then(d => { if (d && d.flows) setL7Flows(d.flows); })
-            .catch(() => {});
-
-        // Initial fetch Bettercap data
-        apiFetch('/api/bettercap/dns/rules')
-            .then(r => r.json())
-            .then(d => {
-                if (d && d.rules) setBettercapDnsRules(d.rules);
-                if (d && typeof d.spoof_all_enabled === 'boolean') setDnsSpoofAll({ enabled: d.spoof_all_enabled, address: d.spoof_all_address || '' });
-                if (d && typeof d.default_ttl === 'number') setDnsTtl(d.default_ttl);
-            })
-            .catch(() => {});
-
-        apiFetch('/api/bettercap/credentials?limit=100')
-            .then(r => r.json())
-            .then(d => { if (d && d.credentials) setSniffedCredentials(d.credentials); })
-            .catch(() => {});
-
-        apiFetch('/api/bettercap/status')
-            .then(r => r.json())
-            .then(d => { if (d) setBettercapStatus(d); })
-            .catch(() => {});
-
-        // Initial fetch Gaming Mode status
-        apiClient.getGamingStatus().then(d => { if (d?.data) setGamingStatus(d.data); }).catch(() => {});
-        // Initial fetch Sentinel Shield data
-        apiClient.getShieldStatus().then(d => { if (d?.data) setShieldStatus(d.data); }).catch(() => {});
-        apiClient.getShieldThreats().then(d => { if (d?.data) setShieldThreats(d.data); }).catch(() => {});
-
-        // Initial check Wi-Fi once on mount (ongoing updates delivered via WebSocket telemetryStream)
-        checkWifi();
-
         return () => {
+            refreshGenerationRef.current += 1;
             newSocket.close();
         };
-    }, []);
-
-    const detectGateway = (deviceList: Device[]) => {
-        let gw = deviceList.find(d => d.is_gateway === true);
-        if (!gw) {
-            gw = deviceList.find(d => d.ip.endsWith('.1') || d.ip.endsWith('.254'));
-        }
-        if (gw) {
-            setGateway(gw);
-        }
-    };
+    }, [pushActivity, refreshAuthoritativeState]);
 
     const clearError = useCallback(() => setError(null), []);
     const clearAutoReblocked = useCallback(() => setAutoReblockedEvent(null), []);
@@ -709,31 +756,41 @@ export function useWebSocket() {
     const clearRogueDhcpAlert = useCallback(() => setRogueDhcpAlert(null), []);
 
     const scan = () => {
-        if (socket && !isScanning) {
-            setIsScanning(true);
-            setError(null);
-            socket.emit('scan');
+        if (!socket?.connected) {
+            setError('Tidak dapat memindai jaringan saat koneksi backend terputus. Tunggu hingga tersambung lalu coba lagi.');
+            return;
         }
+        if (isScanning) return;
+        setIsScanning(true);
+        setError(null);
+        socket.emit('scan');
     };
 
     const block = (ip: string, gatewayIp: string) => {
-        if (socket) {
-            setError(null);
-            socket.emit('block', { ip, gatewayIp });
+        if (!socket?.connected) {
+            setError('Tidak dapat memblokir perangkat saat koneksi backend terputus. Tunggu hingga tersambung lalu coba lagi.');
+            return;
         }
+        setError(null);
+        socket.emit('block', { ip, gatewayIp });
     };
 
     const unblock = (ip: string) => {
-        if (socket) {
-            setError(null);
-            socket.emit('unblock', { ip });
+        if (!socket?.connected) {
+            setError('Tidak dapat membuka blokir saat koneksi backend terputus. Tunggu hingga tersambung lalu coba lagi.');
+            return;
         }
+        setError(null);
+        socket.emit('unblock', { ip });
     };
 
     const deleteDevice = (mac: string) => {
-        if (socket) {
-            socket.emit('deleteDevice', { mac });
+        if (!socket?.connected) {
+            setError('Tidak dapat menghapus perangkat saat koneksi backend terputus. Tunggu hingga tersambung lalu coba lagi.');
+            return;
         }
+        setError(null);
+        socket.emit('deleteDevice', { mac });
     };
 
     const updateAlias = (mac: string, alias: string) => {
@@ -762,34 +819,35 @@ export function useWebSocket() {
         }
     };
 
-    const setSpeedLimit = (ip: string, limit: number) => {
-        if (socket && socket.connected) {
+    const setSpeedLimit = async (ip: string, limit: number) => {
+        setError(null);
+        if (socket?.connected) {
             socket.emit('setSpeedLimit', { ip, limit });
         } else {
-            apiFetch(`/api/devices/${encodeURIComponent(ip)}/limit`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ limit })
-            }).catch(err => console.warn('Error setting speed limit via REST:', err));
+            try {
+                const response = await apiFetch(`/api/devices/${encodeURIComponent(ip)}/limit`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ limit })
+                });
+                if (!response.ok) {
+                    const data = await response.json().catch(() => ({}));
+                    throw new Error(data.error || `HTTP ${response.status}`);
+                }
+            } catch (err: any) {
+                console.warn('Error setting speed limit via REST:', err);
+                setError(`Gagal mengatur batas kecepatan ${ip}: ${err.message}`);
+            }
         }
     };
 
     const checkWifi = async () => {
         try {
-            const res = await apiFetch('/api/wifi');
-            if (res.ok) {
-                const data = await res.json();
-                if (data && data.wifi) {
-                    setWifiInfo({
-                        connected: Boolean(data.wifi.connected),
-                        ssid: data.wifi.ssid || '',
-                        signal: data.wifi.signal || '',
-                        state: data.wifi.state || (data.wifi.connected ? 'connected' : 'disconnected')
-                    });
-                    return;
-                }
-            }
-        } catch {}
+            const data = await fetchApiJson<{ wifi?: WifiInfo }>('/api/wifi');
+            if (data?.wifi) applyWifiSnapshot(data.wifi);
+        } catch (err) {
+            console.warn('Error checking Wi-Fi:', err);
+        }
     };
 
     const quickReauth = async () => {
@@ -1140,7 +1198,8 @@ export function useWebSocket() {
 
     const toggleGamingMode = async (enabled: boolean, mode: string = 'auto_airtime', target_ping_ms: number = 25.0) => {
         try {
-            if (socket && socket.connected) {
+            setError(null);
+            if (socket?.connected) {
                 socket.emit('toggleGamingMode', { enabled, mode, target_ping_ms });
             } else {
                 const res = await apiClient.toggleGamingMode(enabled, mode, target_ping_ms);

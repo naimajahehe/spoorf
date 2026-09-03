@@ -11,7 +11,7 @@ interface Props {
   totalHosts: number;
   blockedHosts: number;
   throttledHosts: number;
-  shieldStatus?: { enabled: boolean; mode: string };
+  shieldStatus?: { is_enabled: boolean; mode: string };
   shieldThreatsCount: number;
   onOpenNetCut: () => void;
   onOpenGateway: () => void;
@@ -67,11 +67,11 @@ export const DashboardWelcomeView: FC<Props> = ({
             Default Gateway
           </div>
           <div className="mt-1 text-2xl font-bold text-white tracking-tight font-mono">
-            {gateway?.ip || "192.168.110.1"}
+            {gateway?.ip || "Tidak terdeteksi"}
           </div>
-          <div className="mt-0.5 text-xs text-emerald-400 font-mono flex items-center gap-1.5">
-            <span className="size-1.5 rounded-full bg-emerald-400" />
-            Kebal / Protected
+          <div className={`mt-0.5 text-xs font-mono flex items-center gap-1.5 ${gateway ? "text-emerald-400" : "text-zinc-500"}`}>
+            <span className={`size-1.5 rounded-full ${gateway ? "bg-emerald-400" : "bg-zinc-600"}`} />
+            {gateway ? "Kebal / Protected" : "Belum tersedia"}
           </div>
         </div>
 
@@ -80,7 +80,7 @@ export const DashboardWelcomeView: FC<Props> = ({
             Sentinel Shield
           </div>
           <div className="mt-1 text-2xl font-bold text-white tracking-tight">
-            {shieldStatus?.enabled ? "Aktif" : "Standby"}
+            {shieldStatus?.is_enabled ? "Aktif" : "Standby"}
           </div>
           <div className="mt-0.5 text-xs text-zinc-400 font-mono">
             {shieldThreatsCount} Ancaman Dicegah

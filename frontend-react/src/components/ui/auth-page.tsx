@@ -12,7 +12,6 @@ import {
   KeyRound,
   Mail,
   Lock,
-  User,
   ShieldCheck,
   AlertCircle,
   CheckCircle2,
@@ -62,10 +61,8 @@ export const AuthPage: React.FC<AuthPageProps> = ({
   const [authMode, setAuthMode] = useState<"signin" | "license" | "signup">("signin");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [fullName, setFullName] = useState("");
   const [licenseKey, setLicenseKey] = useState("");
   const [rememberMachine, setRememberMachine] = useState(true);
-  const [agreeTerms, setAgreeTerms] = useState(true);
   const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -87,6 +84,9 @@ export const AuthPage: React.FC<AuthPageProps> = ({
         await onActivateKey(licenseKey.trim());
         setSuccessMessage("Lisensi PRO berhasil diaktivasi!");
         setTimeout(() => onClose?.(), 600);
+      } else if (authMode === "signup") {
+        setErrorMessage("Pendaftaran akun belum tersedia di aplikasi ini. Gunakan akun cloud yang sudah ada atau aktifkan kode lisensi.");
+        return;
       } else {
         if (!email.trim()) {
           setErrorMessage("Silakan masukkan alamat email.");
@@ -99,11 +99,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({
           return;
         }
         await onLogin(email.trim(), password);
-        setSuccessMessage(
-          authMode === "signup"
-            ? "Akun berhasil dibuat & sesi PRO aktif!"
-            : "Login berhasil! Sesi PRO dibuka."
-        );
+        setSuccessMessage("Login berhasil! Sesi PRO dibuka.");
         setTimeout(() => onClose?.(), 600);
       }
     } catch (err: any) {
@@ -145,7 +141,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({
               ? "Sign in to your account"
               : authMode === "license"
               ? "Activate license key"
-              : "Create an account"}
+              : "Pendaftaran belum tersedia"}
           </h3>
 
           <p className="mt-1.5 text-xs text-zinc-400">
@@ -156,11 +152,11 @@ export const AuthPage: React.FC<AuthPageProps> = ({
                   type="button"
                   onClick={() => {
                     setAuthMode("signup");
-                    setErrorMessage(null);
+                    setErrorMessage("Pendaftaran akun belum tersedia di aplikasi ini. Gunakan akun cloud yang sudah ada atau aktifkan kode lisensi.");
                   }}
                   className="font-medium text-zinc-200 hover:text-white underline underline-offset-4 cursor-pointer"
                 >
-                  Daftar gratis
+                  Info pendaftaran
                 </button>
               </>
             ) : authMode === "license" ? (
@@ -179,7 +175,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({
               </>
             ) : (
               <>
-                Sudah memiliki akun?{" "}
+                Pendaftaran akun cloud belum tersedia.{" "}
                 <button
                   type="button"
                   onClick={() => {
@@ -188,7 +184,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({
                   }}
                   className="font-medium text-zinc-200 hover:text-white underline underline-offset-4 cursor-pointer"
                 >
-                  Sign in
+                  Gunakan akun yang sudah ada
                 </button>
               </>
             )}
@@ -246,24 +242,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({
 
           {/* Form */}
           <form onSubmit={handleSubmit} className="mt-5 space-y-4">
-            {authMode === "signup" && (
-              <div className="space-y-1.5">
-                <Label htmlFor="fullname-input" className="text-xs font-medium text-zinc-300 flex items-center gap-1.5">
-                  <User size={13} className="text-zinc-400" />
-                  Nama Lengkap
-                </Label>
-                <Input
-                  id="fullname-input"
-                  type="text"
-                  placeholder="Budi Pratama"
-                  value={fullName}
-                  onChange={(e) => setFullName(e.target.value)}
-                  className="bg-white/[0.04] border-white/[0.1] text-white placeholder:text-zinc-500 h-10"
-                />
-              </div>
-            )}
-
-            {authMode !== "license" ? (
+            {authMode === "signin" ? (
               <>
                 <div className="space-y-1.5">
                   <Label htmlFor="email-input" className="text-xs font-medium text-zinc-300 flex items-center gap-1.5">
@@ -310,49 +289,31 @@ export const AuthPage: React.FC<AuthPageProps> = ({
                   </div>
                 </div>
 
-                {authMode === "signin" ? (
-                  <div className="flex items-center justify-between pt-1">
-                    <div
-                      onClick={() => setRememberMachine(!rememberMachine)}
-                      className="flex items-center gap-2.5 text-xs text-zinc-400 hover:text-zinc-200 cursor-pointer select-none"
-                    >
-                      <div className={`size-4 rounded border flex items-center justify-center transition-all ${
-                        rememberMachine
-                          ? "bg-white border-white text-black"
-                          : "bg-white/[0.04] border-white/[0.2] text-transparent hover:border-white/[0.4]"
-                      }`}>
-                        {rememberMachine && <Check size={11} className="stroke-[3] text-black" />}
-                      </div>
-                      <span>Ingat perangkat ini</span>
-                    </div>
-
-                    <button
-                      type="button"
-                      onClick={() => setAuthMode("license")}
-                      className="text-xs font-medium text-zinc-300 hover:text-white underline underline-offset-4 cursor-pointer"
-                    >
-                      Gunakan Key?
-                    </button>
-                  </div>
-                ) : (
+                <div className="flex items-center justify-between pt-1">
                   <div
-                    onClick={() => setAgreeTerms(!agreeTerms)}
-                    className="flex items-center gap-2.5 pt-1 text-xs text-zinc-400 hover:text-zinc-200 cursor-pointer select-none"
+                    onClick={() => setRememberMachine(!rememberMachine)}
+                    className="flex items-center gap-2.5 text-xs text-zinc-400 hover:text-zinc-200 cursor-pointer select-none"
                   >
                     <div className={`size-4 rounded border flex items-center justify-center transition-all ${
-                      agreeTerms
+                      rememberMachine
                         ? "bg-white border-white text-black"
                         : "bg-white/[0.04] border-white/[0.2] text-transparent hover:border-white/[0.4]"
                     }`}>
-                      {agreeTerms && <Check size={11} className="stroke-[3] text-black" />}
+                      {rememberMachine && <Check size={11} className="stroke-[3] text-black" />}
                     </div>
-                    <span>
-                      Saya menyetujui Ketentuan & Kebijakan Sentinel
-                    </span>
+                    <span>Ingat perangkat ini</span>
                   </div>
-                )}
+
+                  <button
+                    type="button"
+                    onClick={() => setAuthMode("license")}
+                    className="text-xs font-medium text-zinc-300 hover:text-white underline underline-offset-4 cursor-pointer"
+                  >
+                    Gunakan Key?
+                  </button>
+                </div>
               </>
-            ) : (
+            ) : authMode === "license" ? (
               <div className="space-y-3">
                 <div className="space-y-1.5">
                   <Label htmlFor="license-input" className="text-xs font-medium text-zinc-300 flex items-center gap-1.5">
@@ -377,6 +338,10 @@ export const AuthPage: React.FC<AuthPageProps> = ({
                   </span>
                 </div>
               </div>
+            ) : (
+              <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/20 text-xs text-amber-200 leading-relaxed">
+                Pendaftaran akun belum tersedia di aplikasi ini. Silakan masuk dengan akun cloud yang sudah ada atau gunakan kode lisensi.
+              </div>
             )}
 
             <Button
@@ -398,7 +363,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({
                   ? "Sign In ke Cloud"
                   : authMode === "license"
                   ? "Aktivasi Lisensi PRO"
-                  : "Buat Akun Baru"}
+                  : "Pendaftaran Belum Tersedia"}
               </span>
             </Button>
           </form>
