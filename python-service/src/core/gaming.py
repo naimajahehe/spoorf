@@ -7,6 +7,7 @@ Menyediakan pengoptimalan jaringan Layer-2 otomatis untuk gaming kompetitif:
 3. Sub-Second Jitter & Latency Watchdog: Mengukur latensi real-time (ms), variasi jitter, dan packet loss.
 """
 
+import re
 import time
 import math
 import random
@@ -16,6 +17,30 @@ import collections
 from typing import Dict, Any, List, Optional, Callable
 from .network import get_current_gateway, get_network_info, is_valid_private_ip
 from ..utils.logger import logger
+
+# Ambil RTT ICMP asli dari output `ping` Windows. Menangkap English ("time=34ms",
+# "time<1ms") maupun lokal Indonesia ("waktu=34ms", "waktu<1ms"). Nilai inilah
+# latensi jaringan sebenarnya — bukan wall-clock spawn subprocess yang membengkak
+# saat CPU sibuk (banyak thread spoof-loop) dan membuat ping tampak tinggi palsu.
+_PING_RTT_RE = re.compile(r"(?:time|waktu)\s*([=<])\s*(\d+)\s*ms", re.IGNORECASE)
+
+
+def parse_ping_rtt_ms(stdout: str) -> Optional[float]:
+    """Kembalikan RTT (ms) dari output ping, atau None bila tak ada balasan.
+
+    Untuk "time<1ms" kembalikan 1.0 (batas atas sub-milidetik) agar tetap masuk akal.
+    """
+    if not stdout:
+        return None
+    m = _PING_RTT_RE.search(stdout)
+    if not m:
+        return None
+    op, val = m.group(1), float(m.group(2))
+    if op == '<':
+        # "<1ms" -> pakai nilainya sebagai batas atas (mis. 1.0), minimal 0.5.
+        return max(0.5, val)
+    return max(0.5, val)
+
 
 class GamingEngine:
     """
@@ -105,9 +130,14 @@ class GamingEngine:
         }
 
     def _measure_realtime_ping(self, target_ip: str) -> Optional[float]:
-        """Ukur latensi ke host target dengan fast single ping (~350ms timeout)."""
+        """Ukur latensi ke host target dengan fast single ping (~350ms timeout).
+
+        Latensi diambil dari nilai ICMP asli (time=/waktu=) pada output ping —
+        BUKAN wall-clock mengelilingi spawn subprocess. Wall-clock membengkak
+        drastis saat CPU sibuk oleh banyak thread spoof-loop Gaming Mode, sehingga
+        dulu membuat ping tampak sangat tinggi padahal jaringan baik-baik saja.
+        """
         try:
-            t0 = time.time()
             p = subprocess.run(
                 ["ping", "-n", "1", "-w", "350", target_ip],
                 capture_output=True,
@@ -115,10 +145,9 @@ class GamingEngine:
                 timeout=1.0,
                 creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0)  # cegah kedip konsol Windows
             )
-            stdout = p.stdout
-            if "TTL=" in stdout or "Reply from" in stdout or "Menerima balasan" in stdout:
-                rtt = (time.time() - t0) * 1000.0
-                return max(0.5, rtt)
+            rtt = parse_ping_rtt_ms(p.stdout)
+            if rtt is not None:
+                return rtt
         except Exception:
             pass
         return None

@@ -1,6 +1,6 @@
 import unittest
 import time
-from src.core.gaming import GamingEngine
+from src.core.gaming import GamingEngine, parse_ping_rtt_ms
 
 class TestGamingEngine(unittest.TestCase):
     def setUp(self):
@@ -9,6 +9,28 @@ class TestGamingEngine(unittest.TestCase):
 
     def tearDown(self):
         self.engine.toggle(False)
+
+    # ===== Ping RTT parser (akar masalah "ping tinggi saat gaming") =====
+    # Ping harus diambil dari nilai ICMP asli (time=/waktu=) di output ping, BUKAN
+    # wall-clock mengelilingi spawn subprocess — yang membengkak saat CPU sibuk
+    # (banyak thread spoof-loop) dan membuat ping tampak tinggi palsu.
+    def test_parse_ping_rtt_english(self):
+        out = ("Pinging 1.1.1.1 with 32 bytes of data:\n"
+               "Reply from 1.1.1.1: bytes=32 time=34ms TTL=54\n")
+        self.assertEqual(parse_ping_rtt_ms(out), 34.0)
+
+    def test_parse_ping_rtt_sub_millisecond(self):
+        out = "Reply from 192.168.1.1: bytes=32 time<1ms TTL=64\n"
+        self.assertEqual(parse_ping_rtt_ms(out), 1.0)
+
+    def test_parse_ping_rtt_indonesian_locale(self):
+        out = ("Menerima balasan dari 1.1.1.1: bita=32 waktu=41ms TTL=54\n")
+        self.assertEqual(parse_ping_rtt_ms(out), 41.0)
+
+    def test_parse_ping_rtt_timeout_returns_none(self):
+        out = ("Pinging 1.1.1.1 with 32 bytes of data:\n"
+               "Request timed out.\n")
+        self.assertIsNone(parse_ping_rtt_ms(out))
 
     def test_initial_state(self):
         status = self.engine.get_status()
