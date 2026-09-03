@@ -1,25 +1,11 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef, type CSSProperties } from 'react';
 import type { FC } from 'react';
-import { motion } from 'framer-motion';
-import {
-    Gamepad2,
-    Zap,
-    Activity,
-    Gauge,
-    ShieldCheck,
-    CheckCircle2,
-    Radio,
-    Flame,
-    Sliders,
-    Sparkles,
-    Check,
-    Smartphone,
-    Laptop,
-    Tv,
-    ShieldAlert
-} from 'lucide-react';
+import { Play, Square, Radio, Flame, Check } from 'lucide-react';
 import { Device, GamingStatus, GamingTelemetry } from '../types';
 import { cn } from '../lib/utils';
+import { LiveLineChart } from '@/components/charts/live-line-chart';
+import { LiveLine } from '@/components/charts/live-line';
+import { LiveYAxis } from '@/components/charts/live-y-axis';
 
 interface Props {
     status: GamingStatus;
@@ -28,343 +14,364 @@ interface Props {
     onToggle: (enabled: boolean, mode?: string, target_ping_ms?: number) => Promise<void>;
 }
 
+// ── Palet sinyal (fungsional: warna = kondisi terukur, bukan hias) ──────────────
+const SIGNAL = '#37e0a0';   // sehat: di dalam target
+const WATCH = '#f5b544';    // mendekati ambang
+const CRITICAL = '#ff5c7a'; // di atas ambang / ada packet loss
+
+const MAX_SAMPLES = 60; // ~60 detik jejak
+
+type Health = 'good' | 'watch' | 'critical';
+type Point = { time: number; value: number };
+
+function healthOf(ping: number, target: number, loss: number): Health {
+    if (loss > 0 || ping > target * 1.5) return 'critical';
+    if (ping > target) return 'watch';
+    return 'good';
+}
+
+const HEALTH_COLOR: Record<Health, string> = { good: SIGNAL, watch: WATCH, critical: CRITICAL };
+const HEALTH_WORD: Record<Health, string> = { good: 'stabil', watch: 'mendekati batas', critical: 'tidak stabil' };
+
+function fmtUptime(sec: number): string {
+    if (!sec || sec < 0) return '00:00';
+    const s = Math.floor(sec % 60);
+    const m = Math.floor(sec / 60) % 60;
+    const h = Math.floor(sec / 3600);
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return h > 0 ? `${pad(h)}:${pad(m)}:${pad(s)}` : `${pad(m)}:${pad(s)}`;
+}
+
+// ── Mode isolasi (backend: auto_airtime = 20%, blackhole_priority = 0%) ──────────
+const MODES = [
+    {
+        id: 'auto_airtime',
+        label: 'Smart Airtime Priority',
+        badge: '20%',
+        Icon: Radio,
+        desc: 'Batasi semua perangkat lain ke 20% — chat/WhatsApp ringan tetap jalan, sisa airtime Wi-Fi untuk game-mu.',
+    },
+    {
+        id: 'blackhole_priority',
+        label: 'Ultra Blackhole Isolation',
+        badge: '0%',
+        Icon: Flame,
+        desc: 'Putus total (0%) semua perangkat lain & buang download mereka ke Dead MAC di router.',
+    },
+] as const;
+
+type ModeId = (typeof MODES)[number]['id'];
+
+// Spinner kecil yang mengikuti warna teks (border-current) — dipakai saat loading.
+const Spinner: FC<{ className?: string }> = ({ className }) => (
+    <span
+        className={cn('inline-block rounded-full border-2 border-current border-t-transparent animate-spin', className)}
+        aria-hidden="true"
+    />
+);
+
 export const GamingModeWidget: FC<Props> = ({ status, telemetry, devices, onToggle }) => {
     const [isUpdating, setIsUpdating] = useState(false);
-    const [selectedMode, setSelectedMode] = useState<string>(status.mode || 'auto_airtime');
-    const [targetPing, setTargetPing] = useState<number>(status.target_ping_ms || 25.0);
+    const [targetPing, setTargetPing] = useState<number>(status.target_ping_ms || 25);
+    const [selectedMode, setSelectedMode] = useState<ModeId>(
+        (status.mode as ModeId) === 'blackhole_priority' ? 'blackhole_priority' : 'auto_airtime'
+    );
+    const [samples, setSamples] = useState<Point[]>([]);
+    const lastTsRef = useRef<number>(0);
 
-    const handleToggle = async () => {
+    const enabled = status.is_enabled;
+    const activeMode: ModeId = enabled
+        ? ((status.mode as ModeId) === 'blackhole_priority' ? 'blackhole_priority' : 'auto_airtime')
+        : selectedMode;
+    const ping = telemetry.ping_ms || status.ping_ms || 0;
+    const jitter = telemetry.jitter_ms || status.jitter_ms || 0;
+    const loss = telemetry.packet_loss_pct ?? status.packet_loss_pct ?? 0;
+
+    const health = healthOf(ping, targetPing, loss);
+    const traceColor = HEALTH_COLOR[health];
+
+    // Jumlah perangkat lain yang akan/ sedang dibatasi selama mode aktif.
+    const affected = devices.filter((d) => !d.is_gateway && !d.is_self && d.is_online).length;
+    const limitPct = activeMode === 'blackhole_priority' ? 0 : 20;
+
+    // Kumpulkan sampel ping tiap kali telemetri baru tiba (buffer bergulir).
+    useEffect(() => {
+        if (!enabled) return;
+        if (telemetry.timestamp === lastTsRef.current) return;
+        lastTsRef.current = telemetry.timestamp;
+        const v = telemetry.ping_ms;
+        if (typeof v !== 'number' || Number.isNaN(v)) return;
+        const t = telemetry.timestamp || Date.now() / 1000;
+        setSamples((prev) => [...prev, { time: t, value: v }].slice(-MAX_SAMPLES));
+    }, [telemetry.timestamp, telemetry.ping_ms, enabled]);
+
+    // Kosongkan jejak saat monitor dimatikan.
+    useEffect(() => {
+        if (!enabled) setSamples([]);
+    }, [enabled]);
+
+    // Loading jujur: bertahan sampai backend mengonfirmasi selesai. Backend mengirim
+    // status baru (timestamp berubah) begitu SELURUH proses sekuensial rampung; kita
+    // menahan loading sampai itu tiba, atau sampai pengaman waktu memaksa berhenti.
+    const pendingBaselineTsRef = useRef<number | null>(null);
+    const safetyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+    const clearPending = () => {
+        pendingBaselineTsRef.current = null;
+        if (safetyTimerRef.current) {
+            clearTimeout(safetyTimerRef.current);
+            safetyTimerRef.current = null;
+        }
+        setIsUpdating(false);
+    };
+
+    const runAction = async (fn: () => Promise<void>) => {
+        // Rekam timestamp status SAAT INI sebagai patokan; selesai = timestamp berganti.
+        pendingBaselineTsRef.current = status.timestamp ?? 0;
         setIsUpdating(true);
+        if (safetyTimerRef.current) clearTimeout(safetyTimerRef.current);
+        safetyTimerRef.current = setTimeout(clearPending, 20000); // pengaman 20 dtk
         try {
-            await onToggle(!status.is_enabled, selectedMode, targetPing);
-        } finally {
-            setTimeout(() => setIsUpdating(false), 300);
+            await fn();
+        } catch {
+            clearPending(); // gagal -> hentikan loading segera
         }
     };
 
-    const handleModeChange = async (mode: string) => {
+    // Status baru dari backend (timestamp berbeda) = proses benar-benar selesai.
+    useEffect(() => {
+        if (pendingBaselineTsRef.current === null) return;
+        if (status.timestamp !== pendingBaselineTsRef.current) clearPending();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [status.timestamp]);
+
+    // Bersihkan timer pengaman saat komponen dilepas.
+    useEffect(() => () => {
+        if (safetyTimerRef.current) clearTimeout(safetyTimerRef.current);
+    }, []);
+
+    const handleToggle = () => runAction(() => onToggle(!enabled, selectedMode, targetPing));
+
+    const handleModeChange = (mode: ModeId) => {
         setSelectedMode(mode);
-        if (status.is_enabled) {
-            setIsUpdating(true);
-            try {
-                await onToggle(true, mode, targetPing);
-            } finally {
-                setTimeout(() => setIsUpdating(false), 300);
-            }
-        }
+        if (enabled) runAction(() => onToggle(true, mode, targetPing));
     };
 
-    const handleTargetPingChange = async (val: number) => {
+    const handleTarget = (val: number) => {
         setTargetPing(val);
-        if (status.is_enabled) {
-            await onToggle(true, selectedMode, val);
-        }
+        if (enabled) runAction(() => onToggle(true, selectedMode, val));
     };
 
-    const ping = telemetry.ping_ms || status.ping_ms || 18.0;
-    const jitter = telemetry.jitter_ms || status.jitter_ms || 1.2;
-    const packetLoss = telemetry.packet_loss_pct ?? status.packet_loss_pct ?? 0.0;
-    const isOptimal = ping <= targetPing;
-
-    // Filter target non-gateway non-self
-    const otherLanDevices = devices.filter(d => !d.is_gateway && !d.is_self && d.is_online);
+    // Override variabel tema chart agar cocok dengan HUD gelap (mandiri dari .dark global).
+    const chartVars: CSSProperties = {
+        ['--chart-background' as string]: 'transparent',
+        ['--chart-grid' as string]: 'rgba(120,140,170,0.10)',
+        ['--chart-foreground' as string]: 'rgba(160,175,195,0.55)',
+        ['--chart-foreground-muted' as string]: 'rgba(160,175,195,0.45)',
+        ['--chart-label' as string]: 'rgba(160,175,195,0.45)',
+        ['--chart-crosshair' as string]: 'rgba(160,175,195,0.30)',
+        ['--chart-line-primary' as string]: traceColor,
+    } as CSSProperties;
 
     return (
-        <div className="w-full max-w-5xl mx-auto space-y-6">
-            {/* Header Hero Banner */}
-            <div className="relative overflow-hidden rounded-3xl border border-cyan-500/20 bg-gradient-to-br from-zinc-950 via-zinc-900/90 to-cyan-950/30 p-8 backdrop-blur-xl shadow-2xl">
-                <div className={cn(
-                    "absolute -right-20 -top-20 h-80 w-80 rounded-full blur-3xl pointer-events-none transition-all duration-700",
-                    status.is_enabled ? "bg-cyan-500/15" : "bg-zinc-700/10"
-                )} />
-                <div className={cn(
-                    "absolute -left-20 -bottom-20 h-80 w-80 rounded-full blur-3xl pointer-events-none transition-all duration-700",
-                    status.is_enabled ? "bg-emerald-500/15" : "bg-zinc-700/10"
-                )} />
-
-                <div className="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-6">
-                    <div className="space-y-3">
-                        <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-cyan-500/10 border border-cyan-500/20 text-cyan-400 text-xs font-semibold tracking-wide uppercase">
-                            <Gamepad2 className="w-3.5 h-3.5" />
-                            <span>Esports Ultra-Low Latency Engine</span>
-                        </div>
-                        <h1 className="text-3xl md:text-4xl font-extrabold text-white tracking-tight flex items-center gap-3">
-                            Mode Gaming Sentinel
-                            {status.is_enabled && (
-                                <motion.span
-                                    initial={{ scale: 0 }}
-                                    animate={{ scale: 1 }}
-                                    className="inline-flex items-center gap-1.5 px-3 py-0.5 rounded-full text-xs font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30"
-                                >
-                                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                                    AKTIF ({otherLanDevices.length} TARGET DIKENDALIKAN)
-                                </motion.span>
-                            )}
-                        </h1>
-                        <p className="text-sm text-zinc-400 max-w-xl leading-relaxed">
-                            Otomatis mengisolasi dan mengerem seluruh perangkat lain di jaringan Wi-Fi menggunakan teknik <span className="text-cyan-300 font-medium">Zero-Lag Dead MAC Blackhole</span> sehingga 100% antrean router dan gelombang radio Wi-Fi dikhususkan untuk game Anda.
-                        </p>
-                    </div>
-
-                    <div className="flex flex-col items-center gap-2 shrink-0">
-                        <button
-                            onClick={handleToggle}
-                            disabled={isUpdating}
-                            className={cn(
-                                "group relative flex items-center justify-center gap-3 px-8 py-4 rounded-2xl font-bold text-base transition-all duration-300 shadow-xl active:scale-95 disabled:opacity-50 cursor-pointer",
-                                status.is_enabled
-                                    ? "bg-gradient-to-r from-emerald-500 to-cyan-500 text-black hover:shadow-cyan-500/25 hover:shadow-2xl"
-                                    : "bg-zinc-800/80 hover:bg-zinc-700/80 text-white border border-zinc-700/50 hover:border-cyan-500/40"
-                            )}
-                        >
-                            <Zap className={cn("w-5 h-5 transition-transform group-hover:scale-110", status.is_enabled ? "fill-black" : "text-cyan-400")} />
-                            <span>{status.is_enabled ? "MATIKAN GAMING MODE" : "AKTIFKAN GAMING MODE"}</span>
-                        </button>
-                        <span className="text-[11px] text-zinc-500 font-medium">
-                            {status.is_enabled ? `Otomatis mengontrol ${otherLanDevices.length} perangkat LAN` : "1-Klik untuk mengisolasi seluruh perangkat lain"}
-                        </span>
-                    </div>
-                </div>
-            </div>
-
-            {/* Real-time Telemetry Radar Cards */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                <div className={cn(
-                    "relative overflow-hidden rounded-2xl border p-5 backdrop-blur-md transition-all duration-300",
-                    isOptimal
-                        ? "bg-zinc-900/70 border-emerald-500/30 shadow-emerald-500/5 shadow-lg"
-                        : "bg-zinc-900/70 border-amber-500/30 shadow-amber-500/5 shadow-lg"
-                )}>
-                    <div className="flex items-center justify-between text-zinc-400 text-xs font-semibold mb-2">
-                        <span className="flex items-center gap-1.5 uppercase tracking-wider">
-                            <Activity className="w-4 h-4 text-cyan-400" />
-                            Latensi Game (Ping)
-                        </span>
-                        <span className={cn(
-                            "px-2 py-0.5 rounded text-[10px] font-bold uppercase",
-                            isOptimal ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20" : "bg-amber-500/10 text-amber-400 border border-amber-500/20"
-                        )}>
-                            {isOptimal ? "Sangat Baik" : "Mendekati Batas"}
-                        </span>
-                    </div>
-                    <div className="flex items-baseline gap-2">
-                        <span className="text-4xl font-extrabold text-white tracking-tight font-mono">
-                            {ping.toFixed(1)}
-                        </span>
-                        <span className="text-sm font-semibold text-zinc-400">ms</span>
-                    </div>
-                    <p className="text-[11px] text-zinc-500 mt-2">
-                        Target ambang batas: <span className="text-zinc-300 font-mono font-medium">≤ {targetPing} ms</span>
+        <div className="w-full max-w-4xl mx-auto px-1 py-2 text-zinc-200">
+            {/* Judul + status */}
+            <div className="flex items-end justify-between gap-4 mb-5">
+                <div>
+                    <h1 className="text-2xl md:text-[28px] font-bold tracking-tight text-white leading-none">
+                        Mode Gaming Sentinel
+                    </h1>
+                    <p className="text-[13px] text-zinc-400 mt-2 max-w-lg leading-snug">
+                        Prioritaskan airtime Wi-Fi untuk game-mu. Saat aktif, perangkat lain di jaringan
+                        dibatasi lewat ARP agar antrean router lengang — sambil memantau ping ke internet real-time.
                     </p>
                 </div>
-
-                <div className="relative overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-900/70 p-5 backdrop-blur-md">
-                    <div className="flex items-center justify-between text-zinc-400 text-xs font-semibold mb-2">
-                        <span className="flex items-center gap-1.5 uppercase tracking-wider">
-                            <Gauge className="w-4 h-4 text-cyan-400" />
-                            Fluktuasi Jitter
-                        </span>
-                        <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-cyan-500/10 text-cyan-400 border border-cyan-500/20">
-                            Anti-Jitter
-                        </span>
-                    </div>
-                    <div className="flex items-baseline gap-2">
-                        <span className="text-4xl font-extrabold text-white tracking-tight font-mono">
-                            ±{jitter.toFixed(1)}
-                        </span>
-                        <span className="text-sm font-semibold text-zinc-400">ms</span>
-                    </div>
-                    <p className="text-[11px] text-zinc-500 mt-2">
-                        Variasi ping stabil (bebas lag spike tiba-tiba)
-                    </p>
-                </div>
-
-                <div className="relative overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-900/70 p-5 backdrop-blur-md">
-                    <div className="flex items-center justify-between text-zinc-400 text-xs font-semibold mb-2">
-                        <span className="flex items-center gap-1.5 uppercase tracking-wider">
-                            <ShieldCheck className="w-4 h-4 text-emerald-400" />
-                            Packet Loss
-                        </span>
-                        <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                            0% Loss
-                        </span>
-                    </div>
-                    <div className="flex items-baseline gap-2">
-                        <span className="text-4xl font-extrabold text-white tracking-tight font-mono">
-                            {packetLoss.toFixed(1)}%
-                        </span>
-                        <span className="text-sm font-semibold text-zinc-400">drop</span>
-                    </div>
-                    <p className="text-[11px] text-zinc-500 mt-2">
-                        Integritas koneksi ke router sempurna
-                    </p>
-                </div>
-            </div>
-
-            {/* Controlled LAN Devices List */}
-            <div className="rounded-2xl border border-zinc-800 bg-zinc-900/60 p-6 space-y-4">
-                <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2 text-sm font-bold text-white uppercase tracking-wider">
-                        <ShieldAlert className="w-4 h-4 text-cyan-400" />
-                        Daftar Perangkat LAN yang Dikendalikan Mode Gaming ({otherLanDevices.length})
-                    </div>
-                    <span className="text-xs text-zinc-400">
-                        {status.is_enabled ? (
-                            <span className="text-emerald-400 font-semibold flex items-center gap-1">
-                                <CheckCircle2 className="w-3.5 h-3.5" />
-                                {status.mode === 'blackhole_priority' ? 'Semua Terputus (Blackhole 0%)' : 'Semua Dibatasi (Airtime 20%)'}
-                            </span>
-                        ) : (
-                            'Siaga (Akan otomatis dikontrol saat Gaming Mode aktif)'
-                        )}
-                    </span>
-                </div>
-
-                {otherLanDevices.length === 0 ? (
-                    <div className="p-6 text-center text-zinc-500 text-xs border border-dashed border-zinc-800 rounded-xl">
-                        Tidak ada perangkat lain yang terdeteksi online di jaringan ini.
-                    </div>
-                ) : (
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5 max-h-56 overflow-y-auto pr-1">
-                        {otherLanDevices.map(dev => (
-                            <div
-                                key={dev.ip}
-                                className={cn(
-                                    "flex items-center justify-between p-3 rounded-xl border transition-all",
-                                    status.is_enabled
-                                        ? (status.mode === 'blackhole_priority' ? "bg-red-950/20 border-red-500/30 text-white" : "bg-cyan-950/20 border-cyan-500/30 text-white")
-                                        : "bg-zinc-800/30 border-zinc-700/30 text-zinc-300"
-                                )}
-                            >
-                                <div className="flex items-center gap-2.5 min-w-0">
-                                    {dev.device_type === 'Smart TV' ? (
-                                        <Tv className="w-4 h-4 text-zinc-400 shrink-0" />
-                                    ) : dev.device_type === 'Mobile' ? (
-                                        <Smartphone className="w-4 h-4 text-zinc-400 shrink-0" />
-                                    ) : (
-                                        <Laptop className="w-4 h-4 text-zinc-400 shrink-0" />
-                                    )}
-                                    <div className="min-w-0">
-                                        <div className="text-xs font-bold truncate text-white">
-                                            {dev.alias || dev.hostname || dev.ip}
-                                        </div>
-                                        <div className="text-[10px] font-mono text-zinc-400">
-                                            {dev.ip} • {dev.mac}
-                                        </div>
-                                    </div>
-                                </div>
-
-                                <span className={cn(
-                                    "px-2 py-0.5 rounded text-[10px] font-bold font-mono uppercase shrink-0",
-                                    status.is_enabled
-                                        ? (status.mode === 'blackhole_priority' ? "bg-red-500/20 text-red-300 border border-red-500/30" : "bg-cyan-500/20 text-cyan-300 border border-cyan-500/30")
-                                        : "bg-zinc-700/40 text-zinc-400 border border-zinc-700/50"
-                                )}>
-                                    {status.is_enabled
-                                        ? (status.mode === 'blackhole_priority' ? "Blackhole (0%)" : "Airtime (20%)")
-                                        : "Normal (100%)"
-                                    }
-                                </span>
-                            </div>
-                        ))}
+                {enabled && (
+                    <div className="flex items-center gap-2 shrink-0 text-[12px] font-medium">
+                        <span
+                            className="w-2 h-2 rounded-full motion-safe:animate-pulse"
+                            style={{ background: traceColor, boxShadow: `0 0 8px ${traceColor}` }}
+                        />
+                        <span className="text-zinc-300">Aktif</span>
+                        <span className="font-mono tabular-nums text-zinc-500">{fmtUptime(status.uptime_seconds)}</span>
                     </div>
                 )}
             </div>
 
-            {/* Mode & Target Configuration Panel */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {/* Mode Selector */}
-                <div className="rounded-2xl border border-zinc-800 bg-zinc-900/60 p-6 space-y-4">
-                    <div className="flex items-center gap-2 text-sm font-bold text-white uppercase tracking-wider">
-                        <Sliders className="w-4 h-4 text-cyan-400" />
-                        Pilihan Mode Optimasi
-                    </div>
-
-                    <div className="grid grid-cols-1 gap-3">
-                        <button
-                            onClick={() => handleModeChange('auto_airtime')}
-                            className={cn(
-                                "flex items-start gap-3 p-4 rounded-xl border text-left transition-all cursor-pointer",
-                                selectedMode === 'auto_airtime'
-                                    ? "bg-cyan-500/10 border-cyan-500/40 text-white shadow-lg"
-                                    : "bg-zinc-800/40 border-zinc-700/40 text-zinc-400 hover:bg-zinc-800/80 hover:text-zinc-200"
+            {/* Hero: live trace (bklit LiveLineChart) + readout ping mengambang */}
+            <div className="relative rounded-xl overflow-hidden" style={{ background: 'linear-gradient(180deg,#0d1016,#0a0c10)' }}>
+                <div className="h-[220px] md:h-[248px] w-full" style={chartVars}>
+                    {enabled && samples.length > 0 ? (
+                        <LiveLineChart data={samples} value={ping} window={30} numXTicks={5}>
+                            <LiveYAxis position="left" />
+                            <LiveLine
+                                dataKey="value"
+                                stroke={traceColor}
+                                strokeWidth={2}
+                                pulse
+                                fill
+                                formatValue={(v: number) => `${Math.round(v)} ms`}
+                            />
+                        </LiveLineChart>
+                    ) : (
+                        <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-center px-6">
+                            <p className="text-[13px] text-zinc-400 max-w-xs">
+                                {enabled
+                                    ? 'Menunggu sampel ping pertama…'
+                                    : 'Aktifkan untuk memprioritaskan airtime & memantau koneksimu langsung.'}
+                            </p>
+                            {!enabled && (
+                                <button
+                                    onClick={handleToggle}
+                                    disabled={isUpdating}
+                                    className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg font-semibold text-sm text-black disabled:opacity-70 disabled:cursor-wait transition-transform active:scale-95"
+                                    style={{ background: SIGNAL }}
+                                >
+                                    {isUpdating ? (
+                                        <>
+                                            <Spinner className="w-4 h-4" />
+                                            {affected > 0 ? `Menerapkan ke ${affected} perangkat…` : 'Menerapkan…'}
+                                        </>
+                                    ) : (
+                                        <>
+                                            <Play className="w-4 h-4 fill-black" />
+                                            Aktifkan Mode Gaming
+                                        </>
+                                    )}
+                                </button>
                             )}
-                        >
-                            <Radio className={cn("w-5 h-5 mt-0.5 shrink-0", selectedMode === 'auto_airtime' ? "text-cyan-400" : "text-zinc-500")} />
-                            <div className="space-y-1">
-                                <div className="text-sm font-bold flex items-center gap-2">
-                                    <span>Smart Airtime Priority</span>
-                                    {selectedMode === 'auto_airtime' && <Check className="w-4 h-4 text-cyan-400" />}
-                                </div>
-                                <p className="text-xs text-zinc-400 leading-relaxed">
-                                    Otomatis membatasi seluruh perangkat lain ke <strong className="text-cyan-300">20%</strong>. Perangkat lain tetap bisa WhatsApp/chatting ringan tanpa mengganggu game Anda.
-                                </p>
-                            </div>
-                        </button>
-
-                        <button
-                            onClick={() => handleModeChange('blackhole_priority')}
-                            className={cn(
-                                "flex items-start gap-3 p-4 rounded-xl border text-left transition-all cursor-pointer",
-                                selectedMode === 'blackhole_priority'
-                                    ? "bg-cyan-500/10 border-cyan-500/40 text-white shadow-lg"
-                                    : "bg-zinc-800/40 border-zinc-700/40 text-zinc-400 hover:bg-zinc-800/80 hover:text-zinc-200"
-                            )}
-                        >
-                            <Flame className={cn("w-5 h-5 mt-0.5 shrink-0", selectedMode === 'blackhole_priority' ? "text-cyan-400" : "text-zinc-500")} />
-                            <div className="space-y-1">
-                                <div className="text-sm font-bold flex items-center gap-2">
-                                    <span>Ultra Blackhole Isolation</span>
-                                    {selectedMode === 'blackhole_priority' && <Check className="w-4 h-4 text-cyan-400" />}
-                                </div>
-                                <p className="text-xs text-zinc-400 leading-relaxed">
-                                    Otomatis memutuskan total (<strong className="text-red-400">0% Cut</strong>) seluruh perangkat lain dan mengarahkan download mereka ke Dead MAC di router.
-                                </p>
-                            </div>
-                        </button>
-                    </div>
+                        </div>
+                    )}
                 </div>
 
-                {/* Target Latency Threshold */}
-                <div className="rounded-2xl border border-zinc-800 bg-zinc-900/60 p-6 space-y-4 flex flex-col justify-between">
-                    <div>
-                        <div className="flex items-center justify-between mb-2">
-                            <span className="text-sm font-bold text-white uppercase tracking-wider flex items-center gap-2">
-                                <Sparkles className="w-4 h-4 text-amber-400" />
-                                Target Ambang Ping Maksimal
+                {/* Readout ping mengambang */}
+                {enabled && (
+                    <div className="absolute top-3 left-4 pointer-events-none">
+                        <div className="flex items-baseline gap-1.5">
+                            <span className="font-mono tabular-nums text-4xl md:text-5xl font-bold leading-none" style={{ color: traceColor }}>
+                                {ping ? Math.round(ping) : '—'}
                             </span>
-                            <span className="text-lg font-mono font-extrabold text-cyan-400">{targetPing} ms</span>
+                            <span className="text-sm text-zinc-500">ms</span>
                         </div>
-                        <p className="text-xs text-zinc-400 leading-relaxed mb-4">
-                            Sistem akan secara otomatis mengetatkan kontrol saluran Wi-Fi jika latensi laptop Anda melampaui batas ini.
-                        </p>
-
-                        <div className="grid grid-cols-4 gap-2">
-                            {[15, 25, 40, 60].map(val => (
-                                <button
-                                    key={val}
-                                    onClick={() => handleTargetPingChange(val)}
-                                    className={cn(
-                                        "py-2 rounded-xl text-xs font-mono font-bold border transition-all cursor-pointer",
-                                        targetPing === val
-                                            ? "bg-cyan-500 text-black border-cyan-400 shadow-md shadow-cyan-500/20"
-                                            : "bg-zinc-800/60 text-zinc-300 border-zinc-700/60 hover:bg-zinc-700/60"
-                                    )}
-                                >
-                                    {val} ms
-                                </button>
-                            ))}
+                        <div className="text-[11px] font-medium mt-1" style={{ color: traceColor }}>
+                            {HEALTH_WORD[health]} · target {targetPing} ms
                         </div>
                     </div>
+                )}
+            </div>
 
-                    <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/5 p-3 flex items-center gap-3">
-                        <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />
-                        <span className="text-xs text-emerald-300 leading-normal">
-                            <strong>Garansi Zero-Lag:</strong> Paket video download perangkat lain 100% dibuang di router dan tidak pernah mampir ke kartu Wi-Fi Anda.
-                        </span>
+            {/* Readout pendukung */}
+            <div className="mt-5 pt-4 border-t border-white/[0.07] grid grid-cols-3 gap-4">
+                {[
+                    { label: 'Jitter', sub: 'kestabilan ping', val: enabled ? `±${jitter.toFixed(1)}` : '—', unit: 'ms' },
+                    { label: 'Packet loss', sub: 'paket hilang', val: enabled ? loss.toFixed(1) : '—', unit: '%' },
+                    { label: 'Durasi', sub: 'sejak aktif', val: enabled ? fmtUptime(status.uptime_seconds) : '—', unit: '' },
+                ].map((m) => (
+                    <div key={m.label}>
+                        <div className="flex items-baseline gap-1">
+                            <span className="font-mono tabular-nums text-xl font-semibold text-white">{m.val}</span>
+                            {m.unit && <span className="text-xs text-zinc-500">{m.unit}</span>}
+                        </div>
+                        <div className="text-[12px] text-zinc-300 mt-0.5">{m.label}</div>
+                        <div className="text-[11px] text-zinc-500">{m.sub}</div>
                     </div>
+                ))}
+            </div>
+
+            {/* Pemilih mode isolasi */}
+            <div className="mt-5 pt-4 border-t border-white/[0.07]">
+                <div className="text-[12px] text-zinc-400 mb-2.5">Mode isolasi</div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                    {MODES.map((m) => {
+                        const active = selectedMode === m.id;
+                        const live = enabled && activeMode === m.id;
+                        return (
+                            <button
+                                key={m.id}
+                                onClick={() => handleModeChange(m.id)}
+                                disabled={isUpdating}
+                                className={cn(
+                                    'group text-left rounded-xl border p-3.5 transition-colors disabled:opacity-60',
+                                    active
+                                        ? 'border-white/25 bg-white/[0.04]'
+                                        : 'border-white/[0.08] bg-transparent hover:border-white/15 hover:bg-white/[0.02]'
+                                )}
+                                style={active ? { boxShadow: `inset 0 -2px 0 ${traceColor}` } : undefined}
+                            >
+                                <div className="flex items-center justify-between gap-2">
+                                    <div className="flex items-center gap-2">
+                                        <m.Icon className={cn('w-4 h-4', active ? 'text-white' : 'text-zinc-500')} />
+                                        <span className={cn('text-[13px] font-semibold', active ? 'text-white' : 'text-zinc-300')}>
+                                            {m.label}
+                                        </span>
+                                    </div>
+                                    <span className="flex items-center gap-1.5">
+                                        {live && (
+                                            <span className="text-[10px] font-mono text-black px-1.5 py-0.5 rounded" style={{ background: traceColor }}>
+                                                LIVE
+                                            </span>
+                                        )}
+                                        <span className="font-mono tabular-nums text-[12px] text-zinc-400">{m.badge}</span>
+                                        {active && <Check className="w-3.5 h-3.5" style={{ color: traceColor }} />}
+                                    </span>
+                                </div>
+                                <p className="text-[11px] text-zinc-500 leading-relaxed mt-1.5">{m.desc}</p>
+                            </button>
+                        );
+                    })}
                 </div>
             </div>
+
+            {/* Kontrol: target ping + toggle */}
+            <div className="mt-5 pt-4 border-t border-white/[0.07] flex flex-wrap items-center justify-between gap-4">
+                <div className="flex items-center gap-3">
+                    <span className="text-[12px] text-zinc-400">Target ping</span>
+                    <div className="flex items-center gap-1">
+                        {[15, 25, 40, 60].map((val) => (
+                            <button
+                                key={val}
+                                onClick={() => handleTarget(val)}
+                                disabled={isUpdating}
+                                className={cn(
+                                    'px-2.5 py-1 rounded-md text-[12px] font-mono tabular-nums transition-colors disabled:opacity-60',
+                                    targetPing === val ? 'text-black font-semibold' : 'text-zinc-400 hover:text-zinc-200'
+                                )}
+                                style={targetPing === val ? { background: SIGNAL } : undefined}
+                            >
+                                {val}
+                            </button>
+                        ))}
+                        <span className="text-[12px] text-zinc-500 ml-0.5">ms</span>
+                    </div>
+                </div>
+
+                {enabled && (
+                    <button
+                        onClick={handleToggle}
+                        disabled={isUpdating}
+                        className="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold text-zinc-200 border border-white/10 hover:border-white/20 hover:bg-white/[0.03] disabled:opacity-60 disabled:cursor-wait transition-colors active:scale-95"
+                    >
+                        {isUpdating ? (
+                            <>
+                                <Spinner className="w-3.5 h-3.5" />
+                                Menerapkan…
+                            </>
+                        ) : (
+                            <>
+                                <Square className="w-3.5 h-3.5" />
+                                Hentikan
+                            </>
+                        )}
+                    </button>
+                )}
+            </div>
+
+            {/* Konsekuensi — jujur soal dampak ke perangkat lain */}
+            <p className="mt-4 text-[11px] text-zinc-500 leading-relaxed">
+                {activeMode === 'blackhole_priority'
+                    ? <>Saat aktif, <span className="text-zinc-400">{affected} perangkat lain</span> diputus total (0%) dari internet selama mode berjalan, lalu dipulihkan otomatis saat dimatikan.</>
+                    : <>Saat aktif, <span className="text-zinc-400">{affected} perangkat lain</span> dibatasi ke {limitPct}% selama mode berjalan, lalu dipulihkan otomatis saat dimatikan.</>}
+            </p>
         </div>
     );
 };
