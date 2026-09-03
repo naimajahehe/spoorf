@@ -63,6 +63,27 @@ export function selectGateway(devices: Device[]): Device | undefined {
     return undefined;
 }
 
+interface GamingRestorePlan {
+    macKey: string;
+    priorLimit: number;
+    hadSession: boolean;
+    sessionId?: string;
+    device?: Pick<Device, 'ip' | 'mac' | 'ipv6_link_local' | 'profile_id'>;
+    stopped: boolean;
+    restoredSessionId?: string;
+    blockedPersisted: boolean;
+    speedLimitPersisted: boolean;
+}
+
+interface PendingGamingDisable {
+    mode: string;
+    targetPingMs: number;
+    gateway?: Pick<Device, 'ip' | 'mac' | 'ipv6_link_local'>;
+    restorePlans: GamingRestorePlan[];
+    pythonOff: boolean;
+    result?: any;
+}
+
 export class DeviceManager extends EventEmitter {
     private devices: Map<string, Device> = new Map();
     private scanning: boolean = false;
@@ -78,6 +99,7 @@ export class DeviceManager extends EventEmitter {
     private gamingActive: boolean = false;
     private gamingMode: string = 'auto_airtime';
     private gamingTargetLimit: number = 100;
+    private pendingGamingDisable: PendingGamingDisable | null = null;
     // Mutex serialisasi: operasi tulis perangkat (block/unblock/throttle/redirect)
     // diserialisasi untuk mencegah race condition antar-aksi pengguna.
     private opChain: Promise<void> = Promise.resolve();
@@ -152,6 +174,7 @@ export class DeviceManager extends EventEmitter {
             this.emit('gamingTelemetry', data);
         });
         this.python.on('gamingStatusChanged', (data) => {
+            if (this.pendingGamingDisable) return;
             this.emit('gamingStatusChanged', data);
         });
     }
@@ -159,7 +182,12 @@ export class DeviceManager extends EventEmitter {
     private async _handleDhcpEvent(data: any): Promise<void> {
         {
             console.log('⚡ [DeviceManager] DHCP event received:', data);
-            if (data && data.kind === 'release' && (data.mac || data.ip)) {
+            const isRelease = data && (
+                data.kind === 'release' ||
+                data.is_release === true ||
+                data.message_type_code === 7
+            );
+            if (isRelease && (data.mac || data.ip)) {
                 let updatedAny = false;
                 if (data.mac) {
                     const normMac = data.mac.toLowerCase();
@@ -796,6 +824,7 @@ export class DeviceManager extends EventEmitter {
         if (!device) {
             throw new Error(`Device ${ip} not found`);
         }
+        this._assertNoPendingGamingRecoveryConflict([device]);
 
         if (device.is_self) {
             throw new Error(`Cannot block operator host / This PC (${ip})`);
@@ -866,13 +895,10 @@ export class DeviceManager extends EventEmitter {
         if (!device) {
             throw new Error(`Device ${ip} not found`);
         }
+        this._assertNoPendingGamingRecoveryConflict([device]);
 
         if (device.session_id) {
-            try {
-                await this.python.stopSpoof(device.session_id);
-            } catch (e) {
-                console.warn(`Warning stopping spoof on ${ip}:`, e);
-            }
+            await this.python.stopSpoof(device.session_id);
         }
 
         device.is_blocked = false;
@@ -902,6 +928,7 @@ export class DeviceManager extends EventEmitter {
         if (!device) {
             throw new Error(`Device ${ip} not found`);
         }
+        this._assertNoPendingGamingRecoveryConflict([device]);
 
         if (device.is_gateway || (gatewayIp && device.ip === gatewayIp)) {
             throw new Error(`Cannot redirect the gateway (${ip})`);
@@ -913,11 +940,7 @@ export class DeviceManager extends EventEmitter {
 
         // If device is actively blocked or throttled, unblock first
         if (device.is_blocked || (device.session_id && !device.is_redirected)) {
-            try {
-                if (device.session_id) await this.python.stopSpoof(device.session_id);
-            } catch (e) {
-                console.warn('Notice stopping existing spoof before redirect:', e);
-            }
+            if (device.session_id) await this.python.stopSpoof(device.session_id);
             device.is_blocked = false;
             device.speed_limit = 100;
             device.session_id = undefined;
@@ -962,12 +985,9 @@ export class DeviceManager extends EventEmitter {
         if (!device) {
             throw new Error(`Device ${ip} not found`);
         }
+        this._assertNoPendingGamingRecoveryConflict([device]);
 
-        try {
-            await this.python.stopRedirect(device.ip);
-        } catch (e) {
-            console.warn(`Notice stopping redirect on python:`, e);
-        }
+        await this.python.stopRedirect(device.ip);
 
         device.is_redirected = false;
         device.redirect_url = undefined;
@@ -987,25 +1007,37 @@ export class DeviceManager extends EventEmitter {
 
     private async _deleteDeviceImpl(mac: string): Promise<void> {
         const normMac = mac.toLowerCase();
-        const existing = await this.db.getDeviceByMac(normMac);
-        const profileId = existing?.profile_id;
+        const requestedDevice = this._findDeviceByMac(normMac);
+        if (!requestedDevice && this.pendingGamingDisable) {
+            throw this._pendingGamingRecoveryError();
+        }
+        const requestedProfileId = requestedDevice?.profile_id;
+        const inMemoryTargets = requestedProfileId
+            ? Array.from(this.devices.values()).filter(device => device.profile_id === requestedProfileId)
+            : requestedDevice ? [requestedDevice] : [];
+        this._assertNoPendingGamingRecoveryConflict(inMemoryTargets);
 
-        const ipsToDelete: string[] = [];
+        const existing = await this.db.getDeviceByMac(normMac);
+        const profileId = requestedProfileId || existing?.profile_id;
+
+        const devicesToDelete: Array<[string, Device]> = [];
         for (const [ip, dev] of this.devices.entries()) {
             if (dev.mac.toLowerCase() === normMac || (profileId && dev.profile_id === profileId)) {
-                ipsToDelete.push(ip);
-                if (dev.session_id) {
-                    try {
-                        await this.python.stopSpoof(dev.session_id);
-                    } catch (e) {
-                        console.warn('Error stopping spoof before delete:', e);
-                    }
-                }
+                devicesToDelete.push([ip, dev]);
+            }
+        }
+        this._assertNoPendingGamingRecoveryConflict(devicesToDelete.map(([, device]) => device));
+
+        for (const [, dev] of devicesToDelete) {
+            if (dev.is_redirected) {
+                await this.python.stopRedirect(dev.ip);
+            } else if (dev.session_id) {
+                await this.python.stopSpoof(dev.session_id);
             }
         }
 
         await this.db.deleteDevice(mac);
-        for (const ip of ipsToDelete) {
+        for (const [ip] of devicesToDelete) {
             this.devices.delete(ip);
         }
 
@@ -1013,6 +1045,13 @@ export class DeviceManager extends EventEmitter {
     }
 
     async clearAllDevices(): Promise<void> {
+        return this.runExclusive(() => this._clearAllDevicesImpl());
+    }
+
+    private async _clearAllDevicesImpl(): Promise<void> {
+        if (this.pendingGamingDisable) {
+            throw this._pendingGamingRecoveryError();
+        }
         await this.db.clearAllDevices();
         this.devices.clear();
         this.emit('devicesUpdated', []);
@@ -1050,6 +1089,7 @@ export class DeviceManager extends EventEmitter {
         if (!device) {
             throw new Error(`Device with IP ${ip} not found`);
         }
+        this._assertNoPendingGamingRecoveryConflict([device]);
 
         if (device.is_gateway || device.is_self) {
             throw new Error(`Perangkat infrastruktur (${device.is_gateway ? 'Gateway' : 'Perangkat Ini'}) dilindungi dan tidak dapat dibatasi kecepatannya.`);
@@ -1074,16 +1114,10 @@ export class DeviceManager extends EventEmitter {
             await this._verifyPreFlightLiveness(device, gateway.ip);
         }
 
-        device.is_online = true;
-
         if (cleanLimit === 100) {
             // Pulihkan kecepatan penuh (100%): stop spoof jika ada
             if (device.session_id) {
-                try {
-                    await this.python.stopSpoof(device.session_id);
-                } catch (e) {
-                    console.warn(`Error stopping spoof for full speed:`, e);
-                }
+                await this.python.stopSpoof(device.session_id);
             }
             device.is_blocked = false;
             device.session_id = undefined;
@@ -1136,6 +1170,7 @@ export class DeviceManager extends EventEmitter {
             await this.db.setDeviceOnlineStatus(device.mac, true);
         }
 
+        device.is_online = true;
         this.devices.set(ip, device);
         this.emit('deviceUpdated', device);
         this.emit('devicesUpdated', Array.from(this.devices.values()));
@@ -1182,6 +1217,7 @@ export class DeviceManager extends EventEmitter {
         if (!device) {
             throw new Error(`Device with IP ${ip} not found`);
         }
+        this._assertNoPendingGamingRecoveryConflict([device]);
         if (device.is_gateway || device.is_self) {
             throw new Error(`Perangkat infrastruktur (${device.is_gateway ? 'Gateway' : 'Perangkat Ini'}) dilindungi dan tidak dapat dijadikan target Transparent Gateway.`);
         }
@@ -1208,6 +1244,11 @@ export class DeviceManager extends EventEmitter {
     }
 
     private async _stopTransparentGatewayImpl(ip: string): Promise<void> {
+        const device = this.devices.get(ip);
+        if (device) {
+            this._assertNoPendingGamingRecoveryConflict([device]);
+        }
+        this._assertNoPendingGamingRecoveryConflictByIdentity({ ip });
         await this.python.stopTransparentGateway(ip);
         this.emit('gatewayStatusChanged', await this.getTransparentGatewayStatus());
     }
@@ -1352,7 +1393,7 @@ export class DeviceManager extends EventEmitter {
         return await this.python.getBettercapStatus();
     }
 
-    async getBettercapDnsRules(): Promise<any[]> {
+    async getBettercapDnsRules(): Promise<any> {
         return await this.python.getBettercapDnsRules();
     }
 
@@ -1418,15 +1459,17 @@ export class DeviceManager extends EventEmitter {
 
     async toggleGamingMode(enabled: boolean, mode: string = 'auto_airtime', targetPingMs: number = 25.0): Promise<any> {
         return this.runExclusive(async () => {
-            const result = await this.python.toggleGamingMode(enabled, mode, targetPingMs);
-
-            const gateway = selectGateway(Array.from(this.devices.values()));
-            if (!gateway) {
-                this.emit('gamingStatusChanged', result);
-                return result;
-            }
-
             if (enabled) {
+                if (this.pendingGamingDisable) {
+                    throw new Error('Gaming disable recovery is pending');
+                }
+                const result = await this.python.toggleGamingMode(true, mode, targetPingMs);
+                const gateway = selectGateway(Array.from(this.devices.values()));
+                if (!gateway) {
+                    this.emit('gamingStatusChanged', result);
+                    return result;
+                }
+
                 // Auto-Isolate / Auto-Throttle seluruh perangkat LAN yang sedang online (kecuali Gateway & This PC)
                 const targetLimit = mode === 'blackhole_priority' ? 0 : 20;
                 this.gamingActive = true;
@@ -1442,65 +1485,164 @@ export class DeviceManager extends EventEmitter {
                 for (const target of onlineTargets) {
                     await this._applyGamingToDevice(target, gateway);
                 }
-            } else {
-                // Pulihkan seluruh perangkat yang dikelola oleh Gaming Mode ke kondisi semula
-                this.gamingActive = false;
-                console.log(`🎮 [GAMING MODE NONAKTIF] Memulihkan ${this.gamingManaged.size} perangkat yang dikelola Gaming Mode...`);
-                for (const [macKey, meta] of Array.from(this.gamingManaged.entries())) {
-                    // Cari device berdasarkan MAC; mungkin sudah hilang dari daftar (disconnect).
-                    let dev: Device | undefined;
-                    for (const d of this.devices.values()) {
-                        if (d.mac.toLowerCase() === macKey) { dev = d; break; }
-                    }
-                    try {
-                        // Hentikan sesi BLACKHOLE gaming via sessionId TERSIMPAN — bekerja walau
-                        // objek device sudah hilang (mencegah sesi bocor).
-                        const sidToStop = meta.sessionId || dev?.session_id;
-                        if (sidToStop) {
-                            await this.python.stopSpoof(sidToStop);
-                        }
-                        // Pemulihan state hanya bila device masih ada.
-                        if (!dev) continue;
-                        dev.session_id = undefined;
 
-                        if (meta.hadSession) {
-                            // Perangkat memang di-spoof manual sebelum gaming -> pulihkan sesi manual
-                            // (self_mac) pada limit semula.
-                            const sid = await this.python.startSpoof(
-                                dev.ip,
-                                dev.mac,
-                                gateway.ip,
-                                gateway.mac,
-                                meta.priorLimit,
-                                dev.ipv6_link_local,
-                                gateway.ipv6_link_local
-                                // blackhole default false -> sesi normal
-                            );
-                            dev.session_id = sid;
-                            dev.speed_limit = meta.priorLimit;
-                            dev.is_blocked = (meta.priorLimit <= 0);
-                            await this.db.setDeviceBlocked(dev.mac, meta.priorLimit <= 0, sid).catch(() => {});
-                            await this.db.setDeviceSpeedLimit(dev.mac, meta.priorLimit).catch(() => {});
-                        } else {
-                            // Gaming yang membuat sesi -> biarkan penuh 100%.
-                            dev.speed_limit = 100;
-                            dev.is_blocked = false;
-                            await this.db.setDeviceBlocked(dev.mac, false, undefined).catch(() => {});
-                            await this.db.setDeviceSpeedLimit(dev.mac, 100).catch(() => {});
-                        }
-                        this.devices.set(dev.ip, dev);
-                        this.emit('deviceUpdated', dev);
-                    } catch (err: any) {
-                        console.warn(`Notice memulihkan perangkat ${macKey}:`, err.message);
+                this.emit('devicesUpdated', Array.from(this.devices.values()));
+                this.emit('gamingStatusChanged', result);
+                return result;
+            } else {
+                const pending = this.pendingGamingDisable || this._createPendingGamingDisable(mode, targetPingMs);
+                this.pendingGamingDisable = pending;
+                console.log(`🎮 [GAMING MODE NONAKTIF] Memulihkan ${pending.restorePlans.length} perangkat yang dikelola Gaming Mode...`);
+
+                for (const plan of pending.restorePlans) {
+                    if (!plan.stopped && plan.sessionId) {
+                        await this.python.stopSpoof(plan.sessionId);
+                        plan.stopped = true;
                     }
                 }
-                this.gamingManaged.clear();
-            }
 
-            this.emit('devicesUpdated', Array.from(this.devices.values()));
-            this.emit('gamingStatusChanged', result);
-            return result;
+                if (!pending.pythonOff) {
+                    pending.result = await this.python.toggleGamingMode(
+                        false,
+                        pending.mode,
+                        pending.targetPingMs
+                    );
+                    pending.pythonOff = true;
+                    this.gamingActive = false;
+                }
+
+                for (const plan of pending.restorePlans) {
+                    if (!plan.device) continue;
+                    if (plan.hadSession && !plan.restoredSessionId) {
+                        const gateway = pending.gateway;
+                        if (!gateway) {
+                            throw new Error('Gateway not found');
+                        }
+                        plan.restoredSessionId = await this.python.startSpoof(
+                            plan.device.ip,
+                            plan.device.mac,
+                            gateway.ip,
+                            gateway.mac,
+                            plan.priorLimit,
+                            plan.device.ipv6_link_local,
+                            gateway.ipv6_link_local
+                        );
+                    }
+                }
+
+                for (const plan of pending.restorePlans) {
+                    if (!plan.device) continue;
+                    const restoredSessionId = plan.hadSession ? plan.restoredSessionId : undefined;
+                    const speedLimit = plan.hadSession ? plan.priorLimit : 100;
+                    const isBlocked = plan.hadSession && plan.priorLimit <= 0;
+                    if (!plan.blockedPersisted) {
+                        await this.db.setDeviceBlocked(plan.device.mac, isBlocked, restoredSessionId);
+                        plan.blockedPersisted = true;
+                    }
+                    if (!plan.speedLimitPersisted) {
+                        await this.db.setDeviceSpeedLimit(plan.device.mac, speedLimit);
+                        plan.speedLimitPersisted = true;
+                    }
+                }
+
+                const updatedDevices: Device[] = [];
+                for (const plan of pending.restorePlans) {
+                    if (!plan.device) continue;
+                    const device = this._findDeviceByMac(plan.macKey);
+                    if (!device) continue;
+                    device.session_id = plan.hadSession ? plan.restoredSessionId : undefined;
+                    device.speed_limit = plan.hadSession ? plan.priorLimit : 100;
+                    device.is_blocked = plan.hadSession && plan.priorLimit <= 0;
+                    this.devices.set(device.ip, device);
+                    updatedDevices.push(device);
+                }
+
+                this.gamingActive = false;
+                this.gamingManaged.clear();
+                this.pendingGamingDisable = null;
+                for (const device of updatedDevices) {
+                    this.emit('deviceUpdated', device);
+                }
+                this.emit('devicesUpdated', Array.from(this.devices.values()));
+                this.emit('gamingStatusChanged', pending.result);
+                return pending.result;
+            }
         });
+    }
+
+    private _createPendingGamingDisable(mode: string, targetPingMs: number): PendingGamingDisable {
+        const restorePlans = Array.from(this.gamingManaged.entries()).map(([macKey, meta]) => {
+            const device = this._findDeviceByMac(macKey);
+            return {
+                macKey,
+                priorLimit: meta.priorLimit,
+                hadSession: meta.hadSession,
+                sessionId: meta.sessionId || device?.session_id,
+                device: device ? {
+                    ip: device.ip,
+                    mac: device.mac,
+                    ipv6_link_local: device.ipv6_link_local,
+                    profile_id: device.profile_id,
+                } : undefined,
+                stopped: false,
+                blockedPersisted: false,
+                speedLimitPersisted: false,
+            };
+        });
+        const gateway = selectGateway(Array.from(this.devices.values()));
+        if (restorePlans.some(plan => plan.hadSession && plan.device) && !gateway) {
+            throw new Error('Gateway not found');
+        }
+        return {
+            mode,
+            targetPingMs,
+            gateway: gateway ? {
+                ip: gateway.ip,
+                mac: gateway.mac,
+                ipv6_link_local: gateway.ipv6_link_local,
+            } : undefined,
+            restorePlans,
+            pythonOff: false,
+        };
+    }
+
+    private _findDeviceByMac(macKey: string): Device | undefined {
+        for (const device of this.devices.values()) {
+            if (device.mac.toLowerCase() === macKey) return device;
+        }
+        return undefined;
+    }
+
+    private _assertNoPendingGamingRecoveryConflict(devices: Iterable<Device>): void {
+        for (const device of devices) {
+            this._assertNoPendingGamingRecoveryConflictByIdentity({
+                mac: device.mac,
+                ip: device.ip,
+                profileId: device.profile_id,
+            });
+        }
+    }
+
+    private _assertNoPendingGamingRecoveryConflictByIdentity(
+        identity: { mac?: string; ip?: string; profileId?: string }
+    ): void {
+        if (!this.pendingGamingDisable) return;
+
+        for (const plan of this.pendingGamingDisable.restorePlans) {
+            if (
+                (identity.mac && plan.macKey === identity.mac.toLowerCase()) ||
+                (identity.ip && plan.device?.ip === identity.ip) ||
+                (identity.profileId && plan.device?.profile_id === identity.profileId)
+            ) {
+                throw this._pendingGamingRecoveryError();
+            }
+        }
+    }
+
+    private _pendingGamingRecoveryError(): Error {
+        return new Error(
+            'Gaming disable recovery is pending for a managed device. Retry disabling Gaming Mode before changing its network state.'
+        );
     }
 
     /**
@@ -1568,7 +1710,11 @@ export class DeviceManager extends EventEmitter {
         const gm = this.gamingManaged.get(macKey);
         if (!gm) return;
         if (gm.sessionId) {
-            try { await this.python.stopSpoof(gm.sessionId); } catch {}
+            try {
+                await this.python.stopSpoof(gm.sessionId);
+            } catch (error) {
+                console.warn(`Notice stopping Gaming Mode session ${gm.sessionId}:`, error);
+            }
         }
         this.gamingManaged.delete(macKey);
     }

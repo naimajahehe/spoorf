@@ -25,7 +25,7 @@ import {
 } from 'lucide-react';
 import { Device, L7Flow, CAStatus } from '../types';
 import { GatewayStatusData, GatewayDnsLog, TelemetryData } from '../hooks/useWebSocket';
-import { getApiUrl } from '../api/client';
+import { apiFetch } from '../api/client';
 import { cn } from '../lib/utils';
 
 interface TransparentGatewayViewProps {
@@ -145,8 +145,7 @@ export const TransparentGatewayView: React.FC<TransparentGatewayViewProps> = ({
 
     const handleDownloadCa = async () => {
         try {
-            const apiUrl = getApiUrl();
-            const res = await fetch(`${apiUrl}/api/interceptor/ca/download`);
+            const res = await apiFetch('/api/interceptor/ca/download');
             if (!res.ok) {
                 throw new Error(`Gagal mengunduh sertifikat: ${res.statusText}`);
             }

@@ -296,6 +296,8 @@ export const OpenPortsTable: FC<Props> = ({
                                             const devName = item.device.alias && item.device.alias.trim() !== ''
                                                 ? item.device.alias.trim()
                                                 : (item.device.hostname && item.device.hostname.trim() !== '' ? item.device.hostname : item.device.ip);
+                                            const protocol = item.port === 443 || item.port === 8443 ? 'https' : 'http';
+                                            const webUrl = `${protocol}://${item.device.ip}:${item.port}`;
 
                                             return (
                                                 <tr
@@ -374,7 +376,7 @@ export const OpenPortsTable: FC<Props> = ({
                                                                     type="button"
                                                                     onClick={() => onOpenWebPreview(item.device, item.port)}
                                                                     className="py-1 px-2 rounded-md text-[11px] font-medium bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/20 transition-colors inline-flex items-center gap-1"
-                                                                    title={`Pratinjau langsung http://${item.device.ip}:${item.port}`}
+                                                                    title={`Pratinjau langsung ${webUrl}`}
                                                                 >
                                                                     <Eye size={11} className="text-emerald-400 shrink-0" />
                                                                     <span>Preview</span>
@@ -383,11 +385,11 @@ export const OpenPortsTable: FC<Props> = ({
 
                                                             {item.isWeb && (
                                                                 <a
-                                                                    href={`http://${item.device.ip}:${item.port}`}
+                                                                    href={webUrl}
                                                                     target="_blank"
                                                                     rel="noopener noreferrer"
                                                                     className="py-1 px-2 rounded-md text-[11px] font-medium bg-white/[0.08] hover:bg-white/[0.14] text-white border border-white/[0.1] transition-colors inline-flex items-center gap-1"
-                                                                    title={`Buka http://${item.device.ip}:${item.port} di tab baru`}
+                                                                    title={`Buka ${webUrl} di tab baru`}
                                                                 >
                                                                     <span>Buka Web</span>
                                                                     <ExternalLink size={11} className="text-zinc-300 shrink-0" />

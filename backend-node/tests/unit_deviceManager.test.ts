@@ -1,6 +1,82 @@
 import assert from 'assert';
+import { EventEmitter } from 'events';
 import { Device } from '../src/types';
 import { OFFLINE_GRACE_SECONDS } from '../src/services/database';
+import { DeviceManager } from '../src/services/deviceManager';
+
+function makeStateRetentionDevice(over: Partial<Device> = {}): Device {
+    return {
+        ip: '192.168.1.105',
+        mac: 'a8:3b:76:0c:dc:55',
+        hostname: 'Target-Laptop',
+        vendor: 'Lenovo',
+        device_type: 'PC / Laptop',
+        os: 'Windows 11',
+        rtt_ms: 15,
+        open_ports: [445],
+        services: ['SMB'],
+        is_blocked: false,
+        is_online: true,
+        is_gateway: false,
+        speed_limit: 100,
+        ...over
+    };
+}
+
+function makeStateRetentionManager() {
+    const persistenceCalls: string[] = [];
+    const python: any = new EventEmitter();
+    python.stopSpoof = async () => {};
+    python.stopRedirect = async () => {};
+    python.startRedirect = async () => ({ arp_session_id: 'redirect-session-new' });
+
+    const db: any = {
+        getDeviceByMac: async () => undefined,
+        setDeviceBlocked: async () => { persistenceCalls.push('setDeviceBlocked'); },
+        setDeviceSpeedLimit: async () => { persistenceCalls.push('setDeviceSpeedLimit'); },
+        setDeviceOnlineStatus: async () => { persistenceCalls.push('setDeviceOnlineStatus'); },
+        deleteDevice: async () => { persistenceCalls.push('deleteDevice'); }
+    };
+
+    const manager = new DeviceManager(python, db);
+    const emitted: string[] = [];
+    manager.on('deviceUpdated', () => emitted.push('deviceUpdated'));
+    manager.on('devicesUpdated', () => emitted.push('devicesUpdated'));
+    return { manager, python, db, persistenceCalls, emitted };
+}
+
+function snapshotDevice(device: Device): Device {
+    return {
+        ...device,
+        open_ports: [...device.open_ports],
+        services: [...device.services]
+    };
+}
+
+async function recordRetentionCase(
+    name: string,
+    expectedError: string,
+    operation: () => Promise<unknown>,
+    verify: () => void,
+    failures: string[]
+): Promise<void> {
+    let rejection: Error | undefined;
+    try {
+        await operation();
+    } catch (error: any) {
+        rejection = error;
+    }
+    if (!rejection) {
+        failures.push(`${name}: operation resolved instead of rejecting`);
+    } else if (rejection.message !== expectedError) {
+        failures.push(`${name}: expected "${expectedError}", received "${rejection.message}"`);
+    }
+    try {
+        verify();
+    } catch (error: any) {
+        failures.push(`${name}: ${error.message}`);
+    }
+}
 
 export async function runDeviceManagerTests() {
     console.log('\n--- [Node] Testing DeviceManager Business Logic ---');
@@ -150,27 +226,48 @@ export async function runDeviceManagerTests() {
         console.log('  ✓ Protection: Gateway redirect attempt is strictly rejected');
     }
 
-    // Test 9: Happy Path - Instant Offline Transition via DHCP RELEASE (Option 53 = 7)
+    // Test 9: Real DeviceManager handler recognizes every Python DHCP RELEASE shape.
     {
-        const dev = devices.get('192.168.1.105');
-        assert.ok(dev);
-        assert.strictEqual(dev!.is_online, true);
+        const { DeviceManager } = await import('../src/services/deviceManager');
+        const { PythonBridge } = await import('../src/services/pythonBridge');
+        const releaseShapes = [
+            { kind: 'release' },
+            { is_release: true },
+            { message_type_code: 7 }
+        ];
 
-        // Simulasi penerimaan paket DHCP RELEASE
-        const releasePayload = {
-            mac: 'a8:3b:76:0c:dc:55',
-            ip: '192.168.1.105',
-            message_type: 'RELEASE',
-            message_type_code: 7,
-            is_release: true
-        };
+        for (const shape of releaseShapes) {
+            const python = new PythonBridge();
+            const offlineWrites: Array<{ mac: string; online: boolean }> = [];
+            const db = {
+                setDeviceOnlineStatus: async (mac: string, online: boolean) => {
+                    offlineWrites.push({ mac, online });
+                },
+                updateDeviceIp: async () => {}
+            };
+            const manager = new DeviceManager(python, db as any);
+            const dev: Device = {
+                ...targetDevice,
+                ip: '192.168.1.105',
+                is_online: true
+            };
+            (manager as any).devices.set(dev.ip, dev);
+            let disconnected: Device | undefined;
+            manager.once('deviceDisconnected', value => { disconnected = value; });
 
-        if (releasePayload.is_release || releasePayload.message_type_code === 7) {
-            dev!.is_online = false;
+            await (manager as any)._handleDhcpEvent({
+                mac: dev.mac,
+                ip: dev.ip,
+                message_type: 'RELEASE',
+                ...shape
+            });
+
+            assert.strictEqual(dev.is_online, false, `release shape ${JSON.stringify(shape)} must mark offline`);
+            assert.strictEqual(dev.ip, '', `release shape ${JSON.stringify(shape)} must clear active IP`);
+            assert.strictEqual(disconnected?.mac, dev.mac);
+            assert.deepStrictEqual(offlineWrites, [{ mac: dev.mac, online: false }]);
         }
-
-        assert.strictEqual(dev!.is_online, false, 'Device must be marked offline immediately upon DHCP RELEASE');
-        console.log('  ✓ Happy Path: DHCP RELEASE instant offline transition verified');
+        console.log('  ✓ Contract: production DHCP handler normalizes kind, is_release, and code 7');
     }
 
     // Test 10: Protection - Rogue DHCP Alert validation
@@ -732,6 +829,188 @@ export async function runDeviceManagerTests() {
         const offState = toggle(false);
         assert.strictEqual(offState.is_enabled, false, 'Gaming mode should be disabled');
         console.log('  ✓ Gaming Mode: Ultra-Low Latency & Anti-Jitter state management verified');
+    }
+
+    // Regression: downstream teardown failures must not become successful Node mutations.
+    {
+        const failures: string[] = [];
+
+        {
+            const { manager, python, persistenceCalls, emitted } = makeStateRetentionManager();
+            const target = makeStateRetentionDevice({
+                is_blocked: true,
+                speed_limit: 0,
+                session_id: 'spoof-unblock'
+            });
+            (manager as any).devices.set(target.ip, target);
+            python.stopSpoof = async () => { throw new Error('unblock teardown failed'); };
+            const before = snapshotDevice(target);
+
+            await recordRetentionCase(
+                'unblockDevice',
+                'unblock teardown failed',
+                () => manager.unblockDevice(target.ip),
+                () => {
+                    assert.deepStrictEqual(target, before);
+                    assert.deepStrictEqual(persistenceCalls, []);
+                    assert.deepStrictEqual(emitted, []);
+                },
+                failures
+            );
+        }
+
+        {
+            const { manager, python, persistenceCalls, emitted } = makeStateRetentionManager();
+            const gateway = makeStateRetentionDevice({
+                ip: '192.168.1.1',
+                mac: '00:11:22:33:44:00',
+                is_gateway: true
+            });
+            const target = makeStateRetentionDevice({
+                is_blocked: false,
+                is_online: false,
+                speed_limit: 35,
+                session_id: 'spoof-full-speed'
+            });
+            (manager as any).devices.set(gateway.ip, gateway);
+            (manager as any).devices.set(target.ip, target);
+            python.stopSpoof = async () => { throw new Error('full-speed teardown failed'); };
+            const before = snapshotDevice(target);
+
+            await recordRetentionCase(
+                'setSpeedLimit(100)',
+                'full-speed teardown failed',
+                () => manager.setSpeedLimit(target.ip, 100),
+                () => {
+                    assert.deepStrictEqual(target, before);
+                    assert.deepStrictEqual(persistenceCalls, []);
+                    assert.deepStrictEqual(emitted, []);
+                },
+                failures
+            );
+        }
+
+        {
+            const { manager, python, persistenceCalls, emitted } = makeStateRetentionManager();
+            const gateway = makeStateRetentionDevice({
+                ip: '192.168.1.1',
+                mac: '00:11:22:33:44:00',
+                is_gateway: true
+            });
+            const target = makeStateRetentionDevice({
+                is_blocked: false,
+                speed_limit: 40,
+                session_id: 'spoof-before-redirect'
+            });
+            let redirectStarts = 0;
+            (manager as any).devices.set(gateway.ip, gateway);
+            (manager as any).devices.set(target.ip, target);
+            python.stopSpoof = async () => { throw new Error('redirect transition teardown failed'); };
+            python.startRedirect = async () => {
+                redirectStarts++;
+                return { arp_session_id: 'redirect-session-new' };
+            };
+            const before = snapshotDevice(target);
+
+            await recordRetentionCase(
+                'redirectDevice active spoof transition',
+                'redirect transition teardown failed',
+                () => manager.redirectDevice(target.ip, 'https://example.test/', '', gateway.ip),
+                () => {
+                    assert.deepStrictEqual(target, before);
+                    assert.strictEqual(redirectStarts, 0);
+                    assert.deepStrictEqual(persistenceCalls, []);
+                    assert.deepStrictEqual(emitted, []);
+                },
+                failures
+            );
+        }
+
+        {
+            const { manager, python, persistenceCalls, emitted } = makeStateRetentionManager();
+            const target = makeStateRetentionDevice({
+                is_redirected: true,
+                redirect_url: 'https://example.test/',
+                session_id: 'redirect-session'
+            });
+            (manager as any).devices.set(target.ip, target);
+            python.stopRedirect = async () => { throw new Error('redirect teardown failed'); };
+            const before = snapshotDevice(target);
+
+            await recordRetentionCase(
+                'stopRedirectDevice',
+                'redirect teardown failed',
+                () => manager.stopRedirectDevice(target.ip),
+                () => {
+                    assert.deepStrictEqual(target, before);
+                    assert.deepStrictEqual(persistenceCalls, []);
+                    assert.deepStrictEqual(emitted, []);
+                },
+                failures
+            );
+        }
+
+        {
+            const { manager, python, db, persistenceCalls, emitted } = makeStateRetentionManager();
+            const target = makeStateRetentionDevice({
+                is_blocked: true,
+                speed_limit: 0,
+                session_id: 'spoof-before-delete'
+            });
+            (manager as any).devices.set(target.ip, target);
+            db.getDeviceByMac = async () => target;
+            python.stopSpoof = async () => { throw new Error('delete spoof teardown failed'); };
+            const before = snapshotDevice(target);
+
+            await recordRetentionCase(
+                'deleteDevice active spoof',
+                'delete spoof teardown failed',
+                () => manager.deleteDevice(target.mac),
+                () => {
+                    assert.deepStrictEqual(target, before);
+                    assert.strictEqual((manager as any).devices.get(target.ip), target);
+                    assert.deepStrictEqual(persistenceCalls, []);
+                    assert.deepStrictEqual(emitted, []);
+                },
+                failures
+            );
+        }
+
+        {
+            const { manager, python, db, persistenceCalls, emitted } = makeStateRetentionManager();
+            const target = makeStateRetentionDevice({
+                is_redirected: true,
+                redirect_url: 'https://example.test/',
+                session_id: 'redirect-before-delete'
+            });
+            let spoofStops = 0;
+            (manager as any).devices.set(target.ip, target);
+            db.getDeviceByMac = async () => target;
+            python.stopSpoof = async () => { spoofStops++; };
+            python.stopRedirect = async () => { throw new Error('delete redirect teardown failed'); };
+            const before = snapshotDevice(target);
+
+            await recordRetentionCase(
+                'deleteDevice active redirect',
+                'delete redirect teardown failed',
+                () => manager.deleteDevice(target.mac),
+                () => {
+                    assert.deepStrictEqual(target, before);
+                    assert.strictEqual((manager as any).devices.get(target.ip), target);
+                    assert.strictEqual(spoofStops, 0);
+                    assert.deepStrictEqual(persistenceCalls, []);
+                    assert.deepStrictEqual(emitted, []);
+                },
+                failures
+            );
+        }
+
+        assert.deepStrictEqual(
+            failures,
+            [],
+            `DeviceManager teardown retention regressions:\n${failures.map(failure => `  - ${failure}`).join('\n')}`
+        );
+        console.log('  ✓ Failure safety: user teardown operations preserve memory, SQLite, and events');
     }
 
     // Test 21: init() runs a retention sweep at startup — stale anonymous device archived,

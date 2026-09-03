@@ -1,4 +1,8 @@
 import assert from 'assert';
+import { EventEmitter } from 'events';
+import { createServer } from 'http';
+import { createRouter } from '../src/api/routes';
+import { WebSocketManager } from '../src/websocket';
 
 export async function runApiRoutesTests() {
     console.log('\n--- [Node] Testing API Route Handlers & Input Validations ---');
@@ -178,5 +182,151 @@ export async function runApiRoutesTests() {
         assert.ok(mockDiagnostics.logs.length >= 2);
 
         console.log('  ✓ Happy Path & Hardware Verification: Real Npcap & System Diagnostics payload verified');
+    }
+
+    // Contract: the Bettercap DNS route forwards the complete Python configuration object.
+    {
+        const dnsConfig = {
+            success: true,
+            rules: [{ id: 'rule-1', domain: 'example.test' }],
+            spoof_all_enabled: true,
+            spoof_all_address: '192.168.1.9',
+            default_ttl: 55
+        };
+        const manager = {
+            getBettercapDnsRules: async () => dnsConfig
+        };
+        const router = createRouter(manager as any);
+        const layer = (router as any).stack.find((item: any) =>
+            item.route?.path === '/api/bettercap/dns/rules' && item.route.methods.get
+        );
+        assert.ok(layer, 'Bettercap DNS rules route must be registered');
+
+        let responseBody: any;
+        await layer.route.stack[0].handle(
+            {} as any,
+            { json: (body: any) => { responseBody = body; } } as any,
+            () => {}
+        );
+        assert.deepStrictEqual(responseBody, dnsConfig);
+        console.log('  ✓ Contract: Bettercap DNS route preserves full configuration');
+    }
+
+    // Contract: a typed downstream validation error keeps its 4xx status and safe detail.
+    {
+        const bridgeModule: any = await import('../src/services/pythonBridge');
+        const routesModule: any = await import('../src/api/routes');
+        const error = new bridgeModule.BridgeHttpError(422, 'Target IP must be RFC1918');
+        let statusCode = 0;
+        let responseBody: any;
+        const response = {
+            status(code: number) {
+                statusCode = code;
+                return this;
+            },
+            json(body: any) {
+                responseBody = body;
+                return this;
+            }
+        };
+        routesModule.respondError(response as any, error);
+        assert.strictEqual(statusCode, 422);
+        assert.deepStrictEqual(responseBody, {
+            success: false,
+            error: 'Target IP must be RFC1918'
+        });
+        console.log('  ✓ Contract: downstream validation 4xx is mapped without message guessing');
+    }
+
+    // Contract: Gaming status is broadcast once, via the DeviceManager event only.
+    {
+        class FakeDeviceManager extends EventEmitter {
+            getDevices() { return []; }
+            isScanning() { return false; }
+            async getWifiInfo() { return null; }
+            async getTelemetry() { return null; }
+            async getGamingStatus() { return null; }
+            async toggleGamingMode(enabled: boolean) {
+                const status = { is_enabled: enabled };
+                this.emit('gamingStatusChanged', status);
+                return status;
+            }
+        }
+        class FakeSocket {
+            id = 'socket-test';
+            private handlers = new Map<string, (...args: any[]) => any>();
+            on(event: string, handler: (...args: any[]) => any) {
+                this.handlers.set(event, handler);
+                return this;
+            }
+            emit() { return true; }
+            async trigger(event: string, data: any) {
+                return await this.handlers.get(event)?.(data);
+            }
+        }
+
+        const manager = new FakeDeviceManager();
+        const httpServer = createServer();
+        const websocket = new WebSocketManager(httpServer, manager as any);
+        const broadcasts: string[] = [];
+        (websocket as any).io.emit = (event: string) => {
+            broadcasts.push(event);
+            return true;
+        };
+        const socket = new FakeSocket();
+        (websocket as any).handleConnection(socket);
+        await socket.trigger('toggleGamingMode', { enabled: true });
+        assert.strictEqual(
+            broadcasts.filter(event => event === 'gamingStatusUpdate').length,
+            1,
+            'manager event must be the only Gaming status broadcast'
+        );
+        await new Promise<void>(resolve => (websocket as any).io.close(() => resolve()));
+        console.log('  ✓ Contract: Gaming status has no duplicate direct broadcast');
+    }
+
+    // Contract: SIGINT and SIGTERM share one idempotent shutdown handler.
+    {
+        const { registerGracefulShutdown } = require('../src/shutdown');
+        const handlers = new Map<string, () => Promise<void>>();
+        const signalTarget = {
+            once(signal: string, handler: () => Promise<void>) {
+                handlers.set(signal, handler);
+                return this;
+            }
+        };
+        let stopAllCalls = 0;
+        let stopCalls = 0;
+        let dbCloseCalls = 0;
+        let serverCloseCalls = 0;
+        let exitCalls = 0;
+
+        const shutdown = registerGracefulShutdown({
+            pythonBridge: {
+                stopAll: async () => { stopAllCalls++; },
+                stop: () => { stopCalls++; }
+            },
+            databaseService: {
+                close: async () => { dbCloseCalls++; }
+            },
+            server: {
+                listening: true,
+                close: (callback: () => void) => {
+                    serverCloseCalls++;
+                    callback();
+                }
+            },
+            exit: () => { exitCalls++; },
+            logger: { log: () => {}, warn: () => {} }
+        }, signalTarget);
+
+        assert.strictEqual(handlers.get('SIGINT'), handlers.get('SIGTERM'));
+        assert.strictEqual(handlers.get('SIGINT'), shutdown);
+        await Promise.all([shutdown(), shutdown()]);
+        assert.deepStrictEqual(
+            { stopAllCalls, stopCalls, dbCloseCalls, serverCloseCalls, exitCalls },
+            { stopAllCalls: 1, stopCalls: 1, dbCloseCalls: 1, serverCloseCalls: 1, exitCalls: 1 }
+        );
+        console.log('  ✓ Contract: shared shutdown handler is idempotent across both signals');
     }
 }

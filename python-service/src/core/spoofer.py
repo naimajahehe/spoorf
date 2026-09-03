@@ -12,6 +12,7 @@ import sys
 import time
 import threading
 import random
+import uuid
 import subprocess  # dipakai _ensure_host_gateway_locked (sebelumnya hilang → NameError senyap)
 from typing import Dict, Optional, Any, List, Tuple
 from scapy.all import sendp, ARP, Ether, conf, ifaces
@@ -146,9 +147,14 @@ class ARPSpoofer:
           'racun = drop', jadi forwarding WAJIB OFF agar paket benar-benar jatuh
           saat fase racun. Bila forwarding ON, throttle tidak akan membatasi apa pun.
         """
-        if not self._sessions:
+        active_sessions = [
+            session
+            for session in self._sessions.values()
+            if session.get('active', True)
+        ]
+        if not active_sessions:
             return True
-        return any(s.get('is_redirect', False) for s in self._sessions.values())
+        return any(s.get('is_redirect', False) for s in active_sessions)
 
     def _build_unicast_reply_packet(self, target_ip: str, spoof_ip: str, target_mac: str) -> List[Ether]:
         """
@@ -404,9 +410,9 @@ class ARPSpoofer:
         # KEAMANAN (P1): validasi parameter gateway juga — nilai ini masuk ke
         # paket ARP dan (di Windows) ke perintah netsh. Tanpa validasi, gateway_ip/
         # gateway_mac tak tepercaya membuka command injection & paket malformed.
-        if gateway_ip and not is_valid_private_ip(gateway_ip):
+        if not is_valid_private_ip(gateway_ip):
             raise SpoofError(f"Gateway IP '{gateway_ip}' di luar jangkauan RFC 1918 (private subnet)!")
-        if gateway_mac and not is_valid_mac(gateway_mac):
+        if not is_valid_mac(gateway_mac):
             raise SpoofError(f"Format MAC gateway '{gateway_mac}' tidak valid!")
 
         # Invariant 1: Gateway Immunity
@@ -447,8 +453,12 @@ class ARPSpoofer:
         for old_sid in existing_sids:
             try:
                 self.stop(old_sid)
+            except SpoofError:
+                raise
             except Exception as e:
-                logger.debug(f"Notice stopping prior session {old_sid}: {e}")
+                raise SpoofError(
+                    f"Gagal menghentikan session sebelumnya {old_sid}: {e}"
+                ) from e
 
         # Koordinasi IPv6 Dual-Stack jika target memiliki IPv6
         v6_session_id = None
@@ -465,7 +475,7 @@ class ARPSpoofer:
             except Exception as e:
                 logger.warning(f"Notice starting coordinated IPv6 session: {e}")
 
-        session_id = f"{victim_ip}_{int(time.time())}"
+        session_id = f"{victim_ip}_{uuid.uuid4().hex}"
         with self._lock:
             stop_event = threading.Event()
             session = {
@@ -539,58 +549,98 @@ class ARPSpoofer:
                 raise SessionNotFoundError(f"Session {session_id} tidak ditemukan")
 
             session = dict(self._sessions[session_id])
+            was_restore_retry = bool(session.get('restore_failed'))
+            self._sessions[session_id]['active'] = False
+            self._sessions[session_id]['restore_failed'] = False
             stop_event = self._stop_events.get(session_id)
             if stop_event:
                 stop_event.set()
 
+            worker = self._threads.get(session_id)
             session_iface = self._interface
             v6_id = session.get('v6_session_id')
+            self._running = any(
+                current.get('active', False)
+                for current in self._sessions.values()
+            )
 
-            del self._sessions[session_id]
-            if session_id in self._threads:
-                del self._threads[session_id]
-            if session_id in self._stop_events:
-                del self._stop_events[session_id]
+        restore_error = None
+
+        if worker and worker is not threading.current_thread():
+            try:
+                worker.join(timeout=2.0)
+                if worker.is_alive():
+                    raise RuntimeError("worker spoofing tidak berhenti")
+            except Exception as e:
+                restore_error = e
 
         # Hentikan sesi IPv6 terkoordinasi jika ada
-        if v6_id:
+        if v6_id and restore_error is None:
             try:
                 ndp_spoofer.stop_spoof(v6_id)
+            except SessionNotFoundError as e:
+                if not was_restore_retry:
+                    restore_error = e
             except Exception as e:
-                logger.debug(f"Notice stopping coordinated IPv6 session: {e}")
+                restore_error = e
+            if restore_error is None:
+                with self._lock:
+                    retained = self._sessions.get(session_id)
+                    if retained is not None:
+                        retained['v6_session_id'] = None
 
         # Operasi restorasi jaringan DI LUAR LOCK (tidak memblokir thread atau API lain!)
-        try:
-            restore_v_pkts, restore_gw_pkts = self._build_restore_packets(
-                session['victim_ip'],
-                session['victim_mac'],
-                session['gateway_ip'],
-                session['gateway_mac']
-            )
-            for _ in range(4):
-                for p in restore_v_pkts:
-                    sendp(p, iface=session_iface, verbose=False)
-                for p in restore_gw_pkts:
-                    sendp(p, iface=session_iface, verbose=False)
-                time.sleep(0.03)
-        except Exception as e:
-            logger.error(f"Gagal restore ARP: {e}")
+        if restore_error is None:
+            try:
+                restore_v_pkts, restore_gw_pkts = self._build_restore_packets(
+                    session['victim_ip'],
+                    session['victim_mac'],
+                    session['gateway_ip'],
+                    session['gateway_mac']
+                )
+                for _ in range(4):
+                    for p in restore_v_pkts:
+                        sendp(p, iface=session_iface, verbose=False)
+                    for p in restore_gw_pkts:
+                        sendp(p, iface=session_iface, verbose=False)
+                    time.sleep(0.03)
+            except Exception as e:
+                restore_error = e
 
         # Hitung target IP forwarding & flag running DI DALAM lock; penerapan DI LUAR lock
         with self._lock:
-            no_sessions_left = len(self._sessions) == 0
-            if no_sessions_left:
-                self._running = False
+            if restore_error is None:
+                self._sessions.pop(session_id, None)
+                self._threads.pop(session_id, None)
+                self._stop_events.pop(session_id, None)
+            elif session_id in self._sessions:
+                self._sessions[session_id]['active'] = False
+                self._sessions[session_id]['restore_failed'] = True
+
+            self._running = any(
+                current.get('active', False)
+                for current in self._sessions.values()
+            )
+            no_active_sessions = not self._running
+            no_sessions_left = not self._sessions
             forward_target = self._compute_forward_target()
             iface_name = self._win_interface_name
 
-        if no_sessions_left and self._fwd_touched:
-            # Sesi terakhir berhenti -> pulihkan forwarding ke baseline asli.
+        if no_active_sessions and self._fwd_touched:
+            # Pulihkan baseline segera untuk safety, tetapi pertahankan snapshot
+            # selama masih ada sesi gagal yang perlu direstore ulang.
             set_ip_forwarding(bool(self._fwd_was_enabled), iface_name)
-            self._fwd_touched = False
-            self._fwd_was_enabled = None
-        else:
+            if no_sessions_left:
+                self._fwd_touched = False
+                self._fwd_was_enabled = None
+        elif not no_active_sessions:
             set_ip_forwarding(forward_target, iface_name)
+
+        if restore_error is not None:
+            logger.error(f"Gagal restore session {session_id}: {restore_error}")
+            raise SpoofError(
+                f"Gagal memulihkan ARP session {session_id}: {restore_error}"
+            ) from restore_error
 
         logger.info(f"✅ Session {session_id} dihentikan dengan mulus")
         return True
@@ -599,28 +649,51 @@ class ARPSpoofer:
         logger.info("🛑 Menghentikan semua session...")
         with self._lock:
             session_ids = list(self._sessions.keys())
+        failures = []
 
         for sid in session_ids:
             try:
                 self.stop(sid)
             except Exception as e:
                 logger.error(f"Gagal stop {sid}: {e}")
+                failures.append((sid, e))
 
         try:
             ndp_spoofer.stop_all()
         except Exception as e:
-            logger.debug(f"Notice stopping all IPv6: {e}")
+            logger.error(f"Gagal stop semua session IPv6: {e}")
+            failures.append(("IPv6 cleanup", e))
 
         with self._lock:
-            self._running = False
+            self._running = any(
+                session.get('active', False)
+                for session in self._sessions.values()
+            )
+            no_active_sessions = not self._running
+            no_sessions_left = not self._sessions
             iface_name = self._win_interface_name
+            forwarding_baseline = bool(self._fwd_was_enabled)
+            forwarding_was_touched = self._fwd_touched
 
         # Pulihkan IP forwarding ke BASELINE asli (bukan hard-set True) agar host
         # operator kembali seperti sebelum aplikasi dijalankan (pola bettercap).
-        if self._fwd_touched:
-            set_ip_forwarding(bool(self._fwd_was_enabled), iface_name)
-            self._fwd_touched = False
-            self._fwd_was_enabled = None
+        if no_active_sessions and forwarding_was_touched:
+            try:
+                set_ip_forwarding(forwarding_baseline, iface_name)
+            except Exception as e:
+                logger.error(f"Gagal memulihkan IP forwarding: {e}")
+                failures.append(("IP forwarding", e))
+            else:
+                if no_sessions_left:
+                    with self._lock:
+                        if not self._sessions:
+                            self._fwd_touched = False
+                            self._fwd_was_enabled = None
+
+        if failures:
+            details = "; ".join(f"{scope}: {error}" for scope, error in failures)
+            raise SpoofError(f"Gagal menghentikan semua ARP session: {details}")
+
         logger.info("✅ Semua session dihentikan")
 
     def get_sessions(self) -> Dict[str, Dict[str, Any]]:
@@ -633,6 +706,7 @@ class ARPSpoofer:
                     'gateway_mac': s['gateway_mac'],
                     'speed_limit': s.get('speed_limit', 0),
                     'active': s['active'],
+                    'restore_failed': s.get('restore_failed', False),
                     'started_at': s['started_at'],
                     'packets_sent': s['packets_sent']
                 }
@@ -642,7 +716,10 @@ class ARPSpoofer:
     @property
     def is_running(self) -> bool:
         with self._lock:
-            return len(self._sessions) > 0
+            return any(
+                session.get('active', False)
+                for session in self._sessions.values()
+            )
 
     def micro_cut_batch(self, targets: List[Dict[str, Any]], hold_seconds: float = 1.5) -> Dict[str, Any]:
         """

@@ -1,6 +1,6 @@
 # Security Policy — NetCut Sentinel (Spoorf)
 
-> Terakhir diperbarui: **2026-08-31**. Ringkasan model ancaman, kontrol yang **sudah** diterapkan, dan cara melapor. Audit lengkap: [`docs/SECURITY_AUDIT.md`](docs/SECURITY_AUDIT.md).
+> Terakhir diperbarui: **2026-09-04**. Ringkasan model ancaman, kontrol yang **sudah** diterapkan, dan cara melapor. Audit lengkap: [`docs/SECURITY_AUDIT.md`](docs/SECURITY_AUDIT.md).
 
 ## Penggunaan yang Sah (Authorized Use Only)
 
@@ -23,6 +23,8 @@ Spoorf adalah alat kontrol akses jaringan Layer‑2 (ARP spoofing, DNS spoof, tr
 | **SQL parameterized** (better‑sqlite3, tanpa string‑interpolation) | `backend-node/src/services/database.ts` |
 | **Electron hardening** (`contextIsolation: true`, `nodeIntegration: false`) | `desktop-electron/src/main.ts`, `preload.ts` |
 | **Gateway/Self immunity** (anti self‑cut) & isolasi subnet | `spoofer.py`, `deviceManager.ts` |
+| **Fail-closed cleanup state** (sesi spoof tetap retryable bila restorasi ARP gagal) | `python-service/src/core/spoofer.py`, `backend-node/src/services/deviceManager.ts` |
+| **Cleanup shutdown satu-kali** untuk `SIGINT` dan `SIGTERM` | `backend-node/src/shutdown.ts` |
 | **Captive portal escaping** (whitelist skema + `html.escape` + JS‑safe literal) — P2 | `python-service/src/core/redirector/portal_server.py` |
 | **Sanitasi error** (log penuh, pesan generik utk error tak terduga) — P2 | `backend-node/src/api/routes.ts` (`respondError`), `server.py` (5xx scrubber) |
 | **Proteksi izin Root CA key** (chmod 600 / icacls saat generate) — P2 | `python-service/src/core/interceptor/certs.py` |

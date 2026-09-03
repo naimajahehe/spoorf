@@ -9,8 +9,7 @@ Menguji:
 """
 
 import unittest
-import urllib.request
-import time
+from io import BytesIO
 from unittest.mock import MagicMock, patch
 
 from src.core.redirector.dns_spoofer import DNSSpoofer
@@ -82,41 +81,26 @@ class TestRedirector(unittest.TestCase):
         self.assertFalse(DNSSpoofer.is_whitelisted("detik.com"))
 
     def test_captive_portal_http_responses(self):
-        """Uji apakah Portal Server mengembalikan HTTP 302 Found ke URL Instagram."""
-        test_port = 18088
+        """Uji handler HTTP 302 tanpa membuka server/socket sungguhan."""
         target_url = "https://www.instagram.com/sentinel_ops/"
-        server = CaptivePortalServer(port=test_port, redirect_url=target_url, instagram_username="sentinel_ops")
-        server.start()
-        time.sleep(0.3)
+        for path in ("/", "/generate_204", "/hotspot-detect.html"):
+            with self.subTest(path=path):
+                handler = PortalRequestHandler.__new__(PortalRequestHandler)
+                handler.path = path
+                handler.redirect_url = target_url
+                handler.instagram_username = "sentinel_ops"
+                handler.wfile = BytesIO()
+                handler.send_response = MagicMock()
+                handler.send_header = MagicMock()
+                handler.end_headers = MagicMock()
 
-        try:
-            # Custom HTTP redirect handler agar tidak otomatis mengikuti URL eksternal
-            class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
-                def http_error_302(self, req, fp, code, msg, headers):
-                    return fp
+                handler.do_GET()
 
-            opener = urllib.request.build_opener(NoRedirectHandler)
-
-            # 1. Test standard GET /
-            req = urllib.request.Request(f"http://127.0.0.1:{test_port}/")
-            with opener.open(req) as resp:
-                self.assertEqual(resp.status, 302)
-                self.assertEqual(resp.headers.get("Location"), target_url)
-
-            # 2. Test Android Captive Portal Probe /generate_204
-            req_probe = urllib.request.Request(f"http://127.0.0.1:{test_port}/generate_204")
-            with opener.open(req_probe) as resp:
-                self.assertEqual(resp.status, 302)
-                self.assertEqual(resp.headers.get("Location"), target_url)
-
-            # 3. Test iOS Captive Portal Probe /hotspot-detect.html
-            req_apple = urllib.request.Request(f"http://127.0.0.1:{test_port}/hotspot-detect.html")
-            with opener.open(req_apple) as resp:
-                self.assertEqual(resp.status, 302)
-                self.assertEqual(resp.headers.get("Location"), target_url)
-
-        finally:
-            server.stop()
+                handler.send_response.assert_called_once_with(302)
+                self.assertIn(
+                    unittest.mock.call("Location", target_url),
+                    handler.send_header.call_args_list,
+                )
 
     @patch("src.core.redirector.manager.get_network_info")
     def test_redirect_invariants_enforced(self, mock_net_info):
@@ -160,28 +144,946 @@ class TestRedirector(unittest.TestCase):
             )
         self.assertIn("RFC 1918", str(ctx.exception))
 
+    @patch("src.core.redirector.manager.DNSSpoofer")
+    @patch("src.core.redirector.manager.CaptivePortalServer")
+    @patch("src.core.redirector.manager.set_ip_forwarding")
+    @patch("src.core.redirector.manager.get_network_info")
+    def test_redirect_validates_all_inputs_before_stopping_existing_session(
+        self,
+        mock_net_info,
+        mock_set_forwarding,
+        mock_portal_class,
+        mock_dns_class,
+    ):
+        """Malformed victim/gateway inputs cannot disrupt an existing redirect."""
+        mock_net_info.return_value = {"ip": "192.168.1.10", "gateway": "192.168.1.1"}
+        mock_spoofer = MagicMock()
+        mock_spoofer._self_mac = "a8:3b:76:0c:dc:55"
+        manager = RedirectManager(mock_spoofer)
+        victim_ip = "192.168.1.55"
+        manager._sessions[victim_ip] = {"victim_ip": victim_ip}
+
+        invalid_inputs = (
+            {"victim_mac": "not-a-mac"},
+            {"gateway_ip": "8.8.8.8"},
+            {"gateway_mac": "not-a-mac"},
+        )
+        defaults = {
+            "victim_ip": victim_ip,
+            "victim_mac": "00:11:22:33:44:55",
+            "gateway_ip": "192.168.1.1",
+            "gateway_mac": "00:aa:bb:cc:dd:ee",
+            "redirect_url": "https://www.instagram.com/sentinel_ops/",
+        }
+
+        with patch.object(manager, "_stop_session_unlocked") as mock_stop_existing:
+            for invalid in invalid_inputs:
+                with self.subTest(invalid=invalid):
+                    args = {**defaults, **invalid}
+                    with self.assertRaises(SpoofError):
+                        manager.start_redirect(**args)
+
+        mock_stop_existing.assert_not_called()
+        mock_portal_class.assert_not_called()
+        mock_spoofer.start.assert_not_called()
+        mock_set_forwarding.assert_not_called()
+        mock_dns_class.assert_not_called()
+
+    @patch("src.core.redirector.manager.CaptivePortalServer")
+    @patch("src.core.redirector.manager.get_network_info")
+    def test_redirect_start_rolls_back_portal_when_spoofer_fails(
+        self,
+        mock_net_info,
+        mock_portal_class,
+    ):
+        """A newly started portal is stopped if ARP spoof startup fails."""
+        mock_net_info.return_value = {"ip": "192.168.1.10", "gateway": "192.168.1.1"}
+        mock_spoofer = MagicMock()
+        mock_spoofer._self_mac = "a8:3b:76:0c:dc:55"
+        mock_spoofer._interface = "test-interface"
+        mock_spoofer.start.side_effect = SpoofError("ARP start failed")
+        portal = mock_portal_class.return_value
+        portal._running = False
+        manager = RedirectManager(mock_spoofer)
+
+        with self.assertRaises(SpoofError):
+            manager.start_redirect(
+                victim_ip="192.168.1.55",
+                victim_mac="00:11:22:33:44:55",
+                gateway_ip="192.168.1.1",
+                gateway_mac="00:aa:bb:cc:dd:ee",
+                redirect_url="https://www.instagram.com/sentinel_ops/",
+            )
+
+        portal.stop.assert_called_once_with()
+        self.assertIsNone(manager.portal_server)
+        self.assertEqual(manager.get_sessions(), {})
+
+    @patch("src.core.redirector.manager.DNSSpoofer")
+    @patch("src.core.redirector.manager.CaptivePortalServer")
+    @patch("src.core.redirector.manager.set_ip_forwarding", return_value=False)
+    @patch("src.core.redirector.manager.get_network_info")
+    def test_redirect_start_rolls_back_when_forwarding_enable_fails(
+        self,
+        mock_net_info,
+        mock_set_forwarding,
+        mock_portal_class,
+        mock_dns_class,
+    ):
+        """A failed forwarding enable unwinds ARP and portal before raising."""
+        mock_net_info.return_value = {"ip": "192.168.1.10", "gateway": "192.168.1.1"}
+        mock_spoofer = MagicMock()
+        mock_spoofer._self_mac = "a8:3b:76:0c:dc:55"
+        mock_spoofer._interface = "test-interface"
+        mock_spoofer._win_interface_name = "test-interface"
+        mock_spoofer.start.return_value = "arp-1"
+        portal = mock_portal_class.return_value
+        portal._running = False
+        manager = RedirectManager(mock_spoofer)
+
+        with self.assertRaises(SpoofError):
+            manager.start_redirect(
+                victim_ip="192.168.1.55",
+                victim_mac="00:11:22:33:44:55",
+                gateway_ip="192.168.1.1",
+                gateway_mac="00:aa:bb:cc:dd:ee",
+                redirect_url="https://www.instagram.com/sentinel_ops/",
+            )
+
+        mock_set_forwarding.assert_called_once_with(True, "test-interface")
+        mock_spoofer.stop.assert_called_once_with("arp-1")
+        portal.stop.assert_called_once_with()
+        mock_dns_class.assert_not_called()
+        self.assertIsNone(manager.portal_server)
+        self.assertEqual(manager.get_sessions(), {})
+
+    @patch("src.core.redirector.manager.DNSSpoofer")
+    @patch("src.core.redirector.manager.CaptivePortalServer")
+    @patch("src.core.redirector.manager.set_ip_forwarding")
+    @patch("src.core.redirector.manager.get_network_info")
+    def test_redirect_start_rolls_back_resources_in_reverse_order(
+        self,
+        mock_net_info,
+        mock_set_forwarding,
+        mock_portal_class,
+        mock_dns_class,
+    ):
+        """DNS startup failure unwinds DNS, ARP/forwarding, then portal."""
+        events = []
+        mock_net_info.return_value = {"ip": "192.168.1.10", "gateway": "192.168.1.1"}
+        mock_spoofer = MagicMock()
+        mock_spoofer._self_mac = "a8:3b:76:0c:dc:55"
+        mock_spoofer._interface = "test-interface"
+        mock_spoofer._win_interface_name = "test-interface"
+        mock_spoofer.start.side_effect = lambda **_: events.append("spoofer.start") or "arp-1"
+        mock_spoofer.stop.side_effect = lambda *_: events.append("spoofer.stop")
+        portal = mock_portal_class.return_value
+        portal._running = False
+        portal.start.side_effect = lambda: events.append("portal.start")
+        portal.stop.side_effect = lambda: events.append("portal.stop")
+        mock_set_forwarding.side_effect = lambda *_: events.append("forwarding.enable") or True
+        dns = mock_dns_class.return_value
+        dns.start.side_effect = lambda: (
+            events.append("dns.start"),
+            (_ for _ in ()).throw(RuntimeError("DNS start failed")),
+        )[-1]
+        dns.stop.side_effect = lambda: events.append("dns.stop")
+        manager = RedirectManager(mock_spoofer)
+
+        with self.assertRaises(RuntimeError):
+            manager.start_redirect(
+                victim_ip="192.168.1.55",
+                victim_mac="00:11:22:33:44:55",
+                gateway_ip="192.168.1.1",
+                gateway_mac="00:aa:bb:cc:dd:ee",
+                redirect_url="https://www.instagram.com/sentinel_ops/",
+            )
+
+        self.assertEqual(
+            events,
+            [
+                "portal.start",
+                "spoofer.start",
+                "forwarding.enable",
+                "dns.start",
+                "dns.stop",
+                "spoofer.stop",
+                "portal.stop",
+            ],
+        )
+        self.assertIsNone(manager.portal_server)
+        self.assertEqual(manager.get_sessions(), {})
+
+    @patch("src.core.redirector.manager.get_network_info")
+    def test_redirect_stop_retains_failed_cleanup_for_retry(self, mock_net_info):
+        """Stop failures are explicit and retain only resources that still need cleanup."""
+        mock_net_info.return_value = {"ip": "192.168.1.10", "gateway": "192.168.1.1"}
+        mock_spoofer = MagicMock()
+        dns = MagicMock()
+        dns.stop.side_effect = [RuntimeError("DNS stop failed"), None]
+        mock_spoofer.stop.side_effect = [SpoofError("ARP stop failed"), True]
+        portal = MagicMock()
+        portal._running = True
+        manager = RedirectManager(mock_spoofer)
+        manager.portal_server = portal
+        victim_ip = "192.168.1.55"
+        manager._sessions[victim_ip] = {
+            "victim_ip": victim_ip,
+            "victim_mac": "00:11:22:33:44:55",
+            "gateway_ip": "192.168.1.1",
+            "gateway_mac": "00:aa:bb:cc:dd:ee",
+            "redirect_url": "https://www.instagram.com/old/",
+            "instagram_username": "old",
+            "arp_session_id": "arp-1",
+            "dns_spoofer": dns,
+            "started_at": 1.0,
+        }
+
+        with self.assertRaises(SpoofError) as ctx:
+            manager.stop_redirect(victim_ip)
+
+        self.assertIn("DNS stop failed", str(ctx.exception))
+        self.assertIn("ARP stop failed", str(ctx.exception))
+        self.assertIn(victim_ip, manager._sessions)
+        self.assertIs(manager._sessions[victim_ip]["dns_spoofer"], dns)
+        self.assertEqual(manager._sessions[victim_ip]["arp_session_id"], "arp-1")
+
+        self.assertTrue(manager.stop_redirect(victim_ip))
+        self.assertNotIn(victim_ip, manager._sessions)
+        self.assertIsNone(manager.portal_server)
+        self.assertEqual(dns.stop.call_count, 2)
+        self.assertEqual(mock_spoofer.stop.call_count, 2)
+
+    @patch("src.core.redirector.manager.CaptivePortalServer")
+    @patch("src.core.redirector.manager.set_ip_forwarding", return_value=False)
+    @patch("src.core.redirector.manager.get_network_info")
+    def test_startup_rollback_retains_failed_arp_cleanup_for_stop_all(
+        self,
+        mock_net_info,
+        mock_set_forwarding,
+        mock_portal_class,
+    ):
+        """A failed startup rollback keeps its ARP handle until stop_all can retry it."""
+        mock_net_info.return_value = {"ip": "192.168.1.10", "gateway": "192.168.1.1"}
+        mock_spoofer = MagicMock()
+        mock_spoofer._self_mac = "a8:3b:76:0c:dc:55"
+        mock_spoofer._interface = "test-interface"
+        mock_spoofer._win_interface_name = "test-interface"
+        mock_spoofer.start.return_value = "arp-partial"
+        mock_spoofer.stop.side_effect = [
+            SpoofError("rollback ARP stop failed"),
+            True,
+        ]
+        portal = mock_portal_class.return_value
+        portal._running = False
+        manager = RedirectManager(mock_spoofer)
+
+        with self.assertRaises(SpoofError):
+            manager.start_redirect(
+                victim_ip="192.168.1.55",
+                victim_mac="00:11:22:33:44:55",
+                gateway_ip="192.168.1.1",
+                gateway_mac="00:aa:bb:cc:dd:ee",
+                redirect_url="https://www.instagram.com/sentinel_ops/",
+            )
+
+        self.assertEqual(mock_spoofer.stop.call_count, 1)
+        manager.stop_all()
+        self.assertEqual(mock_spoofer.stop.call_count, 2)
+        self.assertFalse(manager.stop_redirect("192.168.1.55"))
+
+    @patch("src.core.redirector.manager.get_network_info")
+    def test_stop_all_closes_portal_after_active_and_reused_portal_partial_cleanup(
+        self,
+        mock_net_info,
+    ):
+        """Successful global cleanup closes a portal skipped by both session passes."""
+        mock_net_info.return_value = {"ip": "192.168.1.10", "gateway": "192.168.1.1"}
+        mock_spoofer = MagicMock()
+        portal = MagicMock()
+        portal._running = True
+        portal.redirect_url = "https://www.instagram.com/current/"
+        portal.instagram_username = "current"
+        manager = RedirectManager(mock_spoofer)
+        manager.portal_server = portal
+        manager._sessions["192.168.1.44"] = {
+            "victim_ip": "192.168.1.44",
+            "victim_mac": "00:11:22:33:44:44",
+            "gateway_ip": "192.168.1.1",
+            "gateway_mac": "00:aa:bb:cc:dd:ee",
+            "redirect_url": portal.redirect_url,
+            "instagram_username": portal.instagram_username,
+            "arp_session_id": "active-arp",
+            "dns_spoofer": MagicMock(),
+            "started_at": 1.0,
+        }
+        manager._partial_sessions["192.168.1.55"] = {
+            "victim_ip": "192.168.1.55",
+            "victim_mac": "00:11:22:33:44:55",
+            "gateway_ip": "192.168.1.1",
+            "gateway_mac": "00:aa:bb:cc:dd:ee",
+            "redirect_url": "https://www.instagram.com/failed/",
+            "instagram_username": "failed",
+            "arp_session_id": "partial-arp",
+            "dns_spoofer": MagicMock(),
+            "portal_restore_target": (
+                portal.redirect_url,
+                portal.instagram_username,
+            ),
+            "stop_portal_when_clean": False,
+            "started_at": 2.0,
+        }
+
+        manager.stop_all()
+
+        self.assertEqual(manager._sessions, {})
+        self.assertEqual(manager._partial_sessions, {})
+        portal.stop.assert_called_once_with()
+        self.assertIsNone(manager.portal_server)
+
+    @patch("src.core.redirector.manager.CaptivePortalServer")
+    @patch("src.core.redirector.manager.get_network_info")
+    def test_reused_portal_target_is_restored_when_startup_fails(
+        self,
+        mock_net_info,
+        mock_portal_class,
+    ):
+        """A failed new redirect cannot mutate the portal used by existing sessions."""
+        mock_net_info.return_value = {"ip": "192.168.1.10", "gateway": "192.168.1.1"}
+        mock_spoofer = MagicMock()
+        mock_spoofer._self_mac = "a8:3b:76:0c:dc:55"
+        mock_spoofer._interface = "test-interface"
+        mock_spoofer.start.side_effect = SpoofError("ARP start failed")
+        portal = MagicMock()
+        portal._running = True
+        portal.redirect_url = "https://www.instagram.com/existing/"
+        portal.instagram_username = "existing"
+        manager = RedirectManager(mock_spoofer)
+        manager.portal_server = portal
+        existing = {
+            "victim_ip": "192.168.1.44",
+            "victim_mac": "00:11:22:33:44:44",
+            "gateway_ip": "192.168.1.1",
+            "gateway_mac": "00:aa:bb:cc:dd:ee",
+            "redirect_url": portal.redirect_url,
+            "instagram_username": portal.instagram_username,
+            "arp_session_id": "existing-arp",
+            "dns_spoofer": MagicMock(),
+            "started_at": 1.0,
+        }
+        manager._sessions[existing["victim_ip"]] = existing
+
+        with self.assertRaises(SpoofError):
+            manager.start_redirect(
+                victim_ip="192.168.1.55",
+                victim_mac="00:11:22:33:44:55",
+                gateway_ip="192.168.1.1",
+                gateway_mac="00:aa:bb:cc:dd:ee",
+                redirect_url="https://www.instagram.com/new/",
+                instagram_username="new",
+            )
+
+        self.assertEqual(
+            portal.update_target.call_args_list,
+            [
+                unittest.mock.call("https://www.instagram.com/new/", "new"),
+                unittest.mock.call(
+                    "https://www.instagram.com/existing/",
+                    "existing",
+                ),
+            ],
+        )
+        self.assertIs(manager.portal_server, portal)
+        self.assertIs(manager._sessions[existing["victim_ip"]], existing)
+        mock_spoofer.stop.assert_not_called()
+
+    @patch("src.core.redirector.manager.DNSSpoofer")
+    @patch("src.core.redirector.manager.CaptivePortalServer")
+    @patch("src.core.redirector.manager.set_ip_forwarding")
+    @patch("src.core.redirector.manager.get_network_info")
+    def test_duplicate_redirect_start_replaces_existing_session(
+        self,
+        mock_net_info,
+        mock_set_forwarding,
+        mock_portal_class,
+        mock_dns_class,
+    ):
+        """A duplicate start tears down the old redirect and starts its replacement."""
+        mock_net_info.return_value = {"ip": "192.168.1.10", "gateway": "192.168.1.1"}
+        mock_spoofer = MagicMock()
+        mock_spoofer._self_mac = "a8:3b:76:0c:dc:55"
+        mock_spoofer._interface = "test-interface"
+        mock_spoofer._win_interface_name = "test-interface"
+        mock_spoofer.start.return_value = "new-arp"
+        old_portal = MagicMock()
+        old_portal._running = True
+        old_portal.redirect_url = "https://www.instagram.com/existing/"
+        old_portal.instagram_username = "existing"
+        new_portal = mock_portal_class.return_value
+        new_portal._running = False
+        mock_set_forwarding.return_value = True
+        manager = RedirectManager(mock_spoofer)
+        manager.portal_server = old_portal
+        victim_ip = "192.168.1.55"
+        existing_dns = MagicMock()
+        existing = {
+            "victim_ip": victim_ip,
+            "victim_mac": "00:11:22:33:44:55",
+            "gateway_ip": "192.168.1.1",
+            "gateway_mac": "00:aa:bb:cc:dd:ee",
+            "redirect_url": old_portal.redirect_url,
+            "instagram_username": old_portal.instagram_username,
+            "arp_session_id": "existing-arp",
+            "dns_spoofer": existing_dns,
+            "started_at": 1.0,
+        }
+        manager._sessions[victim_ip] = existing
+
+        result = manager.start_redirect(
+            victim_ip=victim_ip,
+            victim_mac="00:11:22:33:44:55",
+            gateway_ip="192.168.1.1",
+            gateway_mac="00:aa:bb:cc:dd:ee",
+            redirect_url="https://www.instagram.com/new/",
+            instagram_username="new",
+        )
+
+        existing_dns.stop.assert_called_once_with()
+        mock_spoofer.stop.assert_any_call("existing-arp")
+        old_portal.stop.assert_called_once_with()
+        new_portal.start.assert_called_once_with()
+        mock_spoofer.start.assert_called_once()
+        mock_dns_class.return_value.start.assert_called_once_with()
+        self.assertEqual(result["arp_session_id"], "new-arp")
+        self.assertEqual(result["redirect_url"], "https://www.instagram.com/new/")
+        self.assertEqual(manager._sessions[victim_ip]["arp_session_id"], "new-arp")
+        self.assertIs(manager.portal_server, new_portal)
+
+    @patch("src.core.redirector.manager.DNSSpoofer")
+    @patch("src.core.redirector.manager.CaptivePortalServer")
+    @patch("src.core.redirector.manager.set_ip_forwarding")
+    @patch("src.core.redirector.manager.get_network_info")
+    def test_duplicate_redirect_start_keeps_old_session_when_teardown_fails(
+        self,
+        mock_net_info,
+        mock_set_forwarding,
+        mock_portal_class,
+        mock_dns_class,
+    ):
+        """A failed old teardown aborts replacement and retains retryable state."""
+        mock_net_info.return_value = {"ip": "192.168.1.10", "gateway": "192.168.1.1"}
+        mock_spoofer = MagicMock()
+        mock_spoofer._self_mac = "a8:3b:76:0c:dc:55"
+        mock_spoofer._interface = "test-interface"
+        mock_spoofer.stop.side_effect = SpoofError("old ARP teardown failed")
+        portal = MagicMock()
+        portal._running = True
+        portal.redirect_url = "https://www.instagram.com/existing/"
+        portal.instagram_username = "existing"
+        manager = RedirectManager(mock_spoofer)
+        manager.portal_server = portal
+        victim_ip = "192.168.1.55"
+        existing = {
+            "victim_ip": victim_ip,
+            "victim_mac": "00:11:22:33:44:55",
+            "gateway_ip": "192.168.1.1",
+            "gateway_mac": "00:aa:bb:cc:dd:ee",
+            "redirect_url": portal.redirect_url,
+            "instagram_username": portal.instagram_username,
+            "arp_session_id": "existing-arp",
+            "dns_spoofer": MagicMock(),
+            "started_at": 1.0,
+        }
+        manager._sessions[victim_ip] = existing
+
+        with self.assertRaises(SpoofError) as ctx:
+            manager.start_redirect(
+                victim_ip=victim_ip,
+                victim_mac="00:11:22:33:44:55",
+                gateway_ip="192.168.1.1",
+                gateway_mac="00:aa:bb:cc:dd:ee",
+                redirect_url="https://www.instagram.com/new/",
+                instagram_username="new",
+            )
+
+        self.assertIn("old ARP teardown failed", str(ctx.exception))
+        restored = manager._sessions[victim_ip]
+        self.assertEqual(restored["victim_mac"], existing["victim_mac"])
+        self.assertEqual(restored["redirect_url"], existing["redirect_url"])
+        self.assertEqual(restored["arp_session_id"], mock_spoofer.start.return_value)
+        self.assertIs(restored["dns_spoofer"], mock_dns_class.return_value)
+        self.assertEqual(restored["cleanup_arp_session_ids"], ["existing-arp"])
+        self.assertIs(manager.portal_server, portal)
+        portal.stop.assert_not_called()
+        mock_spoofer.start.assert_called_once()
+        mock_set_forwarding.assert_called_once_with(
+            True,
+            mock_spoofer._win_interface_name,
+        )
+        mock_portal_class.assert_not_called()
+        mock_dns_class.return_value.start.assert_called_once_with()
+
+    @patch("src.core.redirector.manager.DNSSpoofer")
+    @patch("src.core.redirector.manager.CaptivePortalServer")
+    @patch("src.core.redirector.manager.set_ip_forwarding", return_value=True)
+    @patch("src.core.redirector.manager.get_network_info")
+    def test_duplicate_dns_teardown_failure_keeps_old_redirect_operational(
+        self,
+        mock_net_info,
+        mock_set_forwarding,
+        mock_portal_class,
+        mock_dns_class,
+    ):
+        """A first-stage DNS failure cannot tear down later old resources."""
+        mock_net_info.return_value = {"ip": "192.168.1.10", "gateway": "192.168.1.1"}
+        mock_spoofer = MagicMock()
+        mock_spoofer._self_mac = "a8:3b:76:0c:dc:55"
+        mock_spoofer._interface = "test-interface"
+        mock_spoofer._win_interface_name = "test-interface"
+        portal = MagicMock()
+        portal._running = True
+        portal.redirect_url = "https://www.instagram.com/existing/"
+        portal.instagram_username = "existing"
+        old_dns = MagicMock()
+        old_dns._running = True
+        old_dns.stop.side_effect = RuntimeError("old DNS teardown failed")
+        manager = RedirectManager(mock_spoofer)
+        manager.portal_server = portal
+        victim_ip = "192.168.1.55"
+        manager._sessions[victim_ip] = {
+            "victim_ip": victim_ip,
+            "victim_mac": "00:11:22:33:44:55",
+            "gateway_ip": "192.168.1.1",
+            "gateway_mac": "00:aa:bb:cc:dd:ee",
+            "redirect_url": portal.redirect_url,
+            "instagram_username": portal.instagram_username,
+            "arp_session_id": "existing-arp",
+            "dns_spoofer": old_dns,
+            "started_at": 1.0,
+        }
+
+        with self.assertRaises(SpoofError) as ctx:
+            manager.start_redirect(
+                victim_ip=victim_ip,
+                victim_mac="00:11:22:33:44:66",
+                gateway_ip="192.168.1.1",
+                gateway_mac="00:aa:bb:cc:dd:ee",
+                redirect_url="https://www.instagram.com/new/",
+                instagram_username="new",
+            )
+
+        self.assertIn("previous redirect restored", str(ctx.exception))
+        restored = manager._sessions[victim_ip]
+        self.assertIs(restored["dns_spoofer"], old_dns)
+        self.assertEqual(restored["arp_session_id"], "existing-arp")
+        self.assertIs(manager.portal_server, portal)
+        mock_spoofer.stop.assert_not_called()
+        mock_spoofer.start.assert_not_called()
+        portal.stop.assert_not_called()
+        mock_portal_class.assert_not_called()
+        mock_dns_class.assert_not_called()
+
+    @patch("src.core.redirector.manager.DNSSpoofer")
+    @patch("src.core.redirector.manager.CaptivePortalServer")
+    @patch("src.core.redirector.manager.set_ip_forwarding", return_value=True)
+    @patch("src.core.redirector.manager.get_network_info")
+    def test_duplicate_arp_teardown_failure_restores_stopped_old_resources(
+        self,
+        mock_net_info,
+        mock_set_forwarding,
+        mock_portal_class,
+        mock_dns_class,
+    ):
+        """An ARP teardown failure recreates the old DNS and ARP resources."""
+        mock_net_info.return_value = {"ip": "192.168.1.10", "gateway": "192.168.1.1"}
+        mock_spoofer = MagicMock()
+        mock_spoofer._self_mac = "a8:3b:76:0c:dc:55"
+        mock_spoofer._interface = "test-interface"
+        mock_spoofer._win_interface_name = "test-interface"
+        mock_spoofer.stop.side_effect = SpoofError("old ARP teardown failed")
+        mock_spoofer.start.return_value = "restored-arp"
+        portal = MagicMock()
+        portal._running = True
+        portal.redirect_url = "https://www.instagram.com/existing/"
+        portal.instagram_username = "existing"
+        old_dns = MagicMock()
+        old_dns._running = True
+        restored_dns = mock_dns_class.return_value
+        manager = RedirectManager(mock_spoofer)
+        manager.portal_server = portal
+        victim_ip = "192.168.1.55"
+        manager._sessions[victim_ip] = {
+            "victim_ip": victim_ip,
+            "victim_mac": "00:11:22:33:44:55",
+            "gateway_ip": "192.168.1.1",
+            "gateway_mac": "00:aa:bb:cc:dd:ee",
+            "redirect_url": portal.redirect_url,
+            "instagram_username": portal.instagram_username,
+            "arp_session_id": "existing-arp",
+            "dns_spoofer": old_dns,
+            "started_at": 1.0,
+        }
+
+        with self.assertRaises(SpoofError) as ctx:
+            manager.start_redirect(
+                victim_ip=victim_ip,
+                victim_mac="00:11:22:33:44:66",
+                gateway_ip="192.168.1.1",
+                gateway_mac="00:aa:bb:cc:dd:ee",
+                redirect_url="https://www.instagram.com/new/",
+                instagram_username="new",
+            )
+
+        self.assertIn("previous redirect restored", str(ctx.exception))
+        restored = manager._sessions[victim_ip]
+        self.assertEqual(restored["victim_mac"], "00:11:22:33:44:55")
+        self.assertEqual(restored["arp_session_id"], "restored-arp")
+        self.assertIs(restored["dns_spoofer"], restored_dns)
+        self.assertEqual(restored["cleanup_arp_session_ids"], ["existing-arp"])
+        self.assertIs(manager.portal_server, portal)
+        self.assertNotIn(victim_ip, manager._partial_sessions)
+        old_dns.stop.assert_called_once_with()
+        mock_spoofer.stop.assert_called_once_with("existing-arp")
+        restored_dns.start.assert_called_once_with()
+        mock_portal_class.assert_not_called()
+
+    @patch("src.core.redirector.manager.DNSSpoofer")
+    @patch("src.core.redirector.manager.CaptivePortalServer")
+    @patch("src.core.redirector.manager.set_ip_forwarding", return_value=True)
+    @patch("src.core.redirector.manager.get_network_info")
+    def test_duplicate_portal_teardown_failure_restores_entire_old_redirect(
+        self,
+        mock_net_info,
+        mock_set_forwarding,
+        mock_portal_class,
+        mock_dns_class,
+    ):
+        """A final-stage portal failure recreates every stopped old resource."""
+        mock_net_info.return_value = {"ip": "192.168.1.10", "gateway": "192.168.1.1"}
+        mock_spoofer = MagicMock()
+        mock_spoofer._self_mac = "a8:3b:76:0c:dc:55"
+        mock_spoofer._interface = "test-interface"
+        mock_spoofer._win_interface_name = "test-interface"
+        mock_spoofer.start.return_value = "restored-arp"
+        old_portal = MagicMock()
+        old_portal._running = True
+        old_portal.redirect_url = "https://www.instagram.com/existing/"
+        old_portal.instagram_username = "existing"
+
+        def fail_portal_stop():
+            old_portal._running = False
+            raise RuntimeError("old portal teardown failed")
+
+        old_portal.stop.side_effect = fail_portal_stop
+        restored_portal = mock_portal_class.return_value
+        restored_portal._running = False
+        restored_dns = mock_dns_class.return_value
+        manager = RedirectManager(mock_spoofer)
+        manager.portal_server = old_portal
+        victim_ip = "192.168.1.55"
+        old_dns = MagicMock()
+        manager._sessions[victim_ip] = {
+            "victim_ip": victim_ip,
+            "victim_mac": "00:11:22:33:44:55",
+            "gateway_ip": "192.168.1.1",
+            "gateway_mac": "00:aa:bb:cc:dd:ee",
+            "redirect_url": old_portal.redirect_url,
+            "instagram_username": old_portal.instagram_username,
+            "arp_session_id": "existing-arp",
+            "dns_spoofer": old_dns,
+            "started_at": 1.0,
+        }
+
+        with self.assertRaises(SpoofError) as ctx:
+            manager.start_redirect(
+                victim_ip=victim_ip,
+                victim_mac="00:11:22:33:44:66",
+                gateway_ip="192.168.1.1",
+                gateway_mac="00:aa:bb:cc:dd:ee",
+                redirect_url="https://www.instagram.com/new/",
+                instagram_username="new",
+            )
+
+        self.assertIn("previous redirect restored", str(ctx.exception))
+        restored = manager._sessions[victim_ip]
+        self.assertEqual(restored["arp_session_id"], "restored-arp")
+        self.assertIs(restored["dns_spoofer"], restored_dns)
+        self.assertIs(manager.portal_server, restored_portal)
+        old_dns.stop.assert_called_once_with()
+        mock_spoofer.stop.assert_called_once_with("existing-arp")
+        old_portal.stop.assert_called_once_with()
+        restored_portal.start.assert_called_once_with()
+        restored_dns.start.assert_called_once_with()
+
+    @patch("src.core.redirector.manager.DNSSpoofer")
+    @patch("src.core.redirector.manager.CaptivePortalServer")
+    @patch("src.core.redirector.manager.set_ip_forwarding", return_value=True)
+    @patch("src.core.redirector.manager.get_network_info")
+    def test_duplicate_retry_restores_pending_snapshot_before_replacement(
+        self,
+        mock_net_info,
+        mock_set_forwarding,
+        mock_portal_class,
+        mock_dns_class,
+    ):
+        """Retries retain failed recovery, then restore old state before replacement."""
+        mock_net_info.return_value = {"ip": "192.168.1.10", "gateway": "192.168.1.1"}
+        mock_spoofer = MagicMock()
+        mock_spoofer._self_mac = "a8:3b:76:0c:dc:55"
+        mock_spoofer._interface = "test-interface"
+        mock_spoofer._win_interface_name = "test-interface"
+        mock_spoofer.stop.side_effect = [
+            SpoofError("old ARP teardown failed"),
+            True,
+            True,
+        ]
+        mock_spoofer.start.side_effect = [
+            SpoofError("immediate restore failed"),
+            SpoofError("retry restore failed"),
+            "restored-arp",
+            "replacement-arp",
+        ]
+        old_portal = MagicMock()
+        old_portal._running = True
+        old_portal.redirect_url = "https://www.instagram.com/existing/"
+        old_portal.instagram_username = "existing"
+        replacement_portal = mock_portal_class.return_value
+        replacement_portal._running = False
+        restored_dns = MagicMock()
+        replacement_dns = MagicMock()
+        mock_dns_class.side_effect = [restored_dns, replacement_dns]
+        manager = RedirectManager(mock_spoofer)
+        manager.portal_server = old_portal
+        victim_ip = "192.168.1.55"
+        old_dns = MagicMock()
+        manager._sessions[victim_ip] = {
+            "victim_ip": victim_ip,
+            "victim_mac": "00:11:22:33:44:55",
+            "gateway_ip": "192.168.1.1",
+            "gateway_mac": "00:aa:bb:cc:dd:ee",
+            "redirect_url": old_portal.redirect_url,
+            "instagram_username": old_portal.instagram_username,
+            "arp_session_id": "existing-arp",
+            "dns_spoofer": old_dns,
+            "started_at": 1.0,
+        }
+        replacement_args = {
+            "victim_ip": victim_ip,
+            "victim_mac": "00:11:22:33:44:66",
+            "gateway_ip": "192.168.1.1",
+            "gateway_mac": "00:aa:bb:cc:dd:ee",
+            "redirect_url": "https://www.instagram.com/new/",
+            "instagram_username": "new",
+        }
+
+        with self.assertRaises(SpoofError) as first:
+            manager.start_redirect(**replacement_args)
+
+        self.assertIn("recovery incomplete", str(first.exception))
+        self.assertNotIn(victim_ip, manager._sessions)
+        partial = manager._partial_sessions[victim_ip]
+        self.assertEqual(partial["kind"], "replacement_recovery")
+        self.assertEqual(partial["status"], "recovery_pending")
+        self.assertEqual(
+            partial["recovery_snapshot"]["redirect_url"],
+            old_portal.redirect_url,
+        )
+        self.assertEqual(partial["resource_state"]["dns"], "stopped")
+        self.assertEqual(partial["resource_state"]["arp"], "stopped")
+        self.assertEqual(partial["resource_state"]["portal"], "live")
+
+        with self.assertRaises(SpoofError) as second:
+            manager.start_redirect(**replacement_args)
+
+        self.assertIn("retry restore failed", str(second.exception))
+        self.assertNotIn(victim_ip, manager._sessions)
+        self.assertIs(manager._partial_sessions[victim_ip], partial)
+        self.assertEqual(mock_spoofer.start.call_count, 2)
+        old_portal.stop.assert_not_called()
+
+        result = manager.start_redirect(**replacement_args)
+
+        self.assertEqual(result["arp_session_id"], "replacement-arp")
+        self.assertEqual(manager._sessions[victim_ip]["victim_mac"], "00:11:22:33:44:66")
+        self.assertEqual(manager._sessions[victim_ip]["redirect_url"], replacement_args["redirect_url"])
+        self.assertNotIn(victim_ip, manager._partial_sessions)
+        self.assertEqual(
+            [call.kwargs["victim_mac"] for call in mock_spoofer.start.call_args_list],
+            [
+                "00:11:22:33:44:55",
+                "00:11:22:33:44:55",
+                "00:11:22:33:44:55",
+                "00:11:22:33:44:66",
+            ],
+        )
+        restored_dns.start.assert_called_once_with()
+        restored_dns.stop.assert_called_once_with()
+        replacement_dns.start.assert_called_once_with()
+        old_portal.stop.assert_called_once_with()
+        replacement_portal.start.assert_called_once_with()
+
+    @patch("src.core.redirector.manager.DNSSpoofer")
+    @patch("src.core.redirector.manager.CaptivePortalServer")
+    @patch("src.core.redirector.manager.set_ip_forwarding", return_value=True)
+    @patch("src.core.redirector.manager.get_network_info")
+    def test_failed_duplicate_replacement_restores_previous_redirect(
+        self,
+        mock_net_info,
+        mock_set_forwarding,
+        mock_portal_class,
+        mock_dns_class,
+    ):
+        """A failed replacement recreates the prior redirect from its snapshot."""
+        mock_net_info.return_value = {"ip": "192.168.1.10", "gateway": "192.168.1.1"}
+        mock_spoofer = MagicMock()
+        mock_spoofer._self_mac = "a8:3b:76:0c:dc:55"
+        mock_spoofer._interface = "test-interface"
+        mock_spoofer._win_interface_name = "test-interface"
+        mock_spoofer.start.side_effect = ["replacement-arp", "restored-arp"]
+        old_portal = MagicMock()
+        old_portal._running = True
+        old_portal.redirect_url = "https://www.instagram.com/existing/"
+        old_portal.instagram_username = "existing"
+        replacement_portal = MagicMock()
+        replacement_portal._running = False
+        restored_portal = MagicMock()
+        restored_portal._running = False
+        mock_portal_class.side_effect = [replacement_portal, restored_portal]
+        replacement_dns = MagicMock()
+        replacement_dns.start.side_effect = RuntimeError("replacement DNS failed")
+        restored_dns = MagicMock()
+        mock_dns_class.side_effect = [replacement_dns, restored_dns]
+        manager = RedirectManager(mock_spoofer)
+        manager.portal_server = old_portal
+        victim_ip = "192.168.1.55"
+        manager._sessions[victim_ip] = {
+            "victim_ip": victim_ip,
+            "victim_mac": "00:11:22:33:44:55",
+            "gateway_ip": "192.168.1.1",
+            "gateway_mac": "00:aa:bb:cc:dd:ee",
+            "redirect_url": old_portal.redirect_url,
+            "instagram_username": old_portal.instagram_username,
+            "arp_session_id": "existing-arp",
+            "dns_spoofer": MagicMock(),
+            "started_at": 1.0,
+        }
+
+        with self.assertRaises(SpoofError) as ctx:
+            manager.start_redirect(
+                victim_ip=victim_ip,
+                victim_mac="00:11:22:33:44:55",
+                gateway_ip="192.168.1.1",
+                gateway_mac="00:aa:bb:cc:dd:ee",
+                redirect_url="https://www.instagram.com/new/",
+                instagram_username="new",
+            )
+
+        self.assertIn("previous redirect restored", str(ctx.exception))
+        restored = manager._sessions[victim_ip]
+        self.assertEqual(restored["redirect_url"], old_portal.redirect_url)
+        self.assertEqual(restored["instagram_username"], old_portal.instagram_username)
+        self.assertEqual(restored["arp_session_id"], "restored-arp")
+        self.assertIs(restored["dns_spoofer"], restored_dns)
+        self.assertIs(manager.portal_server, restored_portal)
+        self.assertNotIn(victim_ip, manager._partial_sessions)
+        self.assertEqual(
+            mock_spoofer.stop.call_args_list,
+            [
+                unittest.mock.call("existing-arp"),
+                unittest.mock.call("replacement-arp"),
+            ],
+        )
+
+    @patch("src.core.redirector.manager.DNSSpoofer")
+    @patch("src.core.redirector.manager.CaptivePortalServer")
+    @patch("src.core.redirector.manager.set_ip_forwarding", return_value=True)
+    @patch("src.core.redirector.manager.get_network_info")
+    def test_failed_duplicate_replacement_retains_recovery_state_when_restore_fails(
+        self,
+        mock_net_info,
+        mock_set_forwarding,
+        mock_portal_class,
+        mock_dns_class,
+    ):
+        """Failed replacement and restoration retain the prior snapshot for retry."""
+        mock_net_info.return_value = {"ip": "192.168.1.10", "gateway": "192.168.1.1"}
+        mock_spoofer = MagicMock()
+        mock_spoofer._self_mac = "a8:3b:76:0c:dc:55"
+        mock_spoofer._interface = "test-interface"
+        mock_spoofer._win_interface_name = "test-interface"
+        mock_spoofer.start.side_effect = [
+            SpoofError("replacement ARP failed"),
+            SpoofError("restore ARP failed"),
+        ]
+        old_portal = MagicMock()
+        old_portal._running = True
+        old_portal.redirect_url = "https://www.instagram.com/existing/"
+        old_portal.instagram_username = "existing"
+        replacement_portal = MagicMock()
+        replacement_portal._running = False
+        restored_portal = MagicMock()
+        restored_portal._running = False
+        mock_portal_class.side_effect = [replacement_portal, restored_portal]
+        manager = RedirectManager(mock_spoofer)
+        manager.portal_server = old_portal
+        victim_ip = "192.168.1.55"
+        manager._sessions[victim_ip] = {
+            "victim_ip": victim_ip,
+            "victim_mac": "00:11:22:33:44:55",
+            "gateway_ip": "192.168.1.1",
+            "gateway_mac": "00:aa:bb:cc:dd:ee",
+            "redirect_url": old_portal.redirect_url,
+            "instagram_username": old_portal.instagram_username,
+            "arp_session_id": "existing-arp",
+            "dns_spoofer": MagicMock(),
+            "started_at": 1.0,
+        }
+
+        with self.assertRaises(SpoofError) as ctx:
+            manager.start_redirect(
+                victim_ip=victim_ip,
+                victim_mac="00:11:22:33:44:55",
+                gateway_ip="192.168.1.1",
+                gateway_mac="00:aa:bb:cc:dd:ee",
+                redirect_url="https://www.instagram.com/new/",
+                instagram_username="new",
+            )
+
+        self.assertIn("recovery incomplete", str(ctx.exception))
+        self.assertNotIn(victim_ip, manager._sessions)
+        partial = manager._partial_sessions[victim_ip]
+        self.assertTrue(partial["recovery_failed"])
+        self.assertEqual(
+            partial["recovery_snapshot"]["redirect_url"],
+            old_portal.redirect_url,
+        )
+        self.assertEqual(
+            partial["recovery_snapshot"]["arp_session_id"],
+            "existing-arp",
+        )
+        self.assertEqual(partial["kind"], "replacement_recovery")
+        self.assertEqual(partial["status"], "recovery_pending")
+        self.assertEqual(partial["resource_state"]["portal"], "live")
+        self.assertEqual(partial["resource_state"]["arp"], "stopped")
+        self.assertEqual(partial["resource_state"]["dns"], "stopped")
+        self.assertIs(manager.portal_server, restored_portal)
+
     def test_portal_server_handle_error_resilience(self):
         """Uji apakah ThreadingHTTPServer.handle_error menangani ConnectionResetError tanpa NameError."""
         from src.core.redirector.portal_server import ThreadingHTTPServer, PortalRequestHandler
-        import sys
 
-        server = ThreadingHTTPServer(("127.0.0.1", 0), PortalRequestHandler)
+        server = ThreadingHTTPServer.__new__(ThreadingHTTPServer)
+        # 1. Simulate ConnectionResetError in handle_error
         try:
-            # 1. Simulate ConnectionResetError in handle_error
-            try:
-                raise ConnectionResetError("Client dropped connection abruptly")
-            except ConnectionResetError:
-                # Should cleanly return without throwing NameError
-                server.handle_error(None, ("127.0.0.1", 12345))
+            raise ConnectionResetError("Client dropped connection abruptly")
+        except ConnectionResetError:
+            server.handle_error(None, ("127.0.0.1", 12345))
 
-            # 2. Simulate BrokenPipeError in handle_error
-            try:
-                raise BrokenPipeError("Broken pipe")
-            except BrokenPipeError:
-                # Should cleanly return without throwing NameError
-                server.handle_error(None, ("127.0.0.1", 12345))
-        finally:
-            server.server_close()
+        # 2. Simulate BrokenPipeError in handle_error
+        try:
+            raise BrokenPipeError("Broken pipe")
+        except BrokenPipeError:
+            server.handle_error(None, ("127.0.0.1", 12345))
 
 if __name__ == "__main__":
     unittest.main()

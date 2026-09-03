@@ -4,8 +4,10 @@ Covers: Happy Path, Negative Tests, and Edge Cases
 """
 
 import unittest
+from unittest.mock import patch
 from src.core.network import (
     is_valid_private_ip,
+    is_valid_private_network,
     is_valid_mac,
     get_self_mac,
     get_current_gateway,
@@ -47,6 +49,10 @@ class TestCoreNetwork(unittest.TestCase):
         # Whitespace trimmed should be recognized correctly
         self.assertTrue(is_valid_private_ip("  192.168.1.1  "))
 
+    def test_private_network_validator_rejects_public_cidr(self):
+        self.assertFalse(is_valid_private_network("203.0.113.0/24"))
+        self.assertTrue(is_valid_private_network("192.168.1.0/24"))
+
     # ===== 2. is_valid_mac =====
     def test_valid_mac_happy_path(self):
         """Happy Path: Standard 6-octet MAC addresses with colons and hyphens."""
@@ -75,27 +81,85 @@ class TestCoreNetwork(unittest.TestCase):
     # ===== 3. Interface & Gateway Discovery =====
     def test_get_self_mac_structure(self):
         """Verify get_self_mac returns valid MAC structure."""
-        mac = get_self_mac()
+        iface = type('Iface', (), {'ips': ['192.168.1.20'], 'mac': '00:11:22:33:44:55'})()
+        with patch(
+            'src.core.network.get_network_info',
+            return_value={'ip': '192.168.1.20'}
+        ), patch.dict('src.core.network.ifaces', {'mock': iface}, clear=True):
+            mac = get_self_mac()
         self.assertIsInstance(mac, str)
         self.assertTrue(is_valid_mac(mac))
 
     def test_get_current_gateway_structure(self):
         """Verify get_current_gateway returns non-empty string."""
-        gw = get_current_gateway()
+        with patch(
+            'src.core.network.netifaces.gateways',
+            return_value={'default': {2: ('192.168.1.1', 'Ethernet')}}
+        ):
+            gw = get_current_gateway()
         self.assertIsInstance(gw, str)
         self.assertGreater(len(gw), 6)
 
+    def test_get_current_gateway_rejects_public_default(self):
+        with patch(
+            'src.core.network.netifaces.gateways',
+            return_value={'default': {2: ('203.0.113.1', 'Ethernet')}}
+        ), patch('src.core.network.sys.platform', 'linux'):
+            self.assertEqual(get_current_gateway(), '')
+
     def test_get_network_info_structure(self):
         """Verify get_network_info returns required dictionary keys."""
-        info = get_network_info()
+        with patch('src.core.network.get_active_ip', return_value='192.168.1.20'), \
+             patch('src.core.network.get_current_gateway', return_value='192.168.1.1'), \
+             patch('src.core.network.netifaces.interfaces', return_value=['Ethernet']), \
+             patch(
+                 'src.core.network.netifaces.ifaddresses',
+                 return_value={2: [{'addr': '192.168.1.20', 'netmask': '255.255.255.0'}]}
+             ):
+            info = get_network_info()
         self.assertIsInstance(info, dict)
         for key in ['ip', 'netmask', 'network', 'gateway', 'interface']:
             self.assertIn(key, info)
             self.assertIsInstance(info[key], str)
 
+    def test_get_network_info_rejects_public_default_interface(self):
+        with patch('src.core.network.get_active_ip', return_value='203.0.113.10'), \
+             patch('src.core.network.get_current_gateway', return_value='203.0.113.1'), \
+             patch('src.core.network.netifaces.interfaces', return_value=['Ethernet']), \
+             patch(
+                 'src.core.network.netifaces.ifaddresses',
+                 return_value={2: [{'addr': '203.0.113.10', 'netmask': '255.255.255.0'}]}
+             ), patch(
+                 'src.core.network.netifaces.gateways',
+                 return_value={'default': {2: ('203.0.113.1', 'Ethernet')}}
+             ):
+            info = get_network_info()
+
+        self.assertEqual(info, {
+            'ip': '',
+            'netmask': '',
+            'network': '',
+            'gateway': '',
+            'interface': ''
+        })
+
+    def test_get_network_info_rejects_missing_netmask(self):
+        with patch('src.core.network.get_active_ip', return_value='192.168.1.20'), \
+             patch('src.core.network.get_current_gateway', return_value='192.168.1.1'), \
+             patch('src.core.network.netifaces.interfaces', return_value=['Ethernet']), \
+             patch(
+                 'src.core.network.netifaces.ifaddresses',
+                 return_value={2: [{'addr': '192.168.1.20'}]}
+             ), patch('src.core.network.netifaces.gateways', return_value={}):
+            info = get_network_info()
+
+        self.assertEqual(info['network'], '')
+        self.assertEqual(info['netmask'], '')
+
     def test_get_wifi_info_structure(self):
         """Verify get_wifi_info returns standardized keys."""
-        wifi = get_wifi_info()
+        with patch('src.core.network.sys.platform', 'linux'):
+            wifi = get_wifi_info()
         self.assertIsInstance(wifi, dict)
         self.assertIn('connected', wifi)
         self.assertIsInstance(wifi['connected'], bool)
@@ -104,16 +168,13 @@ class TestCoreNetwork(unittest.TestCase):
     # ===== 4. is_network_changed =====
     def test_network_changed_logic(self):
         """Verify network change detection logic."""
-        curr_gw = get_current_gateway()
-        info = get_network_info()
-        curr_iface = info.get('interface', '')
-        
-        # When comparing to current values, should not be changed
-        self.assertFalse(is_network_changed(curr_gw, curr_iface))
-        
-        # When comparing to different values, should detect change
-        self.assertTrue(is_network_changed("10.99.99.99", curr_iface))
-        self.assertTrue(is_network_changed(curr_gw, "Virtual-Adapter-XYZ"))
+        curr_gw = '192.168.1.1'
+        curr_iface = 'Ethernet'
+        with patch('src.core.network.get_current_gateway', return_value=curr_gw), \
+             patch('src.core.network.get_network_info', return_value={'interface': curr_iface}):
+            self.assertFalse(is_network_changed(curr_gw, curr_iface))
+            self.assertTrue(is_network_changed("10.99.99.99", curr_iface))
+            self.assertTrue(is_network_changed(curr_gw, "Virtual-Adapter-XYZ"))
 
 if __name__ == '__main__':
     unittest.main()

@@ -23,6 +23,7 @@ from ..utils.logger import logger
 # latensi jaringan sebenarnya — bukan wall-clock spawn subprocess yang membengkak
 # saat CPU sibuk (banyak thread spoof-loop) dan membuat ping tampak tinggi palsu.
 _PING_RTT_RE = re.compile(r"(?:time|waktu)\s*([=<])\s*(\d+)\s*ms", re.IGNORECASE)
+_WORKER_JOIN_TIMEOUT_SECONDS = 2.0
 
 
 def parse_ping_rtt_ms(stdout: str) -> Optional[float]:
@@ -49,6 +50,7 @@ class GamingEngine:
     """
     def __init__(self, event_callback: Optional[Callable[[str, Dict[str, Any]], None]] = None):
         self._lock = threading.Lock()
+        self._transition_lock = threading.Lock()
         self._is_enabled = False
         self._mode = "auto_airtime"  # "auto_airtime" | "blackhole_priority"
         self._target_ping_ms = 25.0
@@ -80,35 +82,81 @@ class GamingEngine:
 
     def toggle(self, enabled: bool, mode: str = "auto_airtime", target_ping_ms: float = 25.0) -> Dict[str, Any]:
         """Aktifkan atau nonaktifkan Mode Gaming."""
+        with self._transition_lock:
+            return self._toggle_transition(enabled, mode, target_ping_ms)
+
+    def _toggle_transition(self, enabled: bool, mode: str, target_ping_ms: float) -> Dict[str, Any]:
         with self._lock:
             if self._is_enabled == enabled:
                 if enabled:
                     self._mode = mode
                     self._target_ping_ms = target_ping_ms
-                return self._get_status_unlocked()
+                    return self._get_status_unlocked()
+                worker = self._watchdog_thread
+                self._stop_event.set()
+                changed = False
+            elif enabled:
+                worker = self._watchdog_thread
+                self._stop_event.set()
+                changed = True
+            else:
+                worker = self._watchdog_thread
+                self._stop_event.set()
+                self._is_enabled = False
+                self._mode = mode
+                self._target_ping_ms = max(5.0, min(100.0, target_ping_ms))
+                self._activated_at = None
+                changed = True
 
-            self._is_enabled = enabled
-            self._mode = mode
-            self._target_ping_ms = max(5.0, min(100.0, target_ping_ms))
+        current = threading.current_thread()
+        if worker and worker is not current and worker.is_alive():
+            worker.join(timeout=_WORKER_JOIN_TIMEOUT_SECONDS)
 
+        if worker and worker.is_alive():
             if enabled:
+                raise RuntimeError("Worker Gaming sebelumnya belum berhenti")
+        else:
+            with self._lock:
+                if self._watchdog_thread is worker:
+                    self._watchdog_thread = None
+
+        if enabled:
+            watchdog_thread = threading.Thread(
+                target=self._telemetry_watchdog_loop,
+                name="GamingWatchdogThread",
+                daemon=True
+            )
+            with self._lock:
+                self._is_enabled = True
+                self._mode = mode
+                self._target_ping_ms = max(5.0, min(100.0, target_ping_ms))
                 self._activated_at = time.time()
                 self._stop_event.clear()
-                self._watchdog_thread = threading.Thread(
-                    target=self._telemetry_watchdog_loop,
-                    name="GamingWatchdogThread",
-                    daemon=True
-                )
-                self._watchdog_thread.start()
-                logger.info(f"🎮 Mode Gaming DIAKTIFKAN (Mode: {self._mode}, Target Ping: {self._target_ping_ms}ms)")
-            else:
-                self._activated_at = None
+                self._watchdog_thread = watchdog_thread
+                status = self._get_status_unlocked()
+            try:
+                watchdog_thread.start()
+            except Exception:
                 self._stop_event.set()
+                with self._lock:
+                    self._is_enabled = False
+                    self._activated_at = None
+
+                if watchdog_thread.is_alive():
+                    watchdog_thread.join(timeout=_WORKER_JOIN_TIMEOUT_SECONDS)
+
+                with self._lock:
+                    if self._watchdog_thread is watchdog_thread and not watchdog_thread.is_alive():
+                        self._watchdog_thread = None
+                raise
+            logger.info(f"🎮 Mode Gaming DIAKTIFKAN (Mode: {self._mode}, Target Ping: {self._target_ping_ms}ms)")
+        else:
+            with self._lock:
+                status = self._get_status_unlocked()
+            if changed:
                 logger.info("🎮 Mode Gaming DINONAKTIFKAN (Kembali ke mode normal)")
 
-            status = self._get_status_unlocked()
-
-        if self._event_callback:
+        if changed and self._event_callback:
             try:
                 self._event_callback("gaming_status_changed", status)
             except Exception as e:

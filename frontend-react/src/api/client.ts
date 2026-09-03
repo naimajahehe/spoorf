@@ -1,9 +1,20 @@
-import axios, { AxiosError } from 'axios';
+import axios, { AxiosError, InternalAxiosRequestConfig } from 'axios';
 import { resolveBackendUrl } from '../lib/backend';
+import { isSafeStartupRetry } from './retryPolicy';
 
 export const getApiUrl = (): string => resolveBackendUrl(import.meta.env.VITE_API_URL);
 
 const API_URL = getApiUrl();
+
+export async function apiFetch(path: string, init: RequestInit = {}): Promise<Response> {
+    const headers = new Headers(init.headers);
+    const token = typeof window !== 'undefined' ? window.electronAPI?.apiToken : undefined;
+    if (token) {
+        headers.set('x-sentinel-token', token);
+    }
+
+    return fetch(`${getApiUrl()}${path}`, { ...init, headers });
+}
 
 const http = axios.create({
     baseURL: API_URL,
@@ -22,18 +33,21 @@ http.interceptors.request.use((config) => {
     return config;
 });
 
-// Auto-retry interceptor for startup network readiness (max 3 retries, 400ms delay)
+type RetryableRequestConfig = InternalAxiosRequestConfig & {
+    __retryCount?: number;
+};
+
+// Auto-retry only idempotent startup probes while the backend binds its port.
 http.interceptors.response.use(
     response => response,
     async (error: AxiosError) => {
-        const config = error.config as any;
-        if (!config || (config.__retryCount || 0) >= 3) {
+        const config = error.config as RetryableRequestConfig | undefined;
+        if (!config || !isSafeStartupRetry(config.method, config.url) || (config.__retryCount ?? 0) >= 3) {
             return Promise.reject(error);
         }
 
-        // Retry on network failures when server is binding ports on boot
         if (!error.response || error.code === 'ERR_NETWORK' || error.code === 'ECONNABORTED' || error.message?.includes('Network Error')) {
-            config.__retryCount = (config.__retryCount || 0) + 1;
+            config.__retryCount = (config.__retryCount ?? 0) + 1;
             await new Promise(resolve => setTimeout(resolve, 400));
             return http(config);
         }

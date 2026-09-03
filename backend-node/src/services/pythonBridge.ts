@@ -22,9 +22,34 @@ export class BridgeUnavailableError extends Error {
     }
 }
 
+export class BridgeHttpError extends Error {
+    readonly status: number;
+
+    constructor(status: number, message: string) {
+        super(message);
+        this.name = 'BridgeHttpError';
+        this.status = status;
+    }
+}
+
+export class BridgeOperationError extends Error {
+    constructor(message: string) {
+        super(message);
+        this.name = 'BridgeOperationError';
+    }
+}
+
 /** True untuk error apa pun yang berasal dari Python bridge yang tak terjangkau. */
 export function isBridgeUnavailable(err: unknown): err is BridgeUnavailableError {
     return err instanceof BridgeUnavailableError;
+}
+
+export function isBridgeHttpError(err: unknown): err is BridgeHttpError {
+    return err instanceof BridgeHttpError;
+}
+
+export function isBridgeOperationError(err: unknown): err is BridgeOperationError {
+    return err instanceof BridgeOperationError;
 }
 
 export class PythonBridge extends EventEmitter {
@@ -104,6 +129,45 @@ export class PythonBridge extends EventEmitter {
         } finally {
             clearTimeout(timer);
         }
+    }
+
+    private async readMutationResponse(res: Response, operation: string): Promise<any> {
+        const raw = await res.text();
+        let data: any = null;
+        if (raw) {
+            try {
+                data = JSON.parse(raw);
+            } catch {
+                data = null;
+            }
+        }
+
+        let downstreamMessage = [data?.error, data?.detail, data?.message]
+            .find(value => typeof value === 'string' && value.trim().length > 0);
+        if (!downstreamMessage && Array.isArray(data?.detail)) {
+            const validation = data.detail.find((item: any) => typeof item?.msg === 'string');
+            if (validation) {
+                const location = Array.isArray(validation.loc)
+                    ? validation.loc.filter((part: unknown) => typeof part === 'string' || typeof part === 'number').join('.')
+                    : '';
+                downstreamMessage = location ? `${location}: ${validation.msg}` : validation.msg;
+            }
+        }
+
+        if (!res.ok) {
+            const safeMessage = res.status >= 400 && res.status < 500 && downstreamMessage
+                ? downstreamMessage.slice(0, 500)
+                : `${operation} failed in Python engine (HTTP ${res.status}).`;
+            throw new BridgeHttpError(res.status, safeMessage);
+        }
+
+        if (data?.success === false) {
+            throw new BridgeOperationError(
+                downstreamMessage?.slice(0, 500) || `${operation} was rejected by Python engine.`
+            );
+        }
+
+        return data;
     }
 
     /**
@@ -231,6 +295,53 @@ export class PythonBridge extends EventEmitter {
     private latestTelemetry: any = null;
     private latestWifiInfo: any = null;
 
+    private handlePythonEvent(event: any): void {
+        if (event.event === 'network_changed' || event.error === 'NETWORK_CHANGED') {
+            console.log('📡 Python Broadcast: Network Changed', event.data);
+            this.emit('networkChanged', event.data);
+        } else if (event.event === 'telemetry') {
+            this.latestTelemetry = event.data;
+            if (event.data) {
+                this.latestWifiInfo = {
+                    connected: Boolean(event.data.connected),
+                    ssid: event.data.ssid || '',
+                    signal: event.data.signal || '',
+                    interface_type: event.data.interface_type || 'wifi',
+                    state: event.data.connected ? 'connected' : 'disconnected'
+                };
+            }
+            this.emit('telemetry', event.data);
+        } else if (event.event === 'dhcp_device_discovered') {
+            console.log('📱 [DHCP Sniffer 3B] Perangkat Baru Tertangkap:', event.data);
+            this.emit('dhcpDevice', event.data);
+        } else if (event.event === 'rogue_dhcp_detected') {
+            console.warn('🚨 [DHCP Sniffer 3B] ROGUE DHCP SERVER TERDETEKSI:', event.data);
+            this.emit('rogueDhcp', event.data);
+        } else if (event.event === 'gateway_dns_query') {
+            this.emit('gatewayDnsQuery', event.data);
+        } else if (event.event === 'gateway_status_changed') {
+            this.emit('gatewayStatusChanged', event.data);
+        } else if (event.event === 'traffic_l7_flow') {
+            this.emit('l7Flow', event.data);
+        } else if (event.event === 'bettercap_dns_spoofed') {
+            this.emit('bettercapDnsSpoofed', event.data);
+        } else if (event.event === 'bettercap_credential_sniffed') {
+            this.emit('bettercapCredentialSniffed', event.data);
+        } else if (event.event === 'device_liveness_changed') {
+            this.emit('deviceLivenessChanged', event.data);
+        } else if (event.event === 'device_offline_pulse') {
+            this.emit('deviceLivenessChanged', { ...event.data, is_online: false });
+        } else if (event.event === 'arp_threat_detected') {
+            this.emit('arpThreatDetected', event.data);
+        } else if (event.event === 'shield_status_changed') {
+            this.emit('shieldStatusChanged', event.data);
+        } else if (event.event === 'gaming_status_changed') {
+            this.emit('gamingStatusChanged', event.data);
+        } else if (event.event === 'gaming_telemetry') {
+            this.emit('gamingTelemetry', event.data);
+        }
+    }
+
     private connectWebSocket(): void {
         try {
             const token = process.env.SENTINEL_API_TOKEN;
@@ -247,44 +358,7 @@ export class PythonBridge extends EventEmitter {
             this.ws.on('message', (raw: string | Buffer) => {
                 try {
                     const event = JSON.parse(raw.toString());
-                    if (event.event === 'network_changed' || event.error === 'NETWORK_CHANGED') {
-                        console.log('📡 Python Broadcast: Network Changed', event.data);
-                        this.emit('networkChanged', event.data);
-                    } else if (event.event === 'telemetry') {
-                        this.latestTelemetry = event.data;
-                        if (event.data) {
-                            this.latestWifiInfo = {
-                                connected: Boolean(event.data.connected),
-                                ssid: event.data.ssid || '',
-                                signal: event.data.signal || '',
-                                interface_type: event.data.interface_type || 'wifi',
-                                state: event.data.connected ? 'connected' : 'disconnected'
-                            };
-                        }
-                        this.emit('telemetry', event.data);
-                    } else if (event.event === 'dhcp_device_discovered') {
-                        console.log('📱 [DHCP Sniffer 3B] Perangkat Baru Tertangkap:', event.data);
-                        this.emit('dhcpDevice', event.data);
-                    } else if (event.event === 'rogue_dhcp_detected') {
-                        console.warn('🚨 [DHCP Sniffer 3B] ROGUE DHCP SERVER TERDETEKSI:', event.data);
-                        this.emit('rogueDhcp', event.data);
-                    } else if (event.event === 'gateway_dns_query') {
-                        this.emit('gatewayDnsQuery', event.data);
-                    } else if (event.event === 'gateway_status_changed') {
-                        this.emit('gatewayStatusChanged', event.data);
-                    } else if (event.event === 'traffic_l7_flow') {
-                        this.emit('l7Flow', event.data);
-                    } else if (event.event === 'bettercap_dns_spoofed') {
-                        this.emit('bettercapDnsSpoofed', event.data);
-                    } else if (event.event === 'bettercap_credential_sniffed') {
-                        this.emit('bettercapCredentialSniffed', event.data);
-                    } else if (event.event === 'device_liveness_changed') {
-                        this.emit('deviceLivenessChanged', event.data);
-                    } else if (event.event === 'gaming_status_changed') {
-                        this.emit('gamingStatusChanged', event.data);
-                    } else if (event.event === 'gaming_telemetry') {
-                        this.emit('gamingTelemetry', event.data);
-                    }
+                    this.handlePythonEvent(event);
                 } catch (e) {
                     console.debug('Failed to parse Python WS event:', e);
                 }
@@ -312,16 +386,7 @@ export class PythonBridge extends EventEmitter {
             headers: { 'Content-Type': 'application/json' }
         }, 30000);
 
-        if (!res.ok) {
-            const err = await res.text();
-            throw new Error(`Python scan error (${res.status}): ${err}`);
-        }
-
-        const data: any = await res.json();
-        if (!data.success) {
-            throw new Error(data.error || 'Scan failed');
-        }
-
+        const data = await this.readMutationResponse(res, 'Network scan');
         return data.data.devices;
     }
 
@@ -351,16 +416,7 @@ export class PythonBridge extends EventEmitter {
             })
         });
 
-        if (!res.ok) {
-            const err = await res.text();
-            throw new Error(`Start spoof error (${res.status}): ${err}`);
-        }
-
-        const data: any = await res.json();
-        if (!data.success) {
-            throw new Error(data.error || 'Failed to start spoof');
-        }
-
+        const data = await this.readMutationResponse(res, 'Start spoof');
         return data.data.session_id;
     }
 
@@ -372,10 +428,7 @@ export class PythonBridge extends EventEmitter {
             body: JSON.stringify({ session_id: sessionId, speed_limit: speedLimit })
         });
 
-        if (!res.ok) {
-            const err = await res.text();
-            throw new Error(`Set spoof limit error (${res.status}): ${err}`);
-        }
+        await this.readMutationResponse(res, 'Set spoof limit');
     }
 
     async stopSpoof(sessionId: string): Promise<void> {
@@ -386,19 +439,13 @@ export class PythonBridge extends EventEmitter {
             body: JSON.stringify({ session_id: sessionId })
         });
 
-        if (!res.ok) {
-            const err = await res.text();
-            throw new Error(`Stop spoof error (${res.status}): ${err}`);
-        }
+        await this.readMutationResponse(res, 'Stop spoof');
     }
 
     async stopAll(): Promise<void> {
-        try {
-            console.log('📡 [HTTP Call -> Python] POST /api/spoof/stop_all...');
-            await this.fetchWithTimeout(`${this.baseUrl}/api/spoof/stop_all`, { method: 'POST' });
-        } catch (e) {
-            console.warn('Error during stopAll HTTP call:', e);
-        }
+        console.log('📡 [HTTP Call -> Python] POST /api/spoof/stop_all...');
+        const res = await this.fetchWithTimeout(`${this.baseUrl}/api/spoof/stop_all`, { method: 'POST' });
+        await this.readMutationResponse(res, 'Stop all spoof sessions');
     }
 
     async startRedirect(victimIp: string, victimMac: string, gatewayIp: string, gatewayMac: string, redirectUrl: string, instagramUsername: string = ''): Promise<any> {
@@ -416,16 +463,7 @@ export class PythonBridge extends EventEmitter {
             })
         });
 
-        if (!res.ok) {
-            const err = await res.text();
-            throw new Error(`Start redirect error (${res.status}): ${err}`);
-        }
-
-        const data: any = await res.json();
-        if (!data.success) {
-            throw new Error(data.error || 'Failed to start redirect');
-        }
-
+        const data = await this.readMutationResponse(res, 'Start redirect');
         return data.data;
     }
 
@@ -437,10 +475,7 @@ export class PythonBridge extends EventEmitter {
             body: JSON.stringify({ victim_ip: victimIp })
         });
 
-        if (!res.ok) {
-            const err = await res.text();
-            throw new Error(`Stop redirect error (${res.status}): ${err}`);
-        }
+        await this.readMutationResponse(res, 'Stop redirect');
     }
 
     async getRedirectStatus(): Promise<any> {
@@ -467,16 +502,7 @@ export class PythonBridge extends EventEmitter {
             })
         });
 
-        if (!res.ok) {
-            const err = await res.text();
-            throw new Error(`Start gateway error (${res.status}): ${err}`);
-        }
-
-        const data: any = await res.json();
-        if (!data.success) {
-            throw new Error(data.error || 'Failed to start transparent gateway');
-        }
-
+        const data = await this.readMutationResponse(res, 'Start transparent gateway');
         return data.data;
     }
 
@@ -488,10 +514,7 @@ export class PythonBridge extends EventEmitter {
             body: JSON.stringify({ victim_ip: victimIp })
         });
 
-        if (!res.ok) {
-            const err = await res.text();
-            throw new Error(`Stop gateway error (${res.status}): ${err}`);
-        }
+        await this.readMutationResponse(res, 'Stop transparent gateway');
     }
 
     async getTransparentGatewayStatus(): Promise<any> {
@@ -522,8 +545,7 @@ export class PythonBridge extends EventEmitter {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ domain })
         });
-        if (!res.ok) throw new Error(`Add sinkhole error: ${res.statusText}`);
-        const data: any = await res.json();
+        const data = await this.readMutationResponse(res, 'Add sinkhole domain');
         return data.domains || [];
     }
 
@@ -533,8 +555,7 @@ export class PythonBridge extends EventEmitter {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ domain })
         });
-        if (!res.ok) throw new Error(`Remove sinkhole error: ${res.statusText}`);
-        const data: any = await res.json();
+        const data = await this.readMutationResponse(res, 'Remove sinkhole domain');
         return data.domains || [];
     }
 
@@ -550,7 +571,8 @@ export class PythonBridge extends EventEmitter {
     }
 
     async clearGatewayDnsLogs(): Promise<void> {
-        await this.fetchWithTimeout(`${this.baseUrl}/api/gateway/dns-logs`, { method: 'DELETE' });
+        const res = await this.fetchWithTimeout(`${this.baseUrl}/api/gateway/dns-logs`, { method: 'DELETE' });
+        await this.readMutationResponse(res, 'Clear gateway DNS logs');
     }
 
     async getTelemetry(): Promise<any> {
@@ -587,12 +609,7 @@ export class PythonBridge extends EventEmitter {
             body: JSON.stringify({ ip, ports })
         }, 30000);
 
-        if (!res.ok) {
-            const err = await res.text();
-            throw new Error(`Deep scan ports error (${res.status}): ${err}`);
-        }
-
-        const data: any = await res.json();
+        const data = await this.readMutationResponse(res, 'Deep port scan');
         return data.data;
     }
 
@@ -603,12 +620,7 @@ export class PythonBridge extends EventEmitter {
             headers: { 'Content-Type': 'application/json' }
         }, 30000);
 
-        if (!res.ok) {
-            const err = await res.text();
-            throw new Error(`Optimize DHCP error (${res.status}): ${err}`);
-        }
-
-        const data: any = await res.json();
+        const data = await this.readMutationResponse(res, 'Optimize DHCP profiling');
         return data;
     }
 
@@ -620,11 +632,7 @@ export class PythonBridge extends EventEmitter {
             body: JSON.stringify({ targets, hold_ms: holdMs })
         }, holdMs + 20000);
 
-        if (!res.ok) {
-            const err = await res.text();
-            throw new Error(`Quick re-auth error (${res.status}): ${err}`);
-        }
-        const data: any = await res.json();
+        const data = await this.readMutationResponse(res, 'Quick re-auth');
         return data.data;
     }
 
@@ -689,9 +697,7 @@ export class PythonBridge extends EventEmitter {
         // { success: true } padahal buffer di sisi Python tidak tersentuh.
         if (!this.ready) throw this.offlineError();
         const res = await this.fetchWithTimeout(`${this.baseUrl}/api/interceptor/flows`, { method: 'DELETE' }, 2000);
-        if (!res.ok) {
-            throw new Error(`Gagal menghapus L7 flows di Python engine (HTTP ${res.status}).`);
-        }
+        await this.readMutationResponse(res, 'Clear L7 flows');
     }
 
     async generateLeafCert(domain: string): Promise<any> {
@@ -700,8 +706,7 @@ export class PythonBridge extends EventEmitter {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ domain })
         });
-        if (!res.ok) throw new Error('Failed to generate leaf certificate');
-        return await res.json();
+        return await this.readMutationResponse(res, 'Generate leaf certificate');
     }
 
     // ===== BETTERCAP SECURITY SUITE BRIDGE METHODS =====
@@ -722,8 +727,16 @@ export class PythonBridge extends EventEmitter {
         return this.fetchOrDefault('/api/bettercap/status', PythonBridge.BETTERCAP_STATUS_OFFLINE);
     }
 
-    async getBettercapDnsRules(): Promise<any[]> {
-        return this.fetchOrDefault<any[]>('/api/bettercap/dns/rules', [], (d) => d.rules || []);
+    private static readonly BETTERCAP_DNS_CONFIG_OFFLINE = {
+        success: false,
+        rules: [] as any[],
+        spoof_all_enabled: false,
+        spoof_all_address: '',
+        default_ttl: 10
+    };
+
+    async getBettercapDnsRules(): Promise<any> {
+        return this.fetchOrDefault('/api/bettercap/dns/rules', PythonBridge.BETTERCAP_DNS_CONFIG_OFFLINE);
     }
 
     async addBettercapDnsRule(domain: string, target_ip: string, action: string = 'spoof', is_enabled: boolean = true): Promise<any> {
@@ -732,8 +745,7 @@ export class PythonBridge extends EventEmitter {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ domain, target_ip, action, is_enabled })
         });
-        if (!res.ok) throw new Error('Failed to add Bettercap DNS rule');
-        return await res.json();
+        return await this.readMutationResponse(res, 'Add Bettercap DNS rule');
     }
 
     async updateBettercapDnsRule(ruleId: string, updates: { domain?: string; target_ip?: string; action?: string; is_enabled?: boolean }): Promise<any> {
@@ -742,16 +754,14 @@ export class PythonBridge extends EventEmitter {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(updates)
         });
-        if (!res.ok) throw new Error(`Failed to update Bettercap DNS rule ${ruleId}`);
-        return await res.json();
+        return await this.readMutationResponse(res, `Update Bettercap DNS rule ${ruleId}`);
     }
 
     async deleteBettercapDnsRule(ruleId: string): Promise<any> {
         const res = await this.fetchWithTimeout(`${this.baseUrl}/api/bettercap/dns/rules/${ruleId}`, {
             method: 'DELETE'
         });
-        if (!res.ok) throw new Error(`Failed to delete Bettercap DNS rule ${ruleId}`);
-        return await res.json();
+        return await this.readMutationResponse(res, `Delete Bettercap DNS rule ${ruleId}`);
     }
 
     async setBettercapDnsSpoofAll(enabled: boolean, address: string = ''): Promise<any> {
@@ -760,8 +770,7 @@ export class PythonBridge extends EventEmitter {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ enabled, address })
         });
-        if (!res.ok) throw new Error('Failed to set Bettercap DNS spoof-all');
-        return await res.json();
+        return await this.readMutationResponse(res, 'Set Bettercap DNS spoof-all');
     }
 
     async loadBettercapDnsHosts(content: string, default_address: string = '', action: string = 'spoof'): Promise<any> {
@@ -770,8 +779,7 @@ export class PythonBridge extends EventEmitter {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ content, default_address, action })
         });
-        if (!res.ok) throw new Error('Failed to load Bettercap DNS hosts');
-        return await res.json();
+        return await this.readMutationResponse(res, 'Load Bettercap DNS hosts');
     }
 
     async setBettercapDnsTtl(ttl: number): Promise<any> {
@@ -780,8 +788,7 @@ export class PythonBridge extends EventEmitter {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ ttl })
         });
-        if (!res.ok) throw new Error('Failed to set Bettercap DNS ttl');
-        return await res.json();
+        return await this.readMutationResponse(res, 'Set Bettercap DNS TTL');
     }
 
     async getBettercapCredentials(limit: number = 100): Promise<any[]> {
@@ -795,7 +802,7 @@ export class PythonBridge extends EventEmitter {
         const res = await this.fetchWithTimeout(`${this.baseUrl}/api/bettercap/credentials`, {
             method: 'DELETE'
         });
-        if (!res.ok) throw new Error('Failed to clear Bettercap credentials');
+        await this.readMutationResponse(res, 'Clear Bettercap credentials');
     }
 
     async runBettercapSynScan(targetIp: string, ports?: number[], profile: string = 'top-20'): Promise<any> {
@@ -804,11 +811,7 @@ export class PythonBridge extends EventEmitter {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ target_ip: targetIp, ports, profile })
         }, 30000);
-        if (!res.ok) {
-            const err = await res.text();
-            throw new Error(`Bettercap SYN scan error: ${err}`);
-        }
-        const data: any = await res.json();
+        const data = await this.readMutationResponse(res, 'Bettercap SYN scan');
         return data.data;
     }
 
@@ -818,11 +821,7 @@ export class PythonBridge extends EventEmitter {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ targets, gateway_ip: gatewayIp, timeout: 3.0 })
         }, 8000);
-        if (!res.ok) {
-            const err = await res.text();
-            throw new Error(`Liveness pulse error: ${err}`);
-        }
-        const data: any = await res.json();
+        const data = await this.readMutationResponse(res, 'Liveness pulse');
         return data.data?.results || {};
     }
 
@@ -872,11 +871,7 @@ export class PythonBridge extends EventEmitter {
                 lan_targets: lanTargets
             })
         });
-        if (!res.ok) {
-            const err = await res.text();
-            throw new Error(`Toggle shield error: ${err}`);
-        }
-        const data: any = await res.json();
+        const data = await this.readMutationResponse(res, 'Toggle shield');
         return data.data;
     }
 
@@ -889,11 +884,7 @@ export class PythonBridge extends EventEmitter {
                 auto_retaliate: autoRetaliate
             })
         });
-        if (!res.ok) {
-            const err = await res.text();
-            throw new Error(`Set shield mode error: ${err}`);
-        }
-        const data: any = await res.json();
+        const data = await this.readMutationResponse(res, 'Set shield mode');
         return data.data;
     }
 
@@ -902,13 +893,10 @@ export class PythonBridge extends EventEmitter {
     }
 
     async clearShieldThreats(): Promise<boolean> {
-        if (!this.ready) return false;
-        try {
-            const res = await this.fetchWithTimeout(`${this.baseUrl}/api/shield/threats`, { method: 'DELETE' }, 2000);
-            return res.ok;
-        } catch {
-            return false;
-        }
+        if (!this.ready) throw this.offlineError();
+        const res = await this.fetchWithTimeout(`${this.baseUrl}/api/shield/threats`, { method: 'DELETE' }, 2000);
+        await this.readMutationResponse(res, 'Clear shield threats');
+        return true;
     }
 
 
@@ -939,11 +927,7 @@ export class PythonBridge extends EventEmitter {
                 target_ping_ms: targetPingMs
             })
         });
-        if (!res.ok) {
-            const err = await res.text();
-            throw new Error(`Toggle gaming mode error: ${err}`);
-        }
-        const data: any = await res.json();
+        const data = await this.readMutationResponse(res, 'Toggle gaming mode');
         return data.data;
     }
 

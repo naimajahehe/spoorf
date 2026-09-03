@@ -12,6 +12,7 @@ import sys
 import time
 import threading
 import random
+import uuid
 from typing import Dict, Optional, Any, List, Tuple
 from scapy.all import (
     sendp,
@@ -270,7 +271,7 @@ class NDPSpoofer:
         if self_mac and norm_vic_mac == self_mac:
             raise SpoofError("Host controller sendiri kebal dari manipulasi IPv6")
 
-        session_id = f"v6_{victim_ipv6.replace(':', '_')}_{int(time.time())}"
+        session_id = f"v6_{victim_ipv6.replace(':', '_')}_{uuid.uuid4().hex}"
 
         # Hentikan sesi lama secara bersih jika ada untuk MAC yang sama
         with self._lock:

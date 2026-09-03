@@ -49,103 +49,7 @@ export class WebSocketManager {
     }
 
     private setupListeners() {
-        this.io.on('connection', (socket) => {
-            console.log(`Client connected: ${socket.id}`);
-
-            // Send initial devices from database & memory
-            socket.emit('devices', this.deviceManager.getDevices());
-            if (this.licenseManager) {
-                socket.emit('licenseStatus', this.licenseManager.getStatus());
-            }
-            if (this.deviceManager.isScanning()) {
-                socket.emit('scanStarted');
-            }
-
-            // Atomic Initial Network Snapshot: Send Wi-Fi & Telemetry immediately
-            this.deviceManager.getWifiInfo().then(wifi => {
-                socket.emit('wifiStatus', wifi);
-            }).catch(() => {});
-
-            this.deviceManager.getTelemetry().then(telemetry => {
-                if (telemetry) socket.emit('telemetryStream', telemetry);
-            }).catch(() => {});
-
-            this.deviceManager.getGamingStatus().then(gaming => {
-                if (gaming) socket.emit('gamingStatus', gaming);
-            }).catch(() => {});
-
-            // Handle scan request
-            socket.on('scan', async () => {
-                try {
-                    await this.deviceManager.scanNetwork();
-                } catch (error: any) {
-                    socket.emit('scanError', { error: error.message });
-                }
-            });
-
-            // Handle block request
-            socket.on('block', async (data: { ip: string, gatewayIp: string }) => {
-                try {
-                    const device = await this.deviceManager.blockDevice(data.ip, data.gatewayIp);
-                    socket.emit('deviceBlocked', device);
-                } catch (error: any) {
-                    socket.emit('blockError', { error: error.message, ip: data?.ip });
-                }
-            });
-
-            // Handle unblock request
-            socket.on('unblock', async (data: { ip: string }) => {
-                try {
-                    const device = await this.deviceManager.unblockDevice(data.ip);
-                    socket.emit('deviceUnblocked', device);
-                } catch (error: any) {
-                    socket.emit('unblockError', { error: error.message, ip: data?.ip });
-                }
-            });
-
-            // Handle delete device from database
-            socket.on('deleteDevice', async (data: { mac: string }) => {
-                try {
-                    await this.deviceManager.deleteDevice(data.mac);
-                } catch (error: any) {
-                    socket.emit('deleteError', { error: error.message });
-                }
-            });
-
-            // Handle update device alias (Profile Target Tag)
-            socket.on('updateDeviceAlias', async (data: { mac: string; alias: string }) => {
-                try {
-                    const updated = await this.deviceManager.setDeviceAlias(data.mac, data.alias);
-                    socket.emit('deviceAliasUpdated', updated);
-                } catch (error: any) {
-                    socket.emit('aliasError', { error: error.message, mac: data?.mac });
-                }
-            });
-
-            // Handle speed limit throttle
-            socket.on('setSpeedLimit', async (data: { ip: string; limit: number }) => {
-                try {
-                    const updated = await this.deviceManager.setSpeedLimit(data.ip, data.limit);
-                    socket.emit('deviceSpeedLimitUpdated', updated);
-                } catch (error: any) {
-                    socket.emit('speedLimitError', { error: error.message, ip: data?.ip });
-                }
-            });
-
-            // Handle toggle Gaming Mode
-            socket.on('toggleGamingMode', async (data: { enabled: boolean; mode?: string; target_ping_ms?: number }) => {
-                try {
-                    const status = await this.deviceManager.toggleGamingMode(Boolean(data.enabled), data.mode, data.target_ping_ms);
-                    this.io.emit('gamingStatusUpdate', status);
-                } catch (error: any) {
-                    socket.emit('gamingError', { error: error.message });
-                }
-            });
-
-            socket.on('disconnect', () => {
-                console.log(`Client disconnected: ${socket.id}`);
-            });
-        });
+        this.io.on('connection', (socket) => this.handleConnection(socket));
 
         // Listen for device updates from manager
         this.deviceManager.on('scanStarted', () => {
@@ -241,6 +145,103 @@ export class WebSocketManager {
                 this.io.emit('licenseStatus', status);
             });
         }
+    }
+
+    private handleConnection(socket: any) {
+            console.log(`Client connected: ${socket.id}`);
+
+            // Send initial devices from database & memory
+            socket.emit('devices', this.deviceManager.getDevices());
+            if (this.licenseManager) {
+                socket.emit('licenseStatus', this.licenseManager.getStatus());
+            }
+            if (this.deviceManager.isScanning()) {
+                socket.emit('scanStarted');
+            }
+
+            // Atomic Initial Network Snapshot: Send Wi-Fi & Telemetry immediately
+            this.deviceManager.getWifiInfo().then(wifi => {
+                socket.emit('wifiStatus', wifi);
+            }).catch(() => {});
+
+            this.deviceManager.getTelemetry().then(telemetry => {
+                if (telemetry) socket.emit('telemetryStream', telemetry);
+            }).catch(() => {});
+
+            this.deviceManager.getGamingStatus().then(gaming => {
+                if (gaming) socket.emit('gamingStatus', gaming);
+            }).catch(() => {});
+
+            // Handle scan request
+            socket.on('scan', async () => {
+                try {
+                    await this.deviceManager.scanNetwork();
+                } catch (error: any) {
+                    socket.emit('scanError', { error: error.message });
+                }
+            });
+
+            // Handle block request
+            socket.on('block', async (data: { ip: string, gatewayIp: string }) => {
+                try {
+                    const device = await this.deviceManager.blockDevice(data.ip, data.gatewayIp);
+                    socket.emit('deviceBlocked', device);
+                } catch (error: any) {
+                    socket.emit('blockError', { error: error.message, ip: data?.ip });
+                }
+            });
+
+            // Handle unblock request
+            socket.on('unblock', async (data: { ip: string }) => {
+                try {
+                    const device = await this.deviceManager.unblockDevice(data.ip);
+                    socket.emit('deviceUnblocked', device);
+                } catch (error: any) {
+                    socket.emit('unblockError', { error: error.message, ip: data?.ip });
+                }
+            });
+
+            // Handle delete device from database
+            socket.on('deleteDevice', async (data: { mac: string }) => {
+                try {
+                    await this.deviceManager.deleteDevice(data.mac);
+                } catch (error: any) {
+                    socket.emit('deleteError', { error: error.message });
+                }
+            });
+
+            // Handle update device alias (Profile Target Tag)
+            socket.on('updateDeviceAlias', async (data: { mac: string; alias: string }) => {
+                try {
+                    const updated = await this.deviceManager.setDeviceAlias(data.mac, data.alias);
+                    socket.emit('deviceAliasUpdated', updated);
+                } catch (error: any) {
+                    socket.emit('aliasError', { error: error.message, mac: data?.mac });
+                }
+            });
+
+            // Handle speed limit throttle
+            socket.on('setSpeedLimit', async (data: { ip: string; limit: number }) => {
+                try {
+                    const updated = await this.deviceManager.setSpeedLimit(data.ip, data.limit);
+                    socket.emit('deviceSpeedLimitUpdated', updated);
+                } catch (error: any) {
+                    socket.emit('speedLimitError', { error: error.message, ip: data?.ip });
+                }
+            });
+
+            // Handle toggle Gaming Mode
+            socket.on('toggleGamingMode', async (data: { enabled: boolean; mode?: string; target_ping_ms?: number }) => {
+                try {
+                    await this.deviceManager.toggleGamingMode(Boolean(data.enabled), data.mode, data.target_ping_ms);
+                } catch (error: any) {
+                    socket.emit('gamingError', { error: error.message });
+                }
+            });
+
+            socket.on('disconnect', () => {
+                console.log(`Client disconnected: ${socket.id}`);
+            });
     }
 
     broadcast(event: string, data: any) {
