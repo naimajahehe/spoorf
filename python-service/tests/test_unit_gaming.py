@@ -151,7 +151,12 @@ class TestGamingEngine(unittest.TestCase):
         self.engine.toggle(False)
 
         with patch('src.core.gaming.threading.Thread') as thread_factory, \
-             patch('src.core.gaming.subprocess.run') as os_operation:
+             patch('src.core.gaming.subprocess.run') as os_operation, \
+             patch.object(
+                 self.engine._stop_event,
+                 'clear',
+                 wraps=self.engine._stop_event.clear,
+             ) as stop_clear:
             with self.assertRaisesRegex(RuntimeError, "sebelumnya belum berhenti"):
                 self.engine.toggle(True)
 
@@ -162,6 +167,7 @@ class TestGamingEngine(unittest.TestCase):
         self.assertFalse(self.engine.is_enabled())
         thread_factory.assert_not_called()
         os_operation.assert_not_called()
+        stop_clear.assert_not_called()
 
     def test_enable_and_disable_transitions_do_not_overlap(self):
         construction_entered = threading.Event()

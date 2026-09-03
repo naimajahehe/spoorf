@@ -246,3 +246,78 @@ Process completed with exit code 0
 
 The existing Scapy `TripleDES` deprecation warnings and Wireshark manufacturer
 database warning remained; there were no test failures.
+
+## Fix Round 3
+
+### Finding Addressed
+
+- Strengthened the Shield stuck-worker test to spy on all three Shield
+  stop-event `clear()` methods and assert none are called while a prior worker
+  remains alive after the bounded join.
+- Strengthened the Gaming stuck-worker test to spy on its stop-event `clear()`
+  method and assert it is not called in the same condition.
+- Preserved the existing assertions that activation raises an explicit error,
+  retains the stale worker, and never constructs a replacement worker.
+- No production-code change was needed because the existing guards already
+  reject the restart before stop events are cleared.
+
+### RED
+
+RED was verified with a temporary production mutation that called `clear()`
+and then `set()` immediately before each Shield and Gaming stuck-worker error.
+The mutation was reverted immediately after the run and is not part of the
+commit.
+
+Command:
+
+```powershell
+D:\spoorf\python-service\venv\Scripts\python.exe -m unittest tests.test_unit_shield.TestSentinelShield.test_enable_fails_closed_when_prior_worker_survives_bounded_join tests.test_unit_gaming.TestGamingEngine.test_enable_fails_closed_when_prior_worker_survives_bounded_join -v
+```
+
+Result:
+
+```text
+FAIL: test_enable_fails_closed_when_prior_worker_survives_bounded_join
+      (tests.test_unit_shield.TestSentinelShield)
+AssertionError: Expected 'clear' to not have been called. Called 1 times.
+
+FAIL: test_enable_fails_closed_when_prior_worker_survives_bounded_join
+      (tests.test_unit_gaming.TestGamingEngine)
+AssertionError: Expected 'clear' to not have been called. Called 1 times.
+
+Ran 2 tests in 0.008s
+FAILED (failures=2)
+```
+
+### GREEN
+
+Focused command:
+
+```powershell
+D:\spoorf\python-service\venv\Scripts\python.exe -m unittest tests.test_unit_shield tests.test_unit_gaming -v
+```
+
+Result:
+
+```text
+Ran 24 tests in 0.130s
+OK
+```
+
+### Full Python Suite
+
+Run once:
+
+```powershell
+D:\spoorf\python-service\venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py" -v
+```
+
+Result:
+
+```text
+183 tests discovered
+Process completed with exit code 0
+```
+
+The existing Scapy `TripleDES` deprecation warnings and Wireshark manufacturer
+database warning remained; there were no test failures.

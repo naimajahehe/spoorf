@@ -265,7 +265,22 @@ class TestSentinelShield(unittest.TestCase):
 
         self.shield.disable()
 
-        with patch('src.core.shield.threading.Thread') as thread_factory:
+        with patch('src.core.shield.threading.Thread') as thread_factory, \
+             patch.object(
+                 self.shield._sniffer_stop_event,
+                 'clear',
+                 wraps=self.shield._sniffer_stop_event.clear,
+             ) as sniffer_clear, \
+             patch.object(
+                 self.shield._heartbeat_stop_event,
+                 'clear',
+                 wraps=self.shield._heartbeat_stop_event.clear,
+             ) as heartbeat_clear, \
+             patch.object(
+                 self.shield._healing_stop_event,
+                 'clear',
+                 wraps=self.shield._healing_stop_event.clear,
+             ) as healing_clear:
             with self.assertRaisesRegex(SpoofError, "sebelumnya belum berhenti"):
                 self.shield.enable()
 
@@ -282,6 +297,9 @@ class TestSentinelShield(unittest.TestCase):
         mock_resolve.assert_not_called()
         mock_lock.assert_not_called()
         thread_factory.assert_not_called()
+        sniffer_clear.assert_not_called()
+        heartbeat_clear.assert_not_called()
+        healing_clear.assert_not_called()
 
     @patch('src.core.shield.get_network_info')
     @patch('src.core.shield.get_current_gateway')
