@@ -11,7 +11,13 @@ import random
 import time
 from typing import Dict
 from scapy.all import Ether, ARP, srp, conf
-from ..network import get_self_mac, get_network_info, is_valid_mac, is_valid_private_ip
+from ..network import (
+    get_self_mac,
+    get_network_info,
+    is_valid_mac,
+    is_valid_private_ip,
+    is_valid_private_network,
+)
 from ...utils.logger import logger
 
 def probe_sleeping_host_via_gateway_arp(
@@ -138,7 +144,7 @@ def collect_from_arp_broadcast(discovered: Dict[str, str], timeout: float = 1.0)
         import ipaddress
         net_info = get_network_info()
         network_cidr = net_info.get('network')
-        if not network_cidr:
+        if not is_valid_private_network(network_cidr):
             return
 
         # PENCEGAHAN BROADCAST STORM PADA SUPERNET /16 ATAU /8:
@@ -182,31 +188,28 @@ def sweep_subnet_for_arp(discovered: Dict[str, str]) -> None:
     try:
         import ipaddress
         info = get_network_info()
-        network_cidr = info.get('network', '192.168.1.0/24')
+        network_cidr = info.get('network', '')
         self_ip = info.get('ip', '')
         gateway_ip = info.get('gateway', '')
 
-        # Tentukan base prefix yang aman
+        if not is_valid_private_network(network_cidr):
+            return
+
         if self_ip and is_valid_private_ip(self_ip):
             safe_base_prefix = self_ip.rsplit('.', 1)[0]
         elif gateway_ip and is_valid_private_ip(gateway_ip):
             safe_base_prefix = gateway_ip.rsplit('.', 1)[0]
         else:
-            safe_base_prefix = '192.168.1'
+            safe_base_prefix = ''
 
         candidate_ips = []
-        try:
-            net_obj = ipaddress.IPv4Network(network_cidr, strict=False)
-            if net_obj.num_addresses <= 1024:
-                candidate_ips = [str(ip) for ip in net_obj.hosts() if is_valid_private_ip(str(ip))]
-            else:
-                # Subnet raksasa (/16 atau /8): ambil 254 host di sekitar host controller
-                candidate_ips = [f"{safe_base_prefix}.{i}" for i in range(1, 255)]
-        except Exception:
+        net_obj = ipaddress.IPv4Network(network_cidr, strict=False)
+        if net_obj.num_addresses <= 1024:
+            candidate_ips = [str(ip) for ip in net_obj.hosts()]
+        elif safe_base_prefix:
             candidate_ips = [f"{safe_base_prefix}.{i}" for i in range(1, 255)]
-
-        if not candidate_ips:
-            candidate_ips = [f"{safe_base_prefix}.{i}" for i in range(1, 255)]
+        else:
+            return
 
         # Stealth Shuffling: Acak urutan IP target agar tidak membentuk pola staircase scan
         random.shuffle(candidate_ips)

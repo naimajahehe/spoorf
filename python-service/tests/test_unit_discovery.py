@@ -163,10 +163,15 @@ class TestCoreDiscovery(unittest.TestCase):
     def test_dhcp_sniffer_lifecycle_self_packet_wakeup(self):
         """Lifecycle: Sniffer start and stop gracefully terminates via loopback wakeup packet."""
         from src.core.discovery.dhcp import start_dhcp_sniffer, stop_dhcp_sniffer
+        from unittest.mock import patch, MagicMock
         import time
-        start_dhcp_sniffer()
-        time.sleep(0.1)
-        stop_dhcp_sniffer()
+        mock_thread = MagicMock()
+        mock_thread.is_alive.return_value = False
+        with patch('src.core.discovery.dhcp.threading.Thread', return_value=mock_thread), \
+             patch('socket.socket'):
+            start_dhcp_sniffer()
+            time.sleep(0.1)
+            stop_dhcp_sniffer()
         # Harus berhenti secara bersih
         from src.core.discovery import dhcp
         self.assertFalse(dhcp._dhcp_sniffer_running)
@@ -338,19 +343,49 @@ class TestCoreDiscovery(unittest.TestCase):
         from unittest.mock import patch
 
         discovered = {}
-        probed_ips = []
 
-        # 1. Test empty self_ip & invalid network fallback
+        # 1. Invalid network must fail closed without probing.
         with patch('src.core.discovery.arp.get_network_info', return_value={'network': 'invalid_cidr', 'ip': '', 'gateway': ''}), \
-             patch('socket.socket') as mock_sock:
+             patch('src.core.discovery.arp.socket.socket') as mock_sock, \
+             patch('src.core.discovery.arp.collect_from_arp_cache'):
             sweep_subnet_for_arp(discovered)
-            # Should safely execute fallback without raising unhandled exceptions
+            mock_sock.assert_not_called()
 
         # 2. Test huge supernet (/16) restriction to local /24 block
         with patch('src.core.discovery.arp.get_network_info', return_value={'network': '10.0.0.0/16', 'ip': '10.0.50.25', 'gateway': '10.0.0.1'}), \
-             patch('socket.socket') as mock_sock:
+             patch('src.core.discovery.arp.socket.socket'), \
+             patch('src.core.discovery.arp.collect_from_arp_cache'):
             sweep_subnet_for_arp(discovered)
             # Should safely execute
+
+    def test_arp_broadcast_skips_non_rfc1918_network(self):
+        from src.core.discovery.arp import collect_from_arp_broadcast
+        from unittest.mock import patch
+
+        with patch(
+            'src.core.discovery.arp.get_network_info',
+            return_value={'network': '203.0.113.0/24', 'ip': '203.0.113.10'}
+        ), patch('src.core.discovery.arp.srp') as mock_srp:
+            collect_from_arp_broadcast({})
+
+        mock_srp.assert_not_called()
+
+    def test_arp_sweep_skips_non_rfc1918_network(self):
+        from src.core.discovery.arp import sweep_subnet_for_arp
+        from unittest.mock import patch
+
+        with patch(
+            'src.core.discovery.arp.get_network_info',
+            return_value={
+                'network': '203.0.113.0/24',
+                'ip': '203.0.113.10',
+                'gateway': '203.0.113.1'
+            }
+        ), patch('src.core.discovery.arp.socket.socket') as mock_socket, \
+             patch('src.core.discovery.arp.collect_from_arp_cache'):
+            sweep_subnet_for_arp({})
+
+        mock_socket.assert_not_called()
 
     def test_dhcp6_packet_handling(self):
         """Verify DHCPv6 packet parser extracts DUID, Vendor Class, and ORO fingerprint."""
@@ -381,8 +416,9 @@ class TestCoreDiscovery(unittest.TestCase):
     def test_dual_stack_multicast_wakeup_execution(self):
         """Verify send_multicast_wakeup runs dual-stack IPv4 + IPv6 bursts safely."""
         from src.core.discovery.multicast import send_multicast_wakeup
-        # Must execute cleanly without unhandled exception
-        send_multicast_wakeup()
+        from unittest.mock import patch
+        with patch('src.core.discovery.multicast.socket.socket'):
+            send_multicast_wakeup()
 
 if __name__ == '__main__':
     unittest.main()

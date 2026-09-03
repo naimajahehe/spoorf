@@ -44,6 +44,16 @@ def is_valid_private_ip(ip: str) -> bool:
     except:
         return False
 
+def is_valid_private_network(cidr: str) -> bool:
+    """Validasi bahwa seluruh CIDR IPv4 berada di dalam rentang RFC 1918."""
+    if not cidr or not isinstance(cidr, str):
+        return False
+    try:
+        net = ipaddress.IPv4Network(cidr.strip(), strict=False)
+        return any(net.subnet_of(private) for private in _RFC1918_NETWORKS)
+    except (ipaddress.AddressValueError, ipaddress.NetmaskValueError, ValueError):
+        return False
+
 def is_valid_mac(mac: str) -> bool:
     """Validasi format alamat MAC 6-oktet."""
     if not mac or not isinstance(mac, str):
@@ -90,23 +100,31 @@ def get_current_gateway() -> str:
     try:
         gws = netifaces.gateways()
         default_gw = gws.get('default', {}).get(netifaces.AF_INET)
-        if default_gw and default_gw[0]:
+        if default_gw and is_valid_private_ip(default_gw[0]):
             return default_gw[0]
     except:
         pass
 
     try:
         if sys.platform == 'win32':
-            output = subprocess.check_output("route print 0.0.0.0", shell=True, text=True)
+            output = subprocess.check_output(
+                ["route", "print", "0.0.0.0"],
+                text=True,
+                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+            )
             for line in output.splitlines():
                 if "0.0.0.0" in line:
                     parts = line.split()
-                    if len(parts) >= 3 and parts[0] == "0.0.0.0":
+                    if (
+                        len(parts) >= 3 and
+                        parts[0] == "0.0.0.0" and
+                        is_valid_private_ip(parts[2])
+                    ):
                         return parts[2]
     except:
         pass
 
-    return "192.168.1.1"
+    return ""
 
 def get_network_info() -> Dict[str, Any]:
     """Dapatkan informasi adapter jaringan aktif saat ini (Wi-Fi / Ethernet diutamakan, abaikan Bluetooth)."""
@@ -114,15 +132,17 @@ def get_network_info() -> Dict[str, Any]:
     current_gw = get_current_gateway()
 
     # 1. Jika active_ip terdeteksi langsung dari kernel routing, cari interface yang memiliki IP tersebut
-    if active_ip:
+    if active_ip and is_valid_private_ip(active_ip) and is_valid_private_ip(current_gw):
         for iface in netifaces.interfaces():
             try:
                 addrs = netifaces.ifaddresses(iface)
                 if netifaces.AF_INET in addrs:
                     for ip_info in addrs[netifaces.AF_INET]:
                         if ip_info.get('addr') == active_ip:
-                            netmask = ip_info.get('netmask', '255.255.255.0')
+                            netmask = ip_info.get('netmask', '')
                             network = str(ipaddress.IPv4Network(f"{active_ip}/{netmask}", strict=False))
+                            if not is_valid_private_network(network):
+                                continue
                             return {
                                 'ip': active_ip,
                                 'netmask': netmask,
@@ -143,16 +163,17 @@ def get_network_info() -> Dict[str, Any]:
             if netifaces.AF_INET in addrs:
                 ip_info = addrs[netifaces.AF_INET][0]
                 ip = ip_info['addr']
-                if not ip.startswith('127.') and not ip.startswith('169.254.'):
+                if is_valid_private_ip(ip) and is_valid_private_ip(gw_ip):
                     netmask = ip_info['netmask']
                     network = str(ipaddress.IPv4Network(f"{ip}/{netmask}", strict=False))
-                    return {
-                        'ip': ip,
-                        'netmask': netmask,
-                        'network': network,
-                        'gateway': gw_ip,
-                        'interface': iface
-                    }
+                    if is_valid_private_network(network):
+                        return {
+                            'ip': ip,
+                            'netmask': netmask,
+                            'network': network,
+                            'gateway': gw_ip,
+                            'interface': iface
+                        }
     except Exception:
         pass
 
@@ -170,16 +191,17 @@ def get_network_info() -> Dict[str, Any]:
             if netifaces.AF_INET in addrs:
                 ip_info = addrs[netifaces.AF_INET][0]
                 ip = ip_info['addr']
-                if is_valid_private_ip(ip):
+                if is_valid_private_ip(ip) and is_valid_private_ip(current_gw):
                     netmask = ip_info['netmask']
                     network = str(ipaddress.IPv4Network(f"{ip}/{netmask}", strict=False))
-                    candidates.append({
-                        'ip': ip,
-                        'netmask': netmask,
-                        'network': network,
-                        'gateway': current_gw,
-                        'interface': iface
-                    })
+                    if is_valid_private_network(network):
+                        candidates.append({
+                            'ip': ip,
+                            'netmask': netmask,
+                            'network': network,
+                            'gateway': current_gw,
+                            'interface': iface
+                        })
         except Exception:
             continue
 
@@ -187,11 +209,11 @@ def get_network_info() -> Dict[str, Any]:
         return candidates[0]
 
     return {
-        'ip': active_ip or '192.168.1.100',
-        'netmask': '255.255.255.0',
-        'network': '192.168.1.0/24',
-        'gateway': current_gw,
-        'interface': 'Wi-Fi'
+        'ip': '',
+        'netmask': '',
+        'network': '',
+        'gateway': '',
+        'interface': ''
     }
 
 def get_wifi_info() -> Dict[str, Any]:
