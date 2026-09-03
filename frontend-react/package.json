@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "test:refresh-sequencer": "node scripts/test-refresh-sequencer.mjs",
     "preview": "vite preview"
   },
   "dependencies": {
