@@ -67,3 +67,56 @@ for pending-plan MAC identity. Each covered mutation resolves its in-memory
 target first and invokes the guard before any Python/SQLite call, local mutation,
 or event emission. Profile deletion expands its in-memory target set by
 `profile_id` before its database lookup, so it is also fail-closed.
+
+## Residual Bypasses: RED to GREEN
+
+### RED
+
+Added Test 15 in `backend-node/tests/unit_gamingMode.test.ts`, then ran:
+
+```powershell
+cd backend-node
+npm test
+```
+
+The unpatched implementation failed as expected:
+
+```text
+Gaming Mode Test Failed: AssertionError [ERR_ASSERTION]:
+Missing expected rejection: a connected profile peer must remain protected by
+the disconnected managed device snapshot
+```
+
+This reproduced the bypass: once the managed device was removed from
+`this.devices`, deleting its profile peer reached SQLite and deleted the peer.
+
+### GREEN
+
+The restore-plan device snapshot now retains `profile_id`. Pending recovery
+guards compare exact managed MAC, snapshotted IP, and snapshotted profile ID
+without a database lookup. `deleteDevice()` rejects absent in-memory targets
+before SQLite, rechecks resolved targets before teardown, and `clearAllDevices()`
+is serialized and rejected while recovery is pending. `stopTransparentGateway()`
+checks the snapshotted IP even after the device disappears.
+
+Test 15 verifies all of the following:
+
+- a disconnected managed device still protects an in-memory profile peer;
+- an absent/DB-only deletion target produces zero SQLite calls;
+- transparent-gateway stop by the snapshotted IP produces zero Python calls;
+- clear-all produces zero SQLite calls, events, and device loss;
+- unrelated in-memory speed mutation and deletion remain permitted.
+
+GREEN command:
+
+```powershell
+cd backend-node
+npm test
+```
+
+Result:
+
+```text
+✓ Recovery identity snapshots block disconnected targets without blocking unrelated devices
+TEST RESULTS: 34 PASSED | 0 FAILED
+```

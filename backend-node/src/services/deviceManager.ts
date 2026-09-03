@@ -68,7 +68,7 @@ interface GamingRestorePlan {
     priorLimit: number;
     hadSession: boolean;
     sessionId?: string;
-    device?: Pick<Device, 'ip' | 'mac' | 'ipv6_link_local'>;
+    device?: Pick<Device, 'ip' | 'mac' | 'ipv6_link_local' | 'profile_id'>;
     stopped: boolean;
     restoredSessionId?: string;
     blockedPersisted: boolean;
@@ -1008,6 +1008,9 @@ export class DeviceManager extends EventEmitter {
     private async _deleteDeviceImpl(mac: string): Promise<void> {
         const normMac = mac.toLowerCase();
         const requestedDevice = this._findDeviceByMac(normMac);
+        if (!requestedDevice && this.pendingGamingDisable) {
+            throw this._pendingGamingRecoveryError();
+        }
         const requestedProfileId = requestedDevice?.profile_id;
         const inMemoryTargets = requestedProfileId
             ? Array.from(this.devices.values()).filter(device => device.profile_id === requestedProfileId)
@@ -1023,6 +1026,7 @@ export class DeviceManager extends EventEmitter {
                 devicesToDelete.push([ip, dev]);
             }
         }
+        this._assertNoPendingGamingRecoveryConflict(devicesToDelete.map(([, device]) => device));
 
         for (const [, dev] of devicesToDelete) {
             if (dev.is_redirected) {
@@ -1041,6 +1045,13 @@ export class DeviceManager extends EventEmitter {
     }
 
     async clearAllDevices(): Promise<void> {
+        return this.runExclusive(() => this._clearAllDevicesImpl());
+    }
+
+    private async _clearAllDevicesImpl(): Promise<void> {
+        if (this.pendingGamingDisable) {
+            throw this._pendingGamingRecoveryError();
+        }
         await this.db.clearAllDevices();
         this.devices.clear();
         this.emit('devicesUpdated', []);
@@ -1237,6 +1248,7 @@ export class DeviceManager extends EventEmitter {
         if (device) {
             this._assertNoPendingGamingRecoveryConflict([device]);
         }
+        this._assertNoPendingGamingRecoveryConflictByIdentity({ ip });
         await this.python.stopTransparentGateway(ip);
         this.emit('gatewayStatusChanged', await this.getTransparentGatewayStatus());
     }
@@ -1570,6 +1582,7 @@ export class DeviceManager extends EventEmitter {
                     ip: device.ip,
                     mac: device.mac,
                     ipv6_link_local: device.ipv6_link_local,
+                    profile_id: device.profile_id,
                 } : undefined,
                 stopped: false,
                 blockedPersisted: false,
@@ -1601,18 +1614,35 @@ export class DeviceManager extends EventEmitter {
     }
 
     private _assertNoPendingGamingRecoveryConflict(devices: Iterable<Device>): void {
+        for (const device of devices) {
+            this._assertNoPendingGamingRecoveryConflictByIdentity({
+                mac: device.mac,
+                ip: device.ip,
+                profileId: device.profile_id,
+            });
+        }
+    }
+
+    private _assertNoPendingGamingRecoveryConflictByIdentity(
+        identity: { mac?: string; ip?: string; profileId?: string }
+    ): void {
         if (!this.pendingGamingDisable) return;
 
-        const pendingMacs = new Set(
-            this.pendingGamingDisable.restorePlans.map(plan => plan.macKey)
-        );
-        for (const device of devices) {
-            if (pendingMacs.has(device.mac.toLowerCase())) {
-                throw new Error(
-                    'Gaming disable recovery is pending for a managed device. Retry disabling Gaming Mode before changing its network state.'
-                );
+        for (const plan of this.pendingGamingDisable.restorePlans) {
+            if (
+                (identity.mac && plan.macKey === identity.mac.toLowerCase()) ||
+                (identity.ip && plan.device?.ip === identity.ip) ||
+                (identity.profileId && plan.device?.profile_id === identity.profileId)
+            ) {
+                throw this._pendingGamingRecoveryError();
             }
         }
+    }
+
+    private _pendingGamingRecoveryError(): Error {
+        return new Error(
+            'Gaming disable recovery is pending for a managed device. Retry disabling Gaming Mode before changing its network state.'
+        );
     }
 
     /**

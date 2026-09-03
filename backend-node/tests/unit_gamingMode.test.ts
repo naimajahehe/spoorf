@@ -730,4 +730,105 @@ export async function runGamingModeTests() {
         console.log('  ✓ Recovery isolation: pending Gaming disable blocks mutations until retry completes');
     }
 
+    // Test 15: identity snapshots remain authoritative after the managed device
+    // disconnects, and unknown deletion targets fail closed while recovery is pending.
+    {
+        const { dm, db, networkCalls } = makeManager();
+        const gateway = makeDevice({ ip: '192.168.1.1', mac: '00:00:00:00:00:01', is_gateway: true });
+        const managed = makeDevice({
+            ip: '192.168.1.149',
+            mac: 'f0:0d:00:00:01:49',
+            profile_id: 'recovery-profile',
+            speed_limit: 20,
+            session_id: 'gaming-session-disconnected'
+        });
+        const profilePeer = makeDevice({
+            ip: '192.168.1.150',
+            mac: 'f0:0d:00:00:01:50',
+            profile_id: 'recovery-profile'
+        });
+        const unrelated = makeDevice({
+            ip: '192.168.1.151',
+            mac: 'f0:0d:00:00:01:51',
+            profile_id: 'unrelated-profile'
+        });
+        (dm as any).devices.set(gateway.ip, gateway);
+        (dm as any).devices.set(managed.ip, managed);
+        (dm as any).devices.set(profilePeer.ip, profilePeer);
+        (dm as any).devices.set(unrelated.ip, unrelated);
+        (dm as any).gamingActive = true;
+        (dm as any).gamingManaged.set(managed.mac.toLowerCase(), {
+            priorLimit: 35,
+            hadSession: true,
+            sessionId: managed.session_id
+        });
+
+        const sqliteCalls: string[] = [];
+        let failPersistence = true;
+        db.setDeviceBlocked = async () => {
+            sqliteCalls.push('setDeviceBlocked');
+            if (failPersistence) throw new Error('controlled recovery persistence failure');
+        };
+        db.setDeviceSpeedLimit = async () => { sqliteCalls.push('setDeviceSpeedLimit'); };
+        db.setDeviceOnlineStatus = async () => { sqliteCalls.push('setDeviceOnlineStatus'); };
+        db.getDeviceByMac = async (mac: string) => {
+            sqliteCalls.push(`getDeviceByMac:${mac}`);
+            return [profilePeer, unrelated].find(device => device.mac.toLowerCase() === mac.toLowerCase());
+        };
+        db.deleteDevice = async (mac: string) => { sqliteCalls.push(`deleteDevice:${mac}`); };
+        db.clearAllDevices = async () => { sqliteCalls.push('clearAllDevices'); };
+
+        await assert.rejects(
+            () => dm.toggleGamingMode(false),
+            /controlled recovery persistence failure/
+        );
+        assert.ok((dm as any).pendingGamingDisable, 'persistence failure must retain recovery identity snapshots');
+
+        (dm as any).devices.delete(managed.ip);
+        const recoveryPending = /Gaming disable recovery is pending for a managed device\. Retry disabling Gaming Mode before changing its network state\./;
+        const pythonCallCount = networkCalls.length;
+        const sqliteCallCount = sqliteCalls.length;
+        const beforePeer = { ...profilePeer };
+        const emitted: string[] = [];
+        dm.on('deviceUpdated', () => emitted.push('deviceUpdated'));
+        dm.on('devicesUpdated', () => emitted.push('devicesUpdated'));
+        dm.on('gatewayStatusChanged', () => emitted.push('gatewayStatusChanged'));
+
+        await assert.rejects(
+            () => dm.deleteDevice(profilePeer.mac),
+            recoveryPending,
+            'a connected profile peer must remain protected by the disconnected managed device snapshot'
+        );
+        await assert.rejects(
+            () => dm.deleteDevice('f0:0d:00:00:01:99'),
+            recoveryPending,
+            'an absent deletion target must fail closed without checking SQLite'
+        );
+        await assert.rejects(
+            () => dm.stopTransparentGateway(managed.ip),
+            recoveryPending,
+            'the disconnected managed device IP must remain protected by its recovery snapshot'
+        );
+        await assert.rejects(
+            () => dm.clearAllDevices(),
+            /Gaming disable recovery is pending/,
+            'clear-all must not erase recovery targets'
+        );
+
+        assert.strictEqual(networkCalls.length, pythonCallCount, 'rejected recovery conflicts must not call Python');
+        assert.strictEqual(sqliteCalls.length, sqliteCallCount, 'rejected recovery conflicts must not call SQLite');
+        assert.deepStrictEqual(profilePeer, beforePeer, 'rejected peer deletion must not mutate local state');
+        assert.ok((dm as any).devices.has(profilePeer.ip), 'rejected peer deletion must retain the device');
+        assert.deepStrictEqual(emitted, [], 'rejected recovery conflicts must not emit state events');
+
+        failPersistence = false;
+        await dm.setSpeedLimit(unrelated.ip, 70);
+        await dm.deleteDevice(unrelated.mac);
+        assert.strictEqual(unrelated.speed_limit, 70, 'unrelated in-memory mutations remain allowed while recovery is pending');
+        assert.ok(!(dm as any).devices.has(unrelated.ip), 'unrelated in-memory deletions remain allowed while recovery is pending');
+        assert.ok(networkCalls.length > pythonCallCount, 'allowed unrelated mutation reaches Python');
+        assert.ok(sqliteCalls.length > sqliteCallCount, 'allowed unrelated mutations reach SQLite');
+        console.log('  ✓ Recovery identity snapshots block disconnected targets without blocking unrelated devices');
+    }
+
 }
