@@ -123,6 +123,9 @@ export const EngineReadinessGateContent: FC<EngineReadinessGateProps> = ({ onRea
   const [isTerminalOpen, setIsTerminalOpen] = useState(true);
   const [terminalCopied, setTerminalCopied] = useState(false);
   const [isChecking, setIsChecking] = useState(false);
+  // Alasan pipeline berhenti. Wajib diisi setiap kali sebuah tahap STOP, agar user
+  // selalu punya jalan keluar — tanpa ini gate mengunci user secara permanen.
+  const [haltedReason, setHaltedReason] = useState<string | null>(null);
 
   const startTimeRef = useRef<number>(Date.now());
   const logIdRef = useRef<number>(0);
@@ -150,6 +153,7 @@ export const EngineReadinessGateContent: FC<EngineReadinessGateProps> = ({ onRea
   // Execute Strict Sequential System Diagnostics Pipeline with 1.25s per-phase pacing (Total 5.0s)
   const runDiagnostics = useCallback(async () => {
     setIsChecking(true);
+    setHaltedReason(null);
     startTimeRef.current = Date.now();
     
     addLog("Memulai bootloader NetCut Sentinel v2.3.0...", "info");
@@ -181,6 +185,7 @@ export const EngineReadinessGateContent: FC<EngineReadinessGateProps> = ({ onRea
         )
       );
       addLog("[ERROR] Gagal menghubungi Node.js Orchestrator di http://127.0.0.1:5000", "error");
+      setHaltedReason("Node.js Orchestrator (:5000) tidak merespons");
       setIsChecking(false);
       return; // STOP!
     }
@@ -210,6 +215,7 @@ export const EngineReadinessGateContent: FC<EngineReadinessGateProps> = ({ onRea
         )
       );
       addLog("[ERROR] FastAPI Python Engine (:8001) tidak aktif atau gagal inisialisasi.", "error");
+      setHaltedReason("FastAPI Python Engine (:8001) offline atau tidak merespons");
       setIsChecking(false);
       return; // STOP!
     }
@@ -255,6 +261,7 @@ export const EngineReadinessGateContent: FC<EngineReadinessGateProps> = ({ onRea
         )
       );
       addLog(`[NPCAP ERROR] ${npcapCheck.details}`, "error");
+      setHaltedReason(npcapCheck.details || "Npcap NDIS 6 Kernel Driver tidak terverifikasi");
       setIsChecking(false);
       return; // STOP!
     }
@@ -293,6 +300,7 @@ export const EngineReadinessGateContent: FC<EngineReadinessGateProps> = ({ onRea
         )
       );
       addLog(`[NET ERROR] ${netCheck.details}`, "error");
+      setHaltedReason(netCheck.details || "Tidak ada adapter jaringan fisik dengan IP privat");
       setIsChecking(false);
       return; // STOP!
     }
@@ -471,6 +479,36 @@ export const EngineReadinessGateContent: FC<EngineReadinessGateProps> = ({ onRea
                   </span>
                 </div>
               ))}
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Jalan keluar saat pipeline berhenti — selalu tersedia, apa pun tahap yang gagal. */}
+        <AnimatePresence initial={false}>
+          {haltedReason && !isChecking && (
+            <motion.div
+              initial={{ height: 0, opacity: 0 }}
+              animate={{ height: "auto", opacity: 1 }}
+              exit={{ height: 0, opacity: 0 }}
+              transition={{ duration: 0.2 }}
+              className="border-t border-white/[0.06] bg-amber-500/[0.03] overflow-hidden"
+            >
+              <div className="px-4 py-3 flex items-center justify-between gap-3">
+                <div className="flex items-start gap-2.5 min-w-0">
+                  <AlertTriangle size={13} className="text-amber-400 shrink-0 mt-px" />
+                  <p className="text-[11px] text-zinc-400 leading-snug min-w-0">
+                    Inisialisasi berhenti — <span className="text-zinc-300">{haltedReason}</span>
+                  </p>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => onReady()}
+                  className="shrink-0 px-2.5 py-1.5 rounded-lg text-[11px] font-medium text-amber-300 border border-amber-400/25 bg-amber-400/[0.06] hover:bg-amber-400/[0.12] hover:text-amber-200 transition-colors cursor-pointer outline-none"
+                >
+                  Lanjutkan Mode Terbatas
+                </button>
+              </div>
             </motion.div>
           )}
         </AnimatePresence>

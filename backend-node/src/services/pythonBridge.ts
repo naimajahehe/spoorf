@@ -59,22 +59,49 @@ export class PythonBridge extends EventEmitter {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), timeoutMs);
         try {
-            return await fetch(url, {
+            const res = await fetch(url, {
                 ...options,
                 headers: this.authHeaders(options.headers),
                 signal: controller.signal
             });
+            // Python menjawab di socket -> engine terjangkau. Ini satu-satunya jalur
+            // pemulihan `ready` setelah start() menyerah (lihat catatan di start()).
+            this.markReachable();
+            return res;
         } catch (err: any) {
             if (err.name === 'AbortError' || err.code === 'ABORT_ERR' || err.message?.includes('aborted')) {
+                // Timeout tidak membuktikan engine mati (bisa satu endpoint yang lambat),
+                // jadi status `ready` sengaja tidak diubah di sini.
                 throw new Error(`Koneksi ke Python microservice (${url}) timeout setelah ${timeoutMs}ms.`);
             }
             if (err.code === 'ECONNREFUSED' || err.message?.includes('fetch failed')) {
+                this.markUnreachable();
                 throw new Error(`Python microservice (:8001) tidak dapat dihubungi (Offline).`);
             }
             throw err;
         } finally {
             clearTimeout(timer);
         }
+    }
+
+    /**
+     * `ready` adalah sinyal keterjangkauan yang hidup, bukan flag sekali-set saat boot.
+     * Tanpa ini, engine Python yang boot lebih lambat dari jendela polling start()
+     * akan dianggap offline selamanya oleh seluruh guard `if (!this.ready)`.
+     */
+    private markReachable(): void {
+        if (this.ready) return;
+        this.ready = true;
+        console.log(`✅ Python FastAPI microservice kembali terjangkau di ${this.baseUrl}`);
+        if (!this.ws) {
+            this.connectWebSocket();
+        }
+    }
+
+    private markUnreachable(): void {
+        if (!this.ready) return;
+        this.ready = false;
+        console.warn(`⚠️ Python FastAPI microservice (:8001) tidak lagi terjangkau — beralih ke mode offline.`);
     }
 
     private async checkHealth(): Promise<boolean> {
@@ -95,8 +122,9 @@ export class PythonBridge extends EventEmitter {
             const ok = await this.checkHealth();
             if (ok) {
                 console.log(`✅ Python FastAPI microservice is ready on ${this.baseUrl} (in ${attempts * 0.5}s)`);
-                this.ready = true;
-                this.connectWebSocket();
+                // checkHealth() sudah melewati fetchWithTimeout -> markReachable(),
+                // jadi `ready` dan WebSocket sudah terpasang. Jangan sambung dua kali.
+                this.markReachable();
                 return;
             }
 
@@ -134,7 +162,10 @@ export class PythonBridge extends EventEmitter {
             attempts++;
         }
 
-        console.warn(`⚠️ Python FastAPI microservice not responding on ${this.baseUrl} after ${maxAttempts * 0.5}s. Continuing in offline mode.`);
+        // Menyerah di sini bukan vonis permanen: probe tanpa guard (checkHealth,
+        // getDiagnostics) tetap memanggil fetchWithTimeout, yang akan memanggil
+        // markReachable() begitu Python akhirnya menjawab.
+        console.warn(`⚠️ Python FastAPI microservice not responding on ${this.baseUrl} after ${maxAttempts * 0.5}s. Continuing in offline mode (akan pulih otomatis bila engine menyusul aktif).`);
     }
 
     private latestTelemetry: any = null;
@@ -200,12 +231,16 @@ export class PythonBridge extends EventEmitter {
             });
 
             this.ws.on('close', () => {
+                // Lepas referensi socket mati agar markReachable() bisa menyambung ulang
+                // saat Python kembali hidup setelah sempat dianggap offline.
+                this.ws = null;
                 // Reconnect after 3 seconds if Python is still active
                 if (this.ready) {
                     setTimeout(() => this.connectWebSocket(), 3000);
                 }
             });
         } catch (e) {
+            this.ws = null;
             console.warn('Error initiating Python WebSocket connection:', e);
         }
     }
