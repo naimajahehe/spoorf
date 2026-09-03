@@ -410,9 +410,9 @@ class ARPSpoofer:
         # KEAMANAN (P1): validasi parameter gateway juga — nilai ini masuk ke
         # paket ARP dan (di Windows) ke perintah netsh. Tanpa validasi, gateway_ip/
         # gateway_mac tak tepercaya membuka command injection & paket malformed.
-        if gateway_ip and not is_valid_private_ip(gateway_ip):
+        if not is_valid_private_ip(gateway_ip):
             raise SpoofError(f"Gateway IP '{gateway_ip}' di luar jangkauan RFC 1918 (private subnet)!")
-        if gateway_mac and not is_valid_mac(gateway_mac):
+        if not is_valid_mac(gateway_mac):
             raise SpoofError(f"Format MAC gateway '{gateway_mac}' tidak valid!")
 
         # Invariant 1: Gateway Immunity
@@ -453,8 +453,12 @@ class ARPSpoofer:
         for old_sid in existing_sids:
             try:
                 self.stop(old_sid)
+            except SpoofError:
+                raise
             except Exception as e:
-                logger.debug(f"Notice stopping prior session {old_sid}: {e}")
+                raise SpoofError(
+                    f"Gagal menghentikan session sebelumnya {old_sid}: {e}"
+                ) from e
 
         # Koordinasi IPv6 Dual-Stack jika target memiliki IPv6
         v6_session_id = None
@@ -645,17 +649,20 @@ class ARPSpoofer:
         logger.info("🛑 Menghentikan semua session...")
         with self._lock:
             session_ids = list(self._sessions.keys())
+        failures = []
 
         for sid in session_ids:
             try:
                 self.stop(sid)
             except Exception as e:
                 logger.error(f"Gagal stop {sid}: {e}")
+                failures.append((sid, e))
 
         try:
             ndp_spoofer.stop_all()
         except Exception as e:
-            logger.debug(f"Notice stopping all IPv6: {e}")
+            logger.error(f"Gagal stop semua session IPv6: {e}")
+            failures.append(("IPv6 cleanup", e))
 
         with self._lock:
             self._running = any(
@@ -665,14 +672,28 @@ class ARPSpoofer:
             no_active_sessions = not self._running
             no_sessions_left = not self._sessions
             iface_name = self._win_interface_name
+            forwarding_baseline = bool(self._fwd_was_enabled)
+            forwarding_was_touched = self._fwd_touched
 
         # Pulihkan IP forwarding ke BASELINE asli (bukan hard-set True) agar host
         # operator kembali seperti sebelum aplikasi dijalankan (pola bettercap).
-        if no_active_sessions and self._fwd_touched:
-            set_ip_forwarding(bool(self._fwd_was_enabled), iface_name)
-            if no_sessions_left:
-                self._fwd_touched = False
-                self._fwd_was_enabled = None
+        if no_active_sessions and forwarding_was_touched:
+            try:
+                set_ip_forwarding(forwarding_baseline, iface_name)
+            except Exception as e:
+                logger.error(f"Gagal memulihkan IP forwarding: {e}")
+                failures.append(("IP forwarding", e))
+            else:
+                if no_sessions_left:
+                    with self._lock:
+                        if not self._sessions:
+                            self._fwd_touched = False
+                            self._fwd_was_enabled = None
+
+        if failures:
+            details = "; ".join(f"{scope}: {error}" for scope, error in failures)
+            raise SpoofError(f"Gagal menghentikan semua ARP session: {details}")
+
         logger.info("✅ Semua session dihentikan")
 
     def get_sessions(self) -> Dict[str, Dict[str, Any]]:

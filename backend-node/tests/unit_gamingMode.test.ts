@@ -275,8 +275,8 @@ export async function runGamingModeTests() {
         console.log('  ✓ Failure safety: Gaming OFF mempertahankan state saat teardown gagal');
     }
 
-    // Test 9: A partially completed disable retries every managed session before
-    // turning Python Gaming Mode OFF, so idempotent stops can reconcile session A.
+    // Test 9: A partially completed disable resumes from the failed session instead
+    // of re-stopping a session that was already reconciled successfully.
     {
         const { dm, python, callOrder, persistenceCalls } = makeManager();
         const gateway = makeDevice({ ip: '192.168.1.1', mac: '00:00:00:00:00:01', is_gateway: true });
@@ -333,11 +333,10 @@ export async function runGamingModeTests() {
             [
                 'stop:gaming-session-a',
                 'stop:gaming-session-b',
-                'stop:gaming-session-a',
                 'stop:gaming-session-b',
                 'gaming:false'
             ],
-            'Retry harus merekonsiliasi A yang sudah berhenti, lalu menghentikan B sebelum Gaming OFF'
+            'Retry hanya boleh melanjutkan session B yang belum selesai sebelum Gaming OFF'
         );
         assert.strictEqual((dm as any).gamingActive, false, 'Node hanya nonaktif setelah Python OFF berhasil');
         assert.strictEqual((dm as any).gamingManaged.size, 0, 'Metadata retry dibersihkan setelah commit');
@@ -398,6 +397,227 @@ export async function runGamingModeTests() {
         assert.strictEqual(target.speed_limit, 20, 'State perangkat tidak boleh di-commit sebelum Python OFF sukses');
         assert.deepStrictEqual(persistenceCalls, [], 'SQLite tidak boleh diubah bila Python OFF gagal');
         console.log('  ✓ Failure safety: Python OFF failure mempertahankan recovery metadata dan state Node');
+    }
+
+    // Test 11: after Python Gaming is OFF, a failed manual-session restore remains
+    // retryable without public success events or duplicate successful sessions.
+    {
+        const { dm, python, callOrder, persistenceCalls } = makeManager();
+        const gateway = makeDevice({ ip: '192.168.1.1', mac: '00:00:00:00:00:01', is_gateway: true });
+        const target = makeDevice({
+            ip: '192.168.1.144',
+            mac: 'f0:0d:00:00:01:44',
+            speed_limit: 20,
+            session_id: 'gaming-session-restore-fail'
+        });
+        const macKey = target.mac.toLowerCase();
+        (dm as any).devices.set(gateway.ip, gateway);
+        (dm as any).devices.set(target.ip, target);
+        (dm as any).gamingActive = true;
+        (dm as any).gamingManaged.set(macKey, {
+            priorLimit: 40, hadSession: true, sessionId: target.session_id
+        });
+
+        const before = { ...target, open_ports: [...target.open_ports], services: [...target.services] };
+        const emitted: string[] = [];
+        dm.on('deviceUpdated', () => emitted.push('deviceUpdated'));
+        dm.on('devicesUpdated', () => emitted.push('devicesUpdated'));
+        dm.on('gamingStatusChanged', () => emitted.push('gamingStatusChanged'));
+        let restoreAttempts = 0;
+        const successfulRestoreIds: string[] = [];
+        python.startSpoof = async () => {
+            restoreAttempts++;
+            callOrder.push('start:192.168.1.144');
+            if (restoreAttempts === 1) throw new Error('manual restore start failed');
+            successfulRestoreIds.push('manual-session-restored');
+            return 'manual-session-restored';
+        };
+
+        await assert.rejects(
+            () => dm.toggleGamingMode(false),
+            /manual restore start failed/
+        );
+
+        assert.strictEqual((dm as any).gamingActive, false, 'Python-off confirmation must update control-plane status');
+        assert.deepStrictEqual(target, before, 'Local device state must not commit after restore-start failure');
+        assert.deepStrictEqual(persistenceCalls, [], 'Persistence must wait for all remote reconciliation');
+        assert.deepStrictEqual(emitted, [], 'No success events may precede a recoverable retry');
+        assert.deepStrictEqual(
+            callOrder,
+            ['stop:gaming-session-restore-fail', 'gaming:false', 'start:192.168.1.144'],
+            'Python OFF must precede manual restoration'
+        );
+
+        await dm.toggleGamingMode(false);
+
+        assert.strictEqual(restoreAttempts, 2, 'Only the failed restore start is retried');
+        assert.deepStrictEqual(successfulRestoreIds, ['manual-session-restored'], 'Retry creates one restored session');
+        assert.deepStrictEqual(
+            callOrder,
+            [
+                'stop:gaming-session-restore-fail',
+                'gaming:false',
+                'start:192.168.1.144',
+                'start:192.168.1.144'
+            ],
+            'Completed stop and Python-off phases must not repeat'
+        );
+        assert.strictEqual(target.session_id, 'manual-session-restored');
+        assert.strictEqual(target.speed_limit, 40);
+        assert.deepStrictEqual(
+            persistenceCalls,
+            ['setDeviceBlocked', 'setDeviceSpeedLimit'],
+            'Persistence occurs only after the restored session exists'
+        );
+        assert.deepStrictEqual(
+            emitted,
+            ['deviceUpdated', 'devicesUpdated', 'gamingStatusChanged'],
+            'Success events occur only after retry finalization'
+        );
+        console.log('  ✓ Recovery safety: failed manual restore resumes without duplicate successful sessions');
+    }
+
+    // Test 12: the first persistence write can fail after Python OFF without
+    // re-running completed remote work or emitting partial success.
+    {
+        const { dm, python, db, callOrder } = makeManager();
+        const gateway = makeDevice({ ip: '192.168.1.1', mac: '00:00:00:00:00:01', is_gateway: true });
+        const target = makeDevice({
+            ip: '192.168.1.145',
+            mac: 'f0:0d:00:00:01:45',
+            speed_limit: 20,
+            session_id: 'gaming-session-first-db-fail'
+        });
+        const macKey = target.mac.toLowerCase();
+        (dm as any).devices.set(gateway.ip, gateway);
+        (dm as any).devices.set(target.ip, target);
+        (dm as any).gamingActive = true;
+        (dm as any).gamingManaged.set(macKey, {
+            priorLimit: 35, hadSession: true, sessionId: target.session_id
+        });
+
+        const before = { ...target, open_ports: [...target.open_ports], services: [...target.services] };
+        const emitted: string[] = [];
+        dm.on('deviceUpdated', () => emitted.push('deviceUpdated'));
+        dm.on('devicesUpdated', () => emitted.push('devicesUpdated'));
+        dm.on('gamingStatusChanged', () => emitted.push('gamingStatusChanged'));
+        const persistenceCalls: string[] = [];
+        let failFirstWrite = true;
+        let restoreStarts = 0;
+        python.startSpoof = async () => {
+            restoreStarts++;
+            callOrder.push('start:192.168.1.145');
+            return 'manual-session-first-db';
+        };
+        const toggleGamingMode = python.toggleGamingMode;
+        python.toggleGamingMode = async (...args: any[]) => {
+            const result = await toggleGamingMode(...args);
+            python.emit('gamingStatusChanged', result);
+            return result;
+        };
+        db.setDeviceBlocked = async () => {
+            persistenceCalls.push('blocked');
+            if (failFirstWrite) throw new Error('first DB write failed');
+        };
+        db.setDeviceSpeedLimit = async () => { persistenceCalls.push('speed'); };
+
+        await assert.rejects(
+            () => dm.toggleGamingMode(false),
+            /first DB write failed/
+        );
+
+        assert.strictEqual((dm as any).gamingActive, false, 'Python-off status must remain truthful');
+        assert.deepStrictEqual(target, before, 'No local state may commit after the first DB write fails');
+        assert.deepStrictEqual(emitted, [], 'No partial success events may be emitted');
+        assert.strictEqual(restoreStarts, 1, 'Manual session is restored once before persistence');
+        assert.deepStrictEqual(
+            callOrder,
+            ['stop:gaming-session-first-db-fail', 'gaming:false', 'start:192.168.1.145'],
+        );
+
+        failFirstWrite = false;
+        await dm.toggleGamingMode(false);
+
+        assert.strictEqual(restoreStarts, 1, 'Retry must retain the already-restored session ID');
+        assert.deepStrictEqual(
+            callOrder,
+            ['stop:gaming-session-first-db-fail', 'gaming:false', 'start:192.168.1.145'],
+            'Completed remote work must not repeat after first-write failure'
+        );
+        assert.deepStrictEqual(persistenceCalls, ['blocked', 'blocked', 'speed']);
+        assert.strictEqual(target.session_id, 'manual-session-first-db');
+        assert.strictEqual(target.speed_limit, 35);
+        assert.deepStrictEqual(emitted, ['deviceUpdated', 'devicesUpdated', 'gamingStatusChanged']);
+        console.log('  ✓ Recovery safety: first DB failure resumes persistence without duplicate sessions');
+    }
+
+    // Test 13: a second persistence-write failure preserves completed first-write
+    // progress and resumes only the unfinished write after Python is already off.
+    {
+        const { dm, python, db, callOrder } = makeManager();
+        const gateway = makeDevice({ ip: '192.168.1.1', mac: '00:00:00:00:00:01', is_gateway: true });
+        const target = makeDevice({
+            ip: '192.168.1.146',
+            mac: 'f0:0d:00:00:01:46',
+            speed_limit: 20,
+            session_id: 'gaming-session-second-db-fail'
+        });
+        const macKey = target.mac.toLowerCase();
+        (dm as any).devices.set(gateway.ip, gateway);
+        (dm as any).devices.set(target.ip, target);
+        (dm as any).gamingActive = true;
+        (dm as any).gamingManaged.set(macKey, {
+            priorLimit: 30, hadSession: true, sessionId: target.session_id
+        });
+
+        const before = { ...target, open_ports: [...target.open_ports], services: [...target.services] };
+        const emitted: string[] = [];
+        dm.on('deviceUpdated', () => emitted.push('deviceUpdated'));
+        dm.on('devicesUpdated', () => emitted.push('devicesUpdated'));
+        dm.on('gamingStatusChanged', () => emitted.push('gamingStatusChanged'));
+        const persistenceCalls: string[] = [];
+        let failSecondWrite = true;
+        let restoreStarts = 0;
+        python.startSpoof = async () => {
+            restoreStarts++;
+            callOrder.push('start:192.168.1.146');
+            return 'manual-session-second-db';
+        };
+        db.setDeviceBlocked = async () => { persistenceCalls.push('blocked'); };
+        db.setDeviceSpeedLimit = async () => {
+            persistenceCalls.push('speed');
+            if (failSecondWrite) throw new Error('second DB write failed');
+        };
+
+        await assert.rejects(
+            () => dm.toggleGamingMode(false),
+            /second DB write failed/
+        );
+
+        assert.strictEqual((dm as any).gamingActive, false, 'Python-off status must remain truthful');
+        assert.deepStrictEqual(target, before, 'No local state may commit after the second DB write fails');
+        assert.deepStrictEqual(emitted, [], 'No partial success events may be emitted');
+        assert.strictEqual(restoreStarts, 1, 'Manual restoration completes before persistence begins');
+        assert.deepStrictEqual(persistenceCalls, ['blocked', 'speed']);
+
+        failSecondWrite = false;
+        await dm.toggleGamingMode(false);
+
+        assert.strictEqual(restoreStarts, 1, 'Retry must not create a duplicate restored session');
+        assert.deepStrictEqual(
+            callOrder,
+            ['stop:gaming-session-second-db-fail', 'gaming:false', 'start:192.168.1.146'],
+            'Completed remote phases must not repeat after second-write failure'
+        );
+        assert.deepStrictEqual(
+            persistenceCalls,
+            ['blocked', 'speed', 'speed'],
+            'Successful first persistence write must not be repeated'
+        );
+        assert.strictEqual(target.session_id, 'manual-session-second-db');
+        assert.strictEqual(target.speed_limit, 30);
+        assert.deepStrictEqual(emitted, ['deviceUpdated', 'devicesUpdated', 'gamingStatusChanged']);
+        console.log('  ✓ Recovery safety: second DB failure resumes only unfinished persistence');
     }
 
 }

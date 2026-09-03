@@ -454,9 +454,6 @@ class SentinelShield:
         worker_to_stop = None
         start_healer = False
         with self._lock:
-            self._mode = mode
-            self._auto_retaliate = auto_retaliate
-            
             if self._is_enabled:
                 if mode == "lan_healing" and (not self._healing_thread or not self._healing_thread.is_alive()):
                     worker_to_stop = self._healing_thread
@@ -479,10 +476,22 @@ class SentinelShield:
             )
             with self._lock:
                 self._healing_stop_event.clear()
+            try:
+                healer_thread.start()
+            except Exception:
+                self._healing_stop_event.set()
+                self._join_workers([healer_thread])
+                with self._lock:
+                    if healer_thread.is_alive():
+                        self._healing_thread = healer_thread
+                raise
+
+        with self._lock:
+            self._mode = mode
+            self._auto_retaliate = auto_retaliate
+            if healer_thread:
                 self._healing_thread = healer_thread
-            healer_thread.start()
-        elif worker_to_stop:
-            with self._lock:
+            elif worker_to_stop:
                 if self._healing_thread is worker_to_stop:
                     self._healing_thread = None
 

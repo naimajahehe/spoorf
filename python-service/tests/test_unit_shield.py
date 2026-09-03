@@ -454,5 +454,50 @@ class TestSentinelShield(unittest.TestCase):
         self.assertEqual(res['mode'], 'lan_healing')
         self.assertTrue(res['auto_retaliate'])
 
+    def test_set_mode_keeps_status_when_stuck_healing_worker_cannot_stop(self):
+        """A timed-out healer leaves the previously published mode intact."""
+        stuck_healer = FakeWorker(
+            stop_event=self.shield._healing_stop_event,
+            state_lock=self.shield._lock,
+            stops_on_join=False,
+        )
+        stuck_healer.started = True
+        self.shield._is_enabled = True
+        self.shield._mode = 'lan_healing'
+        self.shield._auto_retaliate = True
+        self.shield._gateway_ip = '192.168.1.1'
+        self.shield._healing_thread = stuck_healer
+
+        with patch('src.core.shield.threading.Thread') as thread_factory:
+            with self.assertRaisesRegex(SpoofError, 'belum berhenti'):
+                self.shield.set_mode('host_lock', auto_retaliate=False)
+
+        status = self.shield.get_status()
+        self.assertEqual(status['mode'], 'lan_healing')
+        self.assertTrue(status['auto_retaliate'])
+        self.assertIs(self.shield._healing_thread, stuck_healer)
+        thread_factory.assert_not_called()
+
+    def test_set_mode_restores_status_when_replacement_healer_fails_to_start(self):
+        """A failed replacement start cannot publish its requested mode."""
+        failed_healer = FailingStartWorker(
+            stop_event=self.shield._healing_stop_event,
+            state_lock=self.shield._lock,
+        )
+        self.shield._is_enabled = True
+        self.shield._mode = 'host_lock'
+        self.shield._auto_retaliate = False
+        self.shield._gateway_ip = '192.168.1.1'
+
+        with patch('src.core.shield.threading.Thread', return_value=failed_healer):
+            with self.assertRaisesRegex(RuntimeError, 'worker start failed'):
+                self.shield.set_mode('lan_healing', auto_retaliate=True)
+
+        status = self.shield.get_status()
+        self.assertEqual(status['mode'], 'host_lock')
+        self.assertFalse(status['auto_retaliate'])
+        self.assertIsNone(self.shield._healing_thread)
+        self.assertTrue(failed_healer.joined)
+
 if __name__ == '__main__':
     unittest.main()

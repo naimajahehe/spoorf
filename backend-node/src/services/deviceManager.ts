@@ -63,6 +63,27 @@ export function selectGateway(devices: Device[]): Device | undefined {
     return undefined;
 }
 
+interface GamingRestorePlan {
+    macKey: string;
+    priorLimit: number;
+    hadSession: boolean;
+    sessionId?: string;
+    device?: Pick<Device, 'ip' | 'mac' | 'ipv6_link_local'>;
+    stopped: boolean;
+    restoredSessionId?: string;
+    blockedPersisted: boolean;
+    speedLimitPersisted: boolean;
+}
+
+interface PendingGamingDisable {
+    mode: string;
+    targetPingMs: number;
+    gateway?: Pick<Device, 'ip' | 'mac' | 'ipv6_link_local'>;
+    restorePlans: GamingRestorePlan[];
+    pythonOff: boolean;
+    result?: any;
+}
+
 export class DeviceManager extends EventEmitter {
     private devices: Map<string, Device> = new Map();
     private scanning: boolean = false;
@@ -78,6 +99,7 @@ export class DeviceManager extends EventEmitter {
     private gamingActive: boolean = false;
     private gamingMode: string = 'auto_airtime';
     private gamingTargetLimit: number = 100;
+    private pendingGamingDisable: PendingGamingDisable | null = null;
     // Mutex serialisasi: operasi tulis perangkat (block/unblock/throttle/redirect)
     // diserialisasi untuk mencegah race condition antar-aksi pengguna.
     private opChain: Promise<void> = Promise.resolve();
@@ -152,6 +174,7 @@ export class DeviceManager extends EventEmitter {
             this.emit('gamingTelemetry', data);
         });
         this.python.on('gamingStatusChanged', (data) => {
+            if (this.pendingGamingDisable) return;
             this.emit('gamingStatusChanged', data);
         });
     }
@@ -1408,6 +1431,9 @@ export class DeviceManager extends EventEmitter {
     async toggleGamingMode(enabled: boolean, mode: string = 'auto_airtime', targetPingMs: number = 25.0): Promise<any> {
         return this.runExclusive(async () => {
             if (enabled) {
+                if (this.pendingGamingDisable) {
+                    throw new Error('Gaming disable recovery is pending');
+                }
                 const result = await this.python.toggleGamingMode(true, mode, targetPingMs);
                 const gateway = selectGateway(Array.from(this.devices.values()));
                 if (!gateway) {
@@ -1435,76 +1461,126 @@ export class DeviceManager extends EventEmitter {
                 this.emit('gamingStatusChanged', result);
                 return result;
             } else {
-                // Pulihkan seluruh perangkat yang dikelola oleh Gaming Mode ke kondisi semula
-                console.log(`🎮 [GAMING MODE NONAKTIF] Memulihkan ${this.gamingManaged.size} perangkat yang dikelola Gaming Mode...`);
-                const restorePlans = Array.from(this.gamingManaged.entries()).map(([macKey, meta]) => {
-                    // Cari device berdasarkan MAC; mungkin sudah hilang dari daftar (disconnect).
-                    let dev: Device | undefined;
-                    for (const d of this.devices.values()) {
-                        if (d.mac.toLowerCase() === macKey) { dev = d; break; }
-                    }
-                    return { meta, dev };
-                });
-                const gateway = selectGateway(Array.from(this.devices.values()));
-                if (restorePlans.some(({ meta, dev }) => meta.hadSession && dev) && !gateway) {
-                    throw new Error('Gateway not found');
-                }
+                const pending = this.pendingGamingDisable || this._createPendingGamingDisable(mode, targetPingMs);
+                this.pendingGamingDisable = pending;
+                console.log(`🎮 [GAMING MODE NONAKTIF] Memulihkan ${pending.restorePlans.length} perangkat yang dikelola Gaming Mode...`);
 
-                // Finish every teardown before changing Node or SQLite state. If any stop
-                // fails, the operation remains retryable with all recovery metadata intact.
-                for (const { meta, dev } of restorePlans) {
-                    const sidToStop = meta.sessionId || dev?.session_id;
-                    if (sidToStop) {
-                        await this.python.stopSpoof(sidToStop);
+                for (const plan of pending.restorePlans) {
+                    if (!plan.stopped && plan.sessionId) {
+                        await this.python.stopSpoof(plan.sessionId);
+                        plan.stopped = true;
                     }
                 }
 
-                // Python must remain enabled through teardown. If this fails, retry uses
-                // the idempotent stop contract and the retained recovery metadata.
-                const result = await this.python.toggleGamingMode(false, mode, targetPingMs);
+                if (!pending.pythonOff) {
+                    pending.result = await this.python.toggleGamingMode(
+                        false,
+                        pending.mode,
+                        pending.targetPingMs
+                    );
+                    pending.pythonOff = true;
+                    this.gamingActive = false;
+                }
 
-                for (const { meta, dev } of restorePlans) {
-                    if (!dev) continue;
-
-                    let restoredSessionId: string | undefined;
-                    if (meta.hadSession) {
+                for (const plan of pending.restorePlans) {
+                    if (!plan.device) continue;
+                    if (plan.hadSession && !plan.restoredSessionId) {
+                        const gateway = pending.gateway;
                         if (!gateway) {
                             throw new Error('Gateway not found');
                         }
-                        // Perangkat memang di-spoof manual sebelum gaming -> pulihkan sesi manual
-                        // (self_mac) pada limit semula.
-                        restoredSessionId = await this.python.startSpoof(
-                            dev.ip,
-                            dev.mac,
+                        plan.restoredSessionId = await this.python.startSpoof(
+                            plan.device.ip,
+                            plan.device.mac,
                             gateway.ip,
                             gateway.mac,
-                            meta.priorLimit,
-                            dev.ipv6_link_local,
+                            plan.priorLimit,
+                            plan.device.ipv6_link_local,
                             gateway.ipv6_link_local
-                            // blackhole default false -> sesi normal
                         );
-                        await this.db.setDeviceBlocked(dev.mac, meta.priorLimit <= 0, restoredSessionId);
-                        await this.db.setDeviceSpeedLimit(dev.mac, meta.priorLimit);
-                    } else {
-                        // Gaming yang membuat sesi -> biarkan penuh 100%.
-                        await this.db.setDeviceBlocked(dev.mac, false, undefined);
-                        await this.db.setDeviceSpeedLimit(dev.mac, 100);
                     }
+                }
 
-                    dev.session_id = restoredSessionId;
-                    dev.speed_limit = meta.hadSession ? meta.priorLimit : 100;
-                    dev.is_blocked = meta.hadSession && meta.priorLimit <= 0;
-                    this.devices.set(dev.ip, dev);
-                    this.emit('deviceUpdated', dev);
+                for (const plan of pending.restorePlans) {
+                    if (!plan.device) continue;
+                    const restoredSessionId = plan.hadSession ? plan.restoredSessionId : undefined;
+                    const speedLimit = plan.hadSession ? plan.priorLimit : 100;
+                    const isBlocked = plan.hadSession && plan.priorLimit <= 0;
+                    if (!plan.blockedPersisted) {
+                        await this.db.setDeviceBlocked(plan.device.mac, isBlocked, restoredSessionId);
+                        plan.blockedPersisted = true;
+                    }
+                    if (!plan.speedLimitPersisted) {
+                        await this.db.setDeviceSpeedLimit(plan.device.mac, speedLimit);
+                        plan.speedLimitPersisted = true;
+                    }
+                }
+
+                const updatedDevices: Device[] = [];
+                for (const plan of pending.restorePlans) {
+                    if (!plan.device) continue;
+                    const device = this._findDeviceByMac(plan.macKey);
+                    if (!device) continue;
+                    device.session_id = plan.hadSession ? plan.restoredSessionId : undefined;
+                    device.speed_limit = plan.hadSession ? plan.priorLimit : 100;
+                    device.is_blocked = plan.hadSession && plan.priorLimit <= 0;
+                    this.devices.set(device.ip, device);
+                    updatedDevices.push(device);
                 }
 
                 this.gamingActive = false;
                 this.gamingManaged.clear();
+                this.pendingGamingDisable = null;
+                for (const device of updatedDevices) {
+                    this.emit('deviceUpdated', device);
+                }
                 this.emit('devicesUpdated', Array.from(this.devices.values()));
-                this.emit('gamingStatusChanged', result);
-                return result;
+                this.emit('gamingStatusChanged', pending.result);
+                return pending.result;
             }
         });
+    }
+
+    private _createPendingGamingDisable(mode: string, targetPingMs: number): PendingGamingDisable {
+        const restorePlans = Array.from(this.gamingManaged.entries()).map(([macKey, meta]) => {
+            const device = this._findDeviceByMac(macKey);
+            return {
+                macKey,
+                priorLimit: meta.priorLimit,
+                hadSession: meta.hadSession,
+                sessionId: meta.sessionId || device?.session_id,
+                device: device ? {
+                    ip: device.ip,
+                    mac: device.mac,
+                    ipv6_link_local: device.ipv6_link_local,
+                } : undefined,
+                stopped: false,
+                blockedPersisted: false,
+                speedLimitPersisted: false,
+            };
+        });
+        const gateway = selectGateway(Array.from(this.devices.values()));
+        if (restorePlans.some(plan => plan.hadSession && plan.device) && !gateway) {
+            throw new Error('Gateway not found');
+        }
+        return {
+            mode,
+            targetPingMs,
+            gateway: gateway ? {
+                ip: gateway.ip,
+                mac: gateway.mac,
+                ipv6_link_local: gateway.ipv6_link_local,
+            } : undefined,
+            restorePlans,
+            pythonOff: false,
+        };
+    }
+
+    private _findDeviceByMac(macKey: string): Device | undefined {
+        for (const device of this.devices.values()) {
+            if (device.mac.toLowerCase() === macKey) return device;
+        }
+        return undefined;
     }
 
     /**

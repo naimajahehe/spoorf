@@ -10,6 +10,7 @@ import socket
 import threading
 import platform
 import concurrent.futures
+import ipaddress
 from typing import List, Dict, Any, Optional
 
 from .network import (
@@ -307,9 +308,28 @@ class NetworkScanner:
         start_time = time.time()
         logger.info("🔍 Memulai SCAN jaringan cerdas & berkecepatan tinggi...")
 
-        discovered: Dict[str, str] = {}
+        # Establish an authoritative private IPv4 topology before any helper can
+        # cause packet or network I/O. A cache-only result is intentionally not
+        # surfaced without a currently valid gateway that can safely verify it.
+        net_info = get_network_info()
         gateway_ip = get_current_gateway()
+        network_cidr = net_info.get('network', '')
+        if not is_valid_private_network(network_cidr) or not is_valid_private_ip(gateway_ip):
+            logger.warning("Scan dibatalkan: jaringan atau gateway RFC1918 tidak valid")
+            return []
 
+        try:
+            curr_net = ipaddress.IPv4Network(network_cidr, strict=False)
+            gateway_is_resolved = ipaddress.IPv4Address(gateway_ip) in curr_net
+        except ValueError:
+            logger.warning("Scan dibatalkan: CIDR jaringan tidak dapat divalidasi")
+            return []
+
+        if not gateway_is_resolved:
+            logger.warning("Scan dibatalkan: gateway berada di luar jaringan aktif")
+            return []
+
+        discovered: Dict[str, str] = {}
         discovered_ipv6: Dict[str, Dict[str, Any]] = {}
 
         # 1. PARALLEL CONCURRENT MULTI-VECTOR DISCOVERY ENGINE (Tahap 1, 2, 3 serentak)
@@ -349,17 +369,7 @@ class NetworkScanner:
         # 5. Kumpulkan kandidat dari DHCP Cache, OS ARP Cache, dan Device History yang belum terverifikasi
         candidates: Dict[str, str] = {}
 
-        net_info = get_network_info()
-        curr_net = None
-        if is_valid_private_network(net_info.get('network', '')):
-            try:
-                import ipaddress
-                curr_net = ipaddress.IPv4Network(net_info['network'], strict=False)
-            except:
-                pass
-
-        if curr_net:
-            collect_from_arp_cache(candidates)
+        collect_from_arp_cache(candidates)
 
         dhcp_snapshot = dhcp_cache.get_snapshot()
         for k, d_info in dhcp_snapshot.items():
@@ -367,10 +377,9 @@ class NetworkScanner:
             d_mac = d_info.get('mac')
             if curr_net and d_ip and d_mac and is_valid_private_ip(d_ip) and is_valid_mac(d_mac):
                 try:
-                    import ipaddress
                     if ipaddress.IPv4Address(d_ip) not in curr_net:
                         continue
-                except:
+                except ValueError:
                     continue
                 candidates[d_ip] = d_mac
 
@@ -380,23 +389,14 @@ class NetworkScanner:
                 h_mac = entry.get('mac')
                 if curr_net and h_ip and h_mac and is_valid_private_ip(h_ip) and is_valid_mac(h_mac):
                     try:
-                        import ipaddress
                         if ipaddress.IPv4Address(h_ip) not in curr_net:
                             continue
-                    except:
+                    except ValueError:
                         continue
                     if h_ip not in candidates:
                         candidates[h_ip] = h_mac
 
         # 6. Verifikasi Liveness untuk seluruh kandidat yang belum masuk 'discovered' (Doze Wakeup / Unicast ARP Probe)
-        gateway_is_resolved = False
-        if curr_net and is_valid_private_ip(gateway_ip):
-            try:
-                import ipaddress
-                gateway_is_resolved = ipaddress.IPv4Address(gateway_ip) in curr_net
-            except:
-                pass
-
         unverified = [
             (ip, mac)
             for ip, mac in candidates.items()

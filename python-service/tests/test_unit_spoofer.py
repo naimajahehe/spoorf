@@ -183,6 +183,33 @@ class TestCoreSpoofer(unittest.TestCase):
                 gateway_mac="00:aa:bb:cc:dd:ee; shutdown"
             )
 
+    @patch('src.core.spoofer.threading.Thread')
+    def test_spoof_blank_gateway_values_are_rejected_before_packet_or_os_work(
+        self, mock_thread
+    ):
+        """Both gateway fields are required before host locks, workers, or forwarding."""
+        with patch.object(
+            self.spoofer, '_ensure_host_gateway_locked'
+        ) as mock_host_lock:
+            for gateway_ip, gateway_mac in (
+                ('', '00:aa:bb:cc:dd:ee'),
+                ('192.168.1.1', ''),
+            ):
+                with self.subTest(gateway_ip=gateway_ip, gateway_mac=gateway_mac):
+                    with self.assertRaises(SpoofError):
+                        self.spoofer.start(
+                            victim_ip='192.168.1.55',
+                            victim_mac='00:11:22:33:44:55',
+                            gateway_ip=gateway_ip,
+                            gateway_mac=gateway_mac,
+                        )
+
+        mock_host_lock.assert_not_called()
+        mock_thread.assert_not_called()
+        self.mock_subprocess.assert_not_called()
+        self.mock_forwarding.assert_not_called()
+        self.assertEqual(self.spoofer.get_all_sessions(), {})
+
     @patch('src.core.spoofer.subprocess.run')
     def test_host_gateway_lock_skips_invalid_input(self, mock_run):
         """P1: _ensure_host_gateway_locked TIDAK memanggil subprocess untuk input invalid."""
@@ -207,6 +234,49 @@ class TestCoreSpoofer(unittest.TestCase):
         """Negative: Stopping an unknown session ID must raise SessionNotFoundError."""
         with self.assertRaises(SessionNotFoundError):
             self.spoofer.stop("nonexistent_session_12345")
+
+    @patch('src.core.spoofer.ndp_spoofer.start_spoof')
+    @patch('src.core.spoofer.threading.Thread')
+    def test_start_aborts_replacement_when_prior_teardown_fails(
+        self, mock_thread, mock_start_ipv6
+    ):
+        """A failed old-session restore prevents every replacement session from starting."""
+        old_session_id = 'prior-session'
+        self.spoofer._sessions[old_session_id] = {
+            'victim_ip': '192.168.1.55',
+            'victim_mac': '00:11:22:33:44:55',
+            'gateway_ip': '192.168.1.1',
+            'gateway_mac': '00:aa:bb:cc:dd:ee',
+            'active': True,
+            'restore_failed': False,
+            'speed_limit': 0,
+            'is_redirect': False,
+            'started_at': 1.0,
+            'packets_sent': 0,
+        }
+
+        def fail_prior_stop(session_id):
+            self.assertEqual(session_id, old_session_id)
+            self.spoofer._sessions[session_id]['active'] = False
+            self.spoofer._sessions[session_id]['restore_failed'] = True
+            raise SpoofError('prior ARP restoration failed')
+
+        with patch.object(self.spoofer, 'stop', side_effect=fail_prior_stop):
+            with self.assertRaisesRegex(SpoofError, 'prior ARP restoration failed'):
+                self.spoofer.start(
+                    victim_ip='192.168.1.55',
+                    victim_mac='00:11:22:33:44:55',
+                    gateway_ip='192.168.1.1',
+                    gateway_mac='00:aa:bb:cc:dd:ee',
+                    victim_ipv6='fe80::55',
+                    gateway_ipv6='fe80::1',
+                )
+
+        self.assertEqual(set(self.spoofer.get_all_sessions()), {old_session_id})
+        self.assertTrue(self.spoofer._sessions[old_session_id]['restore_failed'])
+        mock_start_ipv6.assert_not_called()
+        mock_thread.assert_not_called()
+        self.mock_forwarding.assert_not_called()
 
     @patch('src.core.spoofer.time.sleep')
     @patch('src.core.spoofer.sendp')
@@ -424,6 +494,65 @@ class TestCoreSpoofer(unittest.TestCase):
         """Edge Case: stop_all on an empty spoofer does not raise errors."""
         self.spoofer.stop_all()
         self.assertFalse(self.spoofer.is_running)
+
+    @patch('src.core.spoofer.ndp_spoofer.stop_all')
+    def test_stop_all_aggregates_member_and_ipv6_failures_after_full_cleanup(
+        self, mock_stop_all_ipv6
+    ):
+        """Every session, IPv6 cleanup, and forwarding recovery run before aggregate failure."""
+        failed_session_id = 'failed-session'
+        stopped_session_id = 'stopped-session'
+        self.spoofer._sessions = {
+            failed_session_id: {
+                'victim_ip': '192.168.1.55',
+                'victim_mac': '00:11:22:33:44:55',
+                'gateway_ip': '192.168.1.1',
+                'gateway_mac': '00:aa:bb:cc:dd:ee',
+                'active': True,
+                'restore_failed': False,
+                'speed_limit': 0,
+                'is_redirect': False,
+                'started_at': 1.0,
+                'packets_sent': 0,
+            },
+            stopped_session_id: {
+                'victim_ip': '192.168.1.56',
+                'victim_mac': '00:11:22:33:44:56',
+                'gateway_ip': '192.168.1.1',
+                'gateway_mac': '00:aa:bb:cc:dd:ee',
+                'active': True,
+                'restore_failed': False,
+                'speed_limit': 0,
+                'is_redirect': False,
+                'started_at': 1.0,
+                'packets_sent': 0,
+            },
+        }
+        self.spoofer._fwd_touched = True
+        self.spoofer._fwd_was_enabled = False
+        attempted = []
+
+        def controlled_stop(session_id):
+            attempted.append(session_id)
+            if session_id == failed_session_id:
+                self.spoofer._sessions[session_id]['active'] = False
+                self.spoofer._sessions[session_id]['restore_failed'] = True
+                raise SpoofError('restore burst failed')
+            self.spoofer._sessions.pop(session_id)
+            return True
+
+        mock_stop_all_ipv6.side_effect = RuntimeError('IPv6 cleanup failed')
+        with patch.object(self.spoofer, 'stop', side_effect=controlled_stop):
+            with self.assertRaisesRegex(SpoofError, 'failed-session.*restore burst failed') as ctx:
+                self.spoofer.stop_all()
+
+        self.assertIn('IPv6 cleanup failed', str(ctx.exception))
+        self.assertEqual(attempted, [failed_session_id, stopped_session_id])
+        mock_stop_all_ipv6.assert_called_once_with()
+        self.mock_forwarding.assert_called_once_with(False, 'test-interface')
+        retained = self.spoofer.get_all_sessions()[failed_session_id]
+        self.assertFalse(retained['active'])
+        self.assertTrue(retained['restore_failed'])
 
     @patch('src.core.spoofer.sendp')
     def test_micro_cut_batch_happy_path(self, mock_sendp):

@@ -283,14 +283,27 @@ async def startup_event():
 @app.on_event("shutdown")
 def shutdown_event():
     logger.info("🛑 Shutting down FastAPI microservice, cleaning all ARP spoof sessions...")
-    shield_engine.disable()
-    gaming_engine.toggle(False)
-    liveness_daemon.stop()
-    NetworkScanner.stop_dhcp_sniffer()
-    redirect_manager.stop_all()
-    transparent_gateway.stop_all()
-    spoofer.stop_all()
-    executor.shutdown(wait=False)
+    cleanup_stages = (
+        ("Shield", shield_engine.disable),
+        ("Gaming", lambda: gaming_engine.toggle(False)),
+        ("liveness watchdog", liveness_daemon.stop),
+        ("DHCP sniffer", NetworkScanner.stop_dhcp_sniffer),
+        ("redirect manager", redirect_manager.stop_all),
+        ("transparent gateway", transparent_gateway.stop_all),
+        ("ARP spoofer", spoofer.stop_all),
+        ("executor", lambda: executor.shutdown(wait=False)),
+    )
+    failures = []
+    for stage_name, cleanup in cleanup_stages:
+        try:
+            cleanup()
+        except Exception as error:
+            logger.error(f"Shutdown cleanup failed for {stage_name}: {error}")
+            failures.append((stage_name, error))
+
+    if failures:
+        details = "; ".join(f"{stage_name}: {error}" for stage_name, error in failures)
+        logger.error(f"Shutdown cleanup completed with failures: {details}")
 
 # ===== Pydantic Request Models =====
 class ShieldToggleRequest(BaseModel):
@@ -654,8 +667,12 @@ def restore_spoof(req: SpoofStopRequest):
 @app.post("/api/spoof/stop_all")
 def stop_all_spoof():
     logger.info("📥 [HTTP API] Request stop_all_spoof")
-    spoofer.stop_all()
-    return {"success": True, "message": "All spoofing sessions stopped"}
+    try:
+        spoofer.stop_all()
+        return {"success": True, "message": "All spoofing sessions stopped"}
+    except Exception as e:
+        logger.error(f"Error stopping all spoof sessions: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ===== REDIRECT (CAPTIVE PORTAL & DNS SPOOFING) ROUTES =====
 @app.get("/api/redirect/status")
@@ -1059,4 +1076,3 @@ async def toggle_gaming_mode(req: GamingToggleRequest):
         "success": True,
         "data": status
     }
-

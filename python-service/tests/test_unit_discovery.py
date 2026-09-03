@@ -308,12 +308,22 @@ class TestCoreDiscovery(unittest.TestCase):
         NetworkScanner._DEVICE_HISTORY.clear()
 
         # Simulate build device
-        dev1 = NetworkScanner._build_device(
-            ip='192.168.1.105',
-            mac='a8:3b:76:00:11:22',
-            gateway_ip='192.168.1.1',
-            is_active_layer2=True
-        )
+        with patch('src.core.scanner.get_self_mac', return_value=''), \
+             patch('src.core.scanner.get_hostname_info', return_value=('', {'workgroup': '', 'user': ''})), \
+             patch('src.core.scanner.ping_fast', return_value={'alive': True, 'rtt': 1, 'ttl': 64}), \
+             patch('src.core.scanner.scan_ports', return_value={}), \
+             patch('src.core.scanner.get_http_info', return_value={}), \
+             patch('src.core.scanner.measure_target_proximity', return_value={}), \
+             patch(
+                 'src.core.scanner.synthesize_ensemble_profile',
+                 return_value=('', 'Test Vendor', 'Unknown', 'Unknown'),
+             ):
+            dev1 = NetworkScanner._build_device(
+                ip='192.168.1.105',
+                mac='a8:3b:76:00:11:22',
+                gateway_ip='192.168.1.1',
+                is_active_layer2=True
+            )
         self.assertIn('a8:3b:76:00:11:22', NetworkScanner._DEVICE_HISTORY)
         hist_entry = NetworkScanner._DEVICE_HISTORY['a8:3b:76:00:11:22']
         self.assertEqual(hist_entry['ip'], '192.168.1.105')
@@ -338,13 +348,18 @@ class TestCoreDiscovery(unittest.TestCase):
              patch('src.core.scanner.get_network_info', return_value={'ip': '192.168.1.20', 'network': '192.168.1.0/24'}), \
              patch('src.core.scanner.collect_ssdp_sensors'), \
              patch('src.core.scanner.collect_mdns_sensors'), \
-             patch('src.core.scanner.collect_from_arp_cache'), \
+             patch('src.core.scanner.collect_from_arp_cache') as mock_arp_cache, \
              patch('src.core.scanner.collect_from_arp_broadcast'), \
              patch('src.core.scanner.sweep_subnet_for_arp'), \
              patch('src.core.scanner.send_multicast_wakeup'), \
              patch('src.core.scanner.probe_sleeping_host_via_gateway_arp', side_effect=mock_probe_sleeping), \
              patch('src.core.scanner.get_mac_from_arp', return_value='00:11:22:33:44:55'), \
-             patch('src.core.scanner.get_self_mac', return_value='a8:3b:76:0c:dc:55'):
+             patch('src.core.scanner.get_self_mac', return_value='a8:3b:76:0c:dc:55'), \
+             patch.object(
+                 NetworkScanner,
+                 '_build_device',
+                 side_effect=lambda ip, mac, *_args, **_kwargs: {'ip': ip, 'mac': mac},
+             ):
 
             results = NetworkScanner.scan_full()
             # Sleeping host must have been probed!
@@ -353,7 +368,8 @@ class TestCoreDiscovery(unittest.TestCase):
             result_ips = [d['ip'] for d in results]
             self.assertIn('192.168.1.150', result_ips)
 
-    def test_scan_full_unresolved_network_never_sends_arp(self):
+    def test_scan_full_unresolved_network_skips_every_active_discovery_helper(self):
+        """Unresolved topology must return before any packet-capable scanner helper."""
         from src.core.scanner import NetworkScanner
         from unittest.mock import patch
 
@@ -369,23 +385,92 @@ class TestCoreDiscovery(unittest.TestCase):
                      'src.core.scanner.get_network_info',
                      return_value={'ip': '', 'network': '', 'gateway': ''}
                  ), \
-                 patch('src.core.scanner.collect_ssdp_sensors'), \
-                 patch('src.core.scanner.collect_mdns_sensors'), \
-                 patch('src.core.scanner.collect_from_arp_cache'), \
-                 patch('src.core.scanner.collect_from_arp_broadcast'), \
-                 patch('src.core.scanner.sweep_subnet_for_arp'), \
-                 patch('src.core.scanner.send_multicast_wakeup'), \
-                 patch('src.core.scanner.collect_from_ndp_cache'), \
-                 patch('src.core.scanner.send_ipv6_all_nodes_multicast'), \
-                 patch('src.core.scanner.get_self_mac', return_value=''), \
+                 patch('src.core.scanner.collect_ssdp_sensors') as mock_ssdp, \
+                 patch('src.core.scanner.collect_mdns_sensors') as mock_mdns, \
+                 patch('src.core.scanner.collect_from_arp_cache') as mock_arp_cache, \
+                 patch('src.core.scanner.collect_from_arp_broadcast') as mock_arp_broadcast, \
+                 patch('src.core.scanner.sweep_subnet_for_arp') as mock_arp_sweep, \
+                 patch('src.core.scanner.send_multicast_wakeup') as mock_multicast_wakeup, \
+                 patch('src.core.scanner.collect_from_ndp_cache') as mock_ndp_cache, \
+                 patch('src.core.scanner.send_ipv6_all_nodes_multicast') as mock_ipv6_multicast, \
+                 patch('src.core.scanner.probe_sleeping_host_via_gateway_arp') as mock_sleeping_probe, \
+                 patch('src.core.scanner.verify_ipv6_alive') as mock_ipv6_liveness, \
+                 patch('src.core.scanner.get_mac_from_arp') as mock_gateway_probe, \
+                 patch.object(NetworkScanner, '_build_device') as mock_device_builder, \
+                 patch('src.core.scanner.get_self_mac', return_value='') as mock_self_mac, \
                  patch('src.core.scanner.detect_ap_isolation', return_value={}), \
                  patch('src.core.discovery.arp.get_self_mac', return_value='00:11:22:33:44:55'), \
                  patch('src.core.discovery.arp.srp', return_value=([], [])) as mock_srp:
-                NetworkScanner.scan_full()
+                result = NetworkScanner.scan_full()
 
+            self.assertEqual(result, [])
             mock_srp.assert_not_called()
+            for helper in (
+                mock_multicast_wakeup,
+                mock_ssdp,
+                mock_mdns,
+                mock_ndp_cache,
+                mock_ipv6_multicast,
+                mock_arp_cache,
+                mock_arp_broadcast,
+                mock_arp_sweep,
+                mock_sleeping_probe,
+                mock_ipv6_liveness,
+                mock_gateway_probe,
+                mock_self_mac,
+                mock_device_builder,
+            ):
+                helper.assert_not_called()
         finally:
             NetworkScanner._DEVICE_HISTORY.clear()
+
+    def test_scan_full_public_network_skips_every_active_discovery_helper(self):
+        """A public CIDR is rejected before multicast, ARP, or enrichment probes run."""
+        from src.core.scanner import NetworkScanner
+        from unittest.mock import patch
+
+        with patch('src.core.scanner.get_current_gateway', return_value='203.0.113.1'), \
+             patch(
+                 'src.core.scanner.get_network_info',
+                 return_value={
+                     'ip': '203.0.113.10',
+                     'network': '203.0.113.0/24',
+                     'gateway': '203.0.113.1',
+                 },
+             ), \
+             patch('src.core.scanner.send_multicast_wakeup') as mock_multicast_wakeup, \
+             patch('src.core.scanner.collect_ssdp_sensors') as mock_ssdp, \
+             patch('src.core.scanner.collect_mdns_sensors') as mock_mdns, \
+             patch('src.core.scanner.collect_from_arp_cache') as mock_arp_cache, \
+             patch('src.core.scanner.collect_from_ndp_cache') as mock_ndp_cache, \
+             patch('src.core.scanner.send_ipv6_all_nodes_multicast') as mock_ipv6_multicast, \
+             patch('src.core.scanner.collect_from_arp_broadcast') as mock_arp_broadcast, \
+             patch('src.core.scanner.sweep_subnet_for_arp') as mock_arp_sweep, \
+             patch('src.core.scanner.probe_sleeping_host_via_gateway_arp') as mock_sleeping_probe, \
+             patch('src.core.scanner.verify_ipv6_alive') as mock_ipv6_liveness, \
+             patch('src.core.scanner.get_mac_from_arp') as mock_gateway_probe, \
+             patch.object(NetworkScanner, '_build_device') as mock_device_builder, \
+             patch('src.core.scanner.get_self_mac', return_value='') as mock_self_mac, \
+             patch('src.core.scanner.detect_ap_isolation', return_value={}):
+            result = NetworkScanner.scan_full()
+
+        self.assertEqual(result, [])
+        for helper in (
+            mock_multicast_wakeup,
+            mock_ssdp,
+            mock_mdns,
+            mock_ndp_cache,
+            mock_ipv6_multicast,
+            mock_arp_cache,
+            mock_arp_broadcast,
+            mock_arp_sweep,
+            mock_sleeping_probe,
+            mock_ipv6_liveness,
+            mock_gateway_probe,
+            mock_self_mac,
+            mock_device_builder,
+        ):
+            helper.assert_not_called()
 
     def test_sweep_subnet_for_arp_resilience_and_fallbacks(self):
         """Edge Cases: sweep_subnet_for_arp with empty self_ip, supernet /16, and RFC 1918 enforcement."""

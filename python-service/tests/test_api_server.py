@@ -7,21 +7,28 @@ import unittest
 from unittest.mock import patch
 from fastapi import HTTPException
 from src.exceptions.custom import SpoofError
-from src.server import (
-    health_check,
-    get_wifi_status,
-    get_telemetry,
-    get_status,
-    start_spoof,
-    update_spoof_limit,
-    stop_spoof,
-    stop_all_spoof,
-    run_bettercap_syn_scan,
-    SpoofStartRequest,
-    SpoofLimitRequest,
-    SpoofStopRequest,
-    SynScanRequest
-)
+import src.core.spoofer_v6 as spoofer_v6
+
+# The server owns singleton spoofers, whose normal constructors inspect adapters.
+# Keep the production route tests hermetic before importing those singletons.
+with patch.object(spoofer_v6.NDPSpoofer, 'refresh_interface'), \
+     patch('src.core.spoofer.ARPSpoofer.refresh_interface'):
+    from src.server import (
+        health_check,
+        get_wifi_status,
+        get_telemetry,
+        get_status,
+        start_spoof,
+        update_spoof_limit,
+        stop_spoof,
+        stop_all_spoof,
+        run_bettercap_syn_scan,
+        shutdown_event,
+        SpoofStartRequest,
+        SpoofLimitRequest,
+        SpoofStopRequest,
+        SynScanRequest
+    )
 
 class TestServerAPI(unittest.TestCase):
 
@@ -138,6 +145,43 @@ class TestServerAPI(unittest.TestCase):
             stop_spoof(req_stop)
 
         self.assertEqual(ctx.exception.status_code, 500)
+
+    @patch('src.server.spoofer.stop_all', side_effect=SpoofError('member restore failed'))
+    def test_stop_all_spoof_failure_remains_an_http_error(self, _mock_stop_all):
+        """Boundary: aggregate stop-all failure must never return a success payload."""
+        with self.assertRaises(HTTPException) as ctx:
+            stop_all_spoof()
+
+        self.assertEqual(ctx.exception.status_code, 500)
+
+    def test_shutdown_event_runs_all_cleanup_stages_after_multiple_failures(self):
+        """A failed shutdown stage must not skip later safety cleanup."""
+        calls = []
+
+        def cleanup(name, fail=False):
+            def run(*_args, **_kwargs):
+                calls.append(name)
+                if fail:
+                    raise RuntimeError(f'{name} failed')
+            return run
+
+        with patch('src.server.shield_engine.disable', side_effect=cleanup('shield', True)), \
+             patch('src.server.gaming_engine.toggle', side_effect=cleanup('gaming')), \
+             patch('src.server.liveness_daemon.stop', side_effect=cleanup('liveness', True)), \
+             patch('src.server.NetworkScanner.stop_dhcp_sniffer', side_effect=cleanup('dhcp')), \
+             patch('src.server.redirect_manager.stop_all', side_effect=cleanup('redirect')), \
+             patch('src.server.transparent_gateway.stop_all', side_effect=cleanup('gateway', True)), \
+             patch('src.server.spoofer.stop_all', side_effect=cleanup('spoofer')), \
+             patch('src.server.executor.shutdown', side_effect=cleanup('executor')):
+            try:
+                shutdown_event()
+            except RuntimeError:
+                pass
+
+        self.assertEqual(
+            calls,
+            ['shield', 'gaming', 'liveness', 'dhcp', 'redirect', 'gateway', 'spoofer', 'executor'],
+        )
 
     def test_update_limit_nonexistent_negative(self):
         """Negative: Updating limit for non-existent session must raise HTTPException 500."""
