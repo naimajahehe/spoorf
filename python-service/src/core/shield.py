@@ -15,7 +15,12 @@ import collections
 from typing import Dict, Any, List, Optional, Callable
 from scapy.all import Ether, ARP, sniff, sendp, conf
 from .network import get_current_gateway, get_network_info, get_self_mac, is_valid_mac, is_valid_private_ip
+from ..exceptions.custom import SpoofError
 from ..utils.logger import logger
+
+
+_WORKER_JOIN_TIMEOUT_SECONDS = 2.0
+
 
 class SentinelShield:
     def __init__(self, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None):
@@ -93,28 +98,40 @@ class SentinelShield:
             # KEAMANAN (P1): arg-list + input tervalidasi (tanpa shell=True).
             ps_script = (
                 f"Set-NetNeighbor -InterfaceAlias '{alias_ps}' -IPAddress '{gw_ip}' -LinkLayerAddress '{norm_mac_dash}' -State Permanent -ErrorAction SilentlyContinue; "
-                f"if (!$?) {{ New-NetNeighbor -InterfaceAlias '{alias_ps}' -IPAddress '{gw_ip}' -LinkLayerAddress '{norm_mac_dash}' -State Permanent -ErrorAction SilentlyContinue }}"
+                f"if (!$?) {{ New-NetNeighbor -InterfaceAlias '{alias_ps}' -IPAddress '{gw_ip}' -LinkLayerAddress '{norm_mac_dash}' -State Permanent -ErrorAction SilentlyContinue }}; "
+                f"if ($?) {{ exit 0 }} else {{ exit 1 }}"
             )
-            subprocess.run(
+            result = subprocess.run(
                 ["powershell", "-NoProfile", "-Command", ps_script],
                 shell=False, timeout=4, capture_output=True,
                 creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0)
             )
-            success = True
+            success = result.returncode == 0
         except Exception as e:
             logger.debug(f"Set-NetNeighbor notice: {e}")
 
         try:
-            subprocess.run(
+            result = subprocess.run(
                 ["netsh", "interface", "ipv4", "set", "neighbors", iface_alias, gw_ip, norm_mac_colon],
                 shell=False, timeout=3, capture_output=True,
                 creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0)
             )
-            success = True
+            success = success or result.returncode == 0
         except Exception as e:
             logger.debug(f"netsh set neighbors notice: {e}")
 
         return success
+
+    @staticmethod
+    def _join_workers(workers: List[Optional[threading.Thread]]) -> None:
+        current = threading.current_thread()
+        for worker in workers:
+            if worker and worker is not current and worker.is_alive():
+                worker.join(timeout=_WORKER_JOIN_TIMEOUT_SECONDS)
+
+    @staticmethod
+    def _workers_stopped(workers: List[Optional[threading.Thread]]) -> bool:
+        return all(not worker or not worker.is_alive() for worker in workers)
 
     def _unlock_kernel_neighbor(self, gw_ip: str, iface_alias: str) -> bool:
         """Kembalikan entri gateway di kernel Windows menjadi Dynamic/Unreachable."""
@@ -269,96 +286,169 @@ class SentinelShield:
                 self._auto_retaliate = auto_retaliate
                 return self.get_status()
 
-            info = get_network_info()
-            gw_ip = get_current_gateway()
-            gw_mac = self._resolve_gateway_mac(gw_ip)
-
-            if not gw_mac:
-                logger.warning(f"⚠️ Gagal mendapatkan MAC gateway untuk {gw_ip}. Menggunakan fallback MAC router...")
-                gw_mac = "98:4a:6b:0f:4a:97"
-
-            self._gateway_ip = gw_ip
-            self._gateway_mac = gw_mac
-            self._interface_name = info.get('interface', '')
-            self._self_mac = get_self_mac()
-            self._win_alias = "Wi-Fi"
-            self._mode = mode
-            self._auto_retaliate = auto_retaliate
-            self._healing_targets = lan_targets or []
-
-            locked = self._lock_kernel_neighbor(gw_ip, gw_mac, self._win_alias)
-            self._is_enabled = True
-            self._locked_at = time.strftime("%Y-%m-%d %H:%M:%S")
-
-            logger.info(f"🛡️ [Sentinel Shield AKTIF] Gateway {gw_ip} ({gw_mac}) berhasil dikunci permanen di interface '{self._win_alias}'. Mode: {mode}")
-
-            self._sniffer_stop_event.clear()
-            self._sniffer_thread = threading.Thread(target=self._threat_sniffer_loop, daemon=True, name="shield-threat-sniffer")
-            self._sniffer_thread.start()
-
-            self._heartbeat_stop_event.clear()
-            self._heartbeat_thread = threading.Thread(target=self._heartbeat_loop, daemon=True, name="shield-clean-heartbeat")
-            self._heartbeat_thread.start()
-
-            if mode == "lan_healing":
-                self._healing_stop_event.clear()
-                self._healing_thread = threading.Thread(target=self._lan_healer_loop, daemon=True, name="shield-lan-healer")
-                self._healing_thread.start()
-
-            if self._event_callback:
-                try:
-                    self._event_callback({
-                        "event": "shield_status_changed",
-                        "data": self.get_status()
-                    })
-                except Exception:
-                    pass
-
-            return self.get_status()
-
-    def disable(self) -> Dict[str, Any]:
-        """Nonaktifkan Sentinel Shield dan pulihkan state dynamic."""
-        with self._lock:
-            if not self._is_enabled:
-                return self.get_status()
-
-            if self._gateway_ip:
-                self._unlock_kernel_neighbor(self._gateway_ip, self._win_alias)
-
+            prior_workers = [
+                self._sniffer_thread,
+                self._heartbeat_thread,
+                self._healing_thread,
+            ]
             self._sniffer_stop_event.set()
             self._heartbeat_stop_event.set()
             self._healing_stop_event.set()
 
+        self._join_workers(prior_workers)
+        if not self._workers_stopped(prior_workers):
+            raise SpoofError("Worker Sentinel Shield sebelumnya belum berhenti")
+
+        info = get_network_info()
+        gw_ip = get_current_gateway()
+        if not is_valid_private_ip(gw_ip):
+            raise SpoofError("Gateway private tidak dapat divalidasi")
+
+        gw_mac = self._resolve_gateway_mac(gw_ip)
+        if not is_valid_mac(gw_mac) or gw_mac == "00:00:00:00:00:00":
+            raise SpoofError(f"MAC gateway untuk {gw_ip} tidak dapat divalidasi")
+
+        self_mac = get_self_mac()
+        win_alias = "Wi-Fi"
+        if not self._lock_kernel_neighbor(gw_ip, gw_mac, win_alias):
+            raise SpoofError(f"Gagal mengunci neighbor gateway {gw_ip}")
+
+        sniffer_thread = threading.Thread(
+            target=self._threat_sniffer_loop,
+            daemon=True,
+            name="shield-threat-sniffer"
+        )
+        heartbeat_thread = threading.Thread(
+            target=self._heartbeat_loop,
+            daemon=True,
+            name="shield-clean-heartbeat"
+        )
+        healing_thread = None
+        if mode == "lan_healing":
+            healing_thread = threading.Thread(
+                target=self._lan_healer_loop,
+                daemon=True,
+                name="shield-lan-healer"
+            )
+
+        with self._lock:
+            self._gateway_ip = gw_ip
+            self._gateway_mac = gw_mac
+            self._interface_name = info.get('interface', '')
+            self._self_mac = self_mac
+            self._win_alias = win_alias
+            self._mode = mode
+            self._auto_retaliate = auto_retaliate
+            self._healing_targets = lan_targets or []
+            self._is_enabled = True
+            self._locked_at = time.strftime("%Y-%m-%d %H:%M:%S")
+            self._sniffer_stop_event.clear()
+            self._heartbeat_stop_event.clear()
+            if healing_thread:
+                self._healing_stop_event.clear()
+            self._sniffer_thread = sniffer_thread
+            self._heartbeat_thread = heartbeat_thread
+            self._healing_thread = healing_thread
+
+        sniffer_thread.start()
+        heartbeat_thread.start()
+        if healing_thread:
+            healing_thread.start()
+
+        logger.info(f"🛡️ [Sentinel Shield AKTIF] Gateway {gw_ip} ({gw_mac}) berhasil dikunci permanen di interface '{win_alias}'. Mode: {mode}")
+        status = self.get_status()
+        if self._event_callback:
+            try:
+                self._event_callback({
+                    "event": "shield_status_changed",
+                    "data": status
+                })
+            except Exception:
+                pass
+
+        return status
+
+    def disable(self) -> Dict[str, Any]:
+        """Nonaktifkan Sentinel Shield dan pulihkan state dynamic."""
+        with self._lock:
+            was_enabled = self._is_enabled
+            gw_ip = self._gateway_ip
+            win_alias = self._win_alias
+            self._sniffer_stop_event.set()
+            self._heartbeat_stop_event.set()
+            self._healing_stop_event.set()
+            workers = [
+                self._sniffer_thread,
+                self._heartbeat_thread,
+                self._healing_thread,
+            ]
             self._is_enabled = False
             self._locked_at = None
+
+        if was_enabled and gw_ip:
+            self._unlock_kernel_neighbor(gw_ip, win_alias)
+
+        self._join_workers(workers)
+
+        with self._lock:
+            if self._workers_stopped(workers):
+                self._sniffer_thread = None
+                self._heartbeat_thread = None
+                self._healing_thread = None
+
+        status = self.get_status()
+        if was_enabled:
             logger.info("🛡️ [Sentinel Shield NONAKTIF] Gateway neighbor dikembalikan ke mode dinamis.")
 
             if self._event_callback:
                 try:
                     self._event_callback({
                         "event": "shield_status_changed",
-                        "data": self.get_status()
+                        "data": status
                     })
                 except Exception:
                     pass
 
-            return self.get_status()
+        return status
 
     def set_mode(self, mode: str, auto_retaliate: bool = False) -> Dict[str, Any]:
         """Ubah mode pertahanan shield."""
+        worker_to_stop = None
+        start_healer = False
         with self._lock:
             self._mode = mode
             self._auto_retaliate = auto_retaliate
             
             if self._is_enabled:
                 if mode == "lan_healing" and (not self._healing_thread or not self._healing_thread.is_alive()):
-                    self._healing_stop_event.clear()
-                    self._healing_thread = threading.Thread(target=self._lan_healer_loop, daemon=True, name="shield-lan-healer")
-                    self._healing_thread.start()
+                    worker_to_stop = self._healing_thread
+                    self._healing_stop_event.set()
+                    start_healer = True
                 elif mode != "lan_healing" and self._healing_thread and self._healing_thread.is_alive():
                     self._healing_stop_event.set()
+                    worker_to_stop = self._healing_thread
 
-            return self.get_status()
+        self._join_workers([worker_to_stop])
+        if worker_to_stop and worker_to_stop.is_alive():
+            raise SpoofError("Worker LAN healing sebelumnya belum berhenti")
+
+        healer_thread = None
+        if start_healer:
+            healer_thread = threading.Thread(
+                target=self._lan_healer_loop,
+                daemon=True,
+                name="shield-lan-healer"
+            )
+            with self._lock:
+                self._healing_stop_event.clear()
+                self._healing_thread = healer_thread
+            healer_thread.start()
+        elif worker_to_stop:
+            with self._lock:
+                if self._healing_thread is worker_to_stop:
+                    self._healing_thread = None
+
+        return self.get_status()
 
     def get_status(self) -> Dict[str, Any]:
         """Dapatkan status lengkap Sentinel Shield."""
