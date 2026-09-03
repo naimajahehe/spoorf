@@ -1,7 +1,11 @@
 import { Router, Request, Response } from 'express';
 import { DeviceManager } from '../services/deviceManager';
 import { LicenseManager, FeatureLimitError, FeatureLockedError } from '../services/licenseManager';
-import { isBridgeUnavailable } from '../services/pythonBridge';
+import {
+    isBridgeHttpError,
+    isBridgeOperationError,
+    isBridgeUnavailable
+} from '../services/pythonBridge';
 
 /**
  * KEAMANAN (P2): Sanitasi respons error 500 — hindari kebocoran detail internal.
@@ -10,12 +14,16 @@ import { isBridgeUnavailable } from '../services/pythonBridge';
  */
 const OPERATIONAL_ERROR_RE = /not found|required|already|invalid|cannot|gateway|tidak valid|tidak ditemukan|tidak merespons|diperlukan|dilindungi|kebal|di luar jangkauan|terkunci|format|batas|upgrade/i;
 
-function respondError(res: Response, err: any, status = 500): void {
+export function respondError(res: Response, err: any, status = 500): void {
     const msg = typeof err?.message === 'string' ? err.message : '';
     // Klasifikasi offline lewat tipe error yang stabil (BridgeUnavailableError.code),
     // bukan substring pesan yang bisa berubah saat terjemahan diubah.
     const isOffline = isBridgeUnavailable(err);
-    if (isOffline) {
+    const isDownstreamValidation =
+        isBridgeHttpError(err) &&
+        err.status >= 400 &&
+        err.status < 500;
+    if (isOffline || isDownstreamValidation) {
         // eslint-disable-next-line no-console
         console.warn(`⚠️ [API Warning] ${msg || 'Python Engine Offline / Aborted'}`);
     } else {
@@ -26,8 +34,11 @@ function respondError(res: Response, err: any, status = 500): void {
         err instanceof FeatureLimitError ||
         err instanceof FeatureLockedError ||
         isOffline ||
+        isDownstreamValidation ||
+        isBridgeOperationError(err) ||
         (msg !== '' && OPERATIONAL_ERROR_RE.test(msg));
-    res.status(isOffline ? 503 : status).json({
+    const responseStatus = isOffline ? 503 : (isDownstreamValidation ? err.status : status);
+    res.status(responseStatus).json({
         success: false,
         error: isOperational ? msg : 'Terjadi kesalahan internal pada server.'
     });
@@ -493,8 +504,8 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
 
     router.get('/api/bettercap/dns/rules', async (_req: Request, res: Response) => {
         try {
-            const rules = await deviceManager.getBettercapDnsRules();
-            res.json({ success: true, rules });
+            const config = await deviceManager.getBettercapDnsRules();
+            res.json(config);
         } catch (err: any) {
             respondError(res, err);
         }

@@ -9,6 +9,7 @@ import { DeviceManager } from './services/deviceManager';
 import { createRouter } from './api/routes';
 import { WebSocketManager } from './websocket';
 import { corsOriginCallback, hostGuard, apiTokenGuard } from './security';
+import { registerGracefulShutdown } from './shutdown';
 
 dotenv.config();
 
@@ -78,16 +79,5 @@ async function start() {
     }
 }
 
-// Graceful shutdown
-process.on('SIGINT', async () => {
-    console.log('\n🛑 Shutting down...');
-    await pythonBridge.stopAll();
-    pythonBridge.stop();
-    await databaseService.close();
-    server.close(() => {
-        console.log('✅ Server stopped');
-        process.exit(0);
-    });
-});
-
+registerGracefulShutdown({ pythonBridge, databaseService, server });
 start();

@@ -159,7 +159,12 @@ export class DeviceManager extends EventEmitter {
     private async _handleDhcpEvent(data: any): Promise<void> {
         {
             console.log('⚡ [DeviceManager] DHCP event received:', data);
-            if (data && data.kind === 'release' && (data.mac || data.ip)) {
+            const isRelease = data && (
+                data.kind === 'release' ||
+                data.is_release === true ||
+                data.message_type_code === 7
+            );
+            if (isRelease && (data.mac || data.ip)) {
                 let updatedAny = false;
                 if (data.mac) {
                     const normMac = data.mac.toLowerCase();
@@ -1352,7 +1357,7 @@ export class DeviceManager extends EventEmitter {
         return await this.python.getBettercapStatus();
     }
 
-    async getBettercapDnsRules(): Promise<any[]> {
+    async getBettercapDnsRules(): Promise<any> {
         return await this.python.getBettercapDnsRules();
     }
 

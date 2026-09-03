@@ -150,27 +150,48 @@ export async function runDeviceManagerTests() {
         console.log('  ✓ Protection: Gateway redirect attempt is strictly rejected');
     }
 
-    // Test 9: Happy Path - Instant Offline Transition via DHCP RELEASE (Option 53 = 7)
+    // Test 9: Real DeviceManager handler recognizes every Python DHCP RELEASE shape.
     {
-        const dev = devices.get('192.168.1.105');
-        assert.ok(dev);
-        assert.strictEqual(dev!.is_online, true);
+        const { DeviceManager } = await import('../src/services/deviceManager');
+        const { PythonBridge } = await import('../src/services/pythonBridge');
+        const releaseShapes = [
+            { kind: 'release' },
+            { is_release: true },
+            { message_type_code: 7 }
+        ];
 
-        // Simulasi penerimaan paket DHCP RELEASE
-        const releasePayload = {
-            mac: 'a8:3b:76:0c:dc:55',
-            ip: '192.168.1.105',
-            message_type: 'RELEASE',
-            message_type_code: 7,
-            is_release: true
-        };
+        for (const shape of releaseShapes) {
+            const python = new PythonBridge();
+            const offlineWrites: Array<{ mac: string; online: boolean }> = [];
+            const db = {
+                setDeviceOnlineStatus: async (mac: string, online: boolean) => {
+                    offlineWrites.push({ mac, online });
+                },
+                updateDeviceIp: async () => {}
+            };
+            const manager = new DeviceManager(python, db as any);
+            const dev: Device = {
+                ...targetDevice,
+                ip: '192.168.1.105',
+                is_online: true
+            };
+            (manager as any).devices.set(dev.ip, dev);
+            let disconnected: Device | undefined;
+            manager.once('deviceDisconnected', value => { disconnected = value; });
 
-        if (releasePayload.is_release || releasePayload.message_type_code === 7) {
-            dev!.is_online = false;
+            await (manager as any)._handleDhcpEvent({
+                mac: dev.mac,
+                ip: dev.ip,
+                message_type: 'RELEASE',
+                ...shape
+            });
+
+            assert.strictEqual(dev.is_online, false, `release shape ${JSON.stringify(shape)} must mark offline`);
+            assert.strictEqual(dev.ip, '', `release shape ${JSON.stringify(shape)} must clear active IP`);
+            assert.strictEqual(disconnected?.mac, dev.mac);
+            assert.deepStrictEqual(offlineWrites, [{ mac: dev.mac, online: false }]);
         }
-
-        assert.strictEqual(dev!.is_online, false, 'Device must be marked offline immediately upon DHCP RELEASE');
-        console.log('  ✓ Happy Path: DHCP RELEASE instant offline transition verified');
+        console.log('  ✓ Contract: production DHCP handler normalizes kind, is_release, and code 7');
     }
 
     // Test 10: Protection - Rogue DHCP Alert validation
