@@ -25,6 +25,7 @@ _WORKER_JOIN_TIMEOUT_SECONDS = 2.0
 class SentinelShield:
     def __init__(self, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None):
         self._lock = threading.Lock()
+        self._transition_lock = threading.Lock()
         self._is_enabled = False
         self._mode = "host_lock"  # "host_lock" | "lan_healing" | "reflect_counter"
         self._auto_retaliate = False
@@ -82,7 +83,7 @@ class SentinelShield:
     def _lock_kernel_neighbor(self, gw_ip: str, gw_mac: str, iface_alias: str) -> bool:
         """Kunci entri gateway di kernel Windows menjadi Permanent/Static."""
         if sys.platform != 'win32':
-            return True
+            return False
 
         # KEAMANAN (P1): tolak input gateway tak valid sebelum menyentuh OS.
         if not is_valid_private_ip(gw_ip) or not is_valid_mac(gw_mac):
@@ -280,6 +281,10 @@ class SentinelShield:
 
     def enable(self, mode: str = "host_lock", auto_retaliate: bool = False, lan_targets: Optional[List[Dict[str, str]]] = None) -> Dict[str, Any]:
         """Aktifkan Sentinel Shield."""
+        with self._transition_lock:
+            return self._enable_transition(mode, auto_retaliate, lan_targets)
+
+    def _enable_transition(self, mode: str, auto_retaliate: bool, lan_targets: Optional[List[Dict[str, str]]]) -> Dict[str, Any]:
         with self._lock:
             if self._is_enabled:
                 self._mode = mode
@@ -313,47 +318,72 @@ class SentinelShield:
         if not self._lock_kernel_neighbor(gw_ip, gw_mac, win_alias):
             raise SpoofError(f"Gagal mengunci neighbor gateway {gw_ip}")
 
-        sniffer_thread = threading.Thread(
-            target=self._threat_sniffer_loop,
-            daemon=True,
-            name="shield-threat-sniffer"
-        )
-        heartbeat_thread = threading.Thread(
-            target=self._heartbeat_loop,
-            daemon=True,
-            name="shield-clean-heartbeat"
-        )
-        healing_thread = None
-        if mode == "lan_healing":
-            healing_thread = threading.Thread(
-                target=self._lan_healer_loop,
+        attempt_workers: List[Optional[threading.Thread]] = []
+        try:
+            sniffer_thread = threading.Thread(
+                target=self._threat_sniffer_loop,
                 daemon=True,
-                name="shield-lan-healer"
+                name="shield-threat-sniffer"
             )
+            attempt_workers.append(sniffer_thread)
+            heartbeat_thread = threading.Thread(
+                target=self._heartbeat_loop,
+                daemon=True,
+                name="shield-clean-heartbeat"
+            )
+            attempt_workers.append(heartbeat_thread)
+            healing_thread = None
+            if mode == "lan_healing":
+                healing_thread = threading.Thread(
+                    target=self._lan_healer_loop,
+                    daemon=True,
+                    name="shield-lan-healer"
+                )
+                attempt_workers.append(healing_thread)
 
-        with self._lock:
-            self._gateway_ip = gw_ip
-            self._gateway_mac = gw_mac
-            self._interface_name = info.get('interface', '')
-            self._self_mac = self_mac
-            self._win_alias = win_alias
-            self._mode = mode
-            self._auto_retaliate = auto_retaliate
-            self._healing_targets = lan_targets or []
-            self._is_enabled = True
-            self._locked_at = time.strftime("%Y-%m-%d %H:%M:%S")
-            self._sniffer_stop_event.clear()
-            self._heartbeat_stop_event.clear()
+            with self._lock:
+                self._gateway_ip = gw_ip
+                self._gateway_mac = gw_mac
+                self._interface_name = info.get('interface', '')
+                self._self_mac = self_mac
+                self._win_alias = win_alias
+                self._mode = mode
+                self._auto_retaliate = auto_retaliate
+                self._healing_targets = lan_targets or []
+                self._is_enabled = True
+                self._locked_at = time.strftime("%Y-%m-%d %H:%M:%S")
+                self._sniffer_stop_event.clear()
+                self._heartbeat_stop_event.clear()
+                if healing_thread:
+                    self._healing_stop_event.clear()
+                self._sniffer_thread = sniffer_thread
+                self._heartbeat_thread = heartbeat_thread
+                self._healing_thread = healing_thread
+
+            sniffer_thread.start()
+            heartbeat_thread.start()
             if healing_thread:
-                self._healing_stop_event.clear()
-            self._sniffer_thread = sniffer_thread
-            self._heartbeat_thread = heartbeat_thread
-            self._healing_thread = healing_thread
+                healing_thread.start()
+        except Exception:
+            with self._lock:
+                self._sniffer_stop_event.set()
+                self._heartbeat_stop_event.set()
+                self._healing_stop_event.set()
+                self._is_enabled = False
+                self._locked_at = None
 
-        sniffer_thread.start()
-        heartbeat_thread.start()
-        if healing_thread:
-            healing_thread.start()
+            self._join_workers(attempt_workers)
+            try:
+                self._unlock_kernel_neighbor(gw_ip, win_alias)
+            except Exception as unlock_error:
+                logger.debug(f"Rollback kernel neighbor unlock failed: {unlock_error}")
+
+            with self._lock:
+                if self._workers_stopped(attempt_workers):
+                    self._sniffer_thread = None
+                    self._heartbeat_thread = None
+                    self._healing_thread = None
+            raise
 
         logger.info(f"🛡️ [Sentinel Shield AKTIF] Gateway {gw_ip} ({gw_mac}) berhasil dikunci permanen di interface '{win_alias}'. Mode: {mode}")
         status = self.get_status()
@@ -370,6 +400,10 @@ class SentinelShield:
 
     def disable(self) -> Dict[str, Any]:
         """Nonaktifkan Sentinel Shield dan pulihkan state dynamic."""
+        with self._transition_lock:
+            return self._disable_transition()
+
+    def _disable_transition(self) -> Dict[str, Any]:
         with self._lock:
             was_enabled = self._is_enabled
             gw_ip = self._gateway_ip
@@ -413,6 +447,10 @@ class SentinelShield:
 
     def set_mode(self, mode: str, auto_retaliate: bool = False) -> Dict[str, Any]:
         """Ubah mode pertahanan shield."""
+        with self._transition_lock:
+            return self._set_mode_transition(mode, auto_retaliate)
+
+    def _set_mode_transition(self, mode: str, auto_retaliate: bool) -> Dict[str, Any]:
         worker_to_stop = None
         start_healer = False
         with self._lock:

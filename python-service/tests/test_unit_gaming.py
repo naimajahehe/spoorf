@@ -1,7 +1,11 @@
 import unittest
 import time
+import threading
 from unittest.mock import patch
 from src.core.gaming import GamingEngine, parse_ping_rtt_ms
+
+
+REAL_THREAD = threading.Thread
 
 
 class FakeWorker:
@@ -30,6 +34,12 @@ class FakeWorker:
 
     def is_alive(self):
         return self.started and not self.joined
+
+
+class FailingStartWorker(FakeWorker):
+    def start(self):
+        self.started = True
+        raise RuntimeError("worker start failed")
 
 
 class TestGamingEngine(unittest.TestCase):
@@ -116,6 +126,71 @@ class TestGamingEngine(unittest.TestCase):
         self.assertTrue(workers[0].stop_was_set_during_join)
         self.assertTrue(workers[0].lock_was_free_during_join)
         self.assertTrue(workers[1].started_after_prior_join)
+
+    def test_enable_and_disable_transitions_do_not_overlap(self):
+        construction_entered = threading.Event()
+        release_construction = threading.Event()
+        disable_started = threading.Event()
+        disable_done = threading.Event()
+        errors = []
+
+        def blocking_worker(**_kwargs):
+            construction_entered.set()
+            release_construction.wait(1.0)
+            return FakeWorker(
+                stop_event=self.engine._stop_event,
+                state_lock=self.engine._lock,
+            )
+
+        def run_enable():
+            try:
+                self.engine.toggle(True)
+            except Exception as exc:
+                errors.append(exc)
+
+        def run_disable():
+            disable_started.set()
+            try:
+                self.engine.toggle(False)
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                disable_done.set()
+
+        enable_thread = REAL_THREAD(target=run_enable)
+        disable_thread = REAL_THREAD(target=run_disable)
+
+        with patch('src.core.gaming.threading.Thread', side_effect=blocking_worker):
+            enable_thread.start()
+            self.assertTrue(construction_entered.wait(1.0))
+            disable_thread.start()
+            self.assertTrue(disable_started.wait(1.0))
+            self.assertFalse(disable_done.wait(0.05))
+            release_construction.set()
+            enable_thread.join(1.0)
+            disable_thread.join(1.0)
+
+        self.assertFalse(enable_thread.is_alive())
+        self.assertFalse(disable_thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertFalse(self.engine.is_enabled())
+
+    def test_enable_rolls_back_started_worker_when_start_fails(self):
+        worker = FailingStartWorker(
+            stop_event=self.engine._stop_event,
+            state_lock=self.engine._lock,
+        )
+
+        with patch('src.core.gaming.threading.Thread', return_value=worker):
+            with self.assertRaisesRegex(RuntimeError, "worker start failed"):
+                self.engine.toggle(True)
+
+        self.assertTrue(worker.joined)
+        self.assertEqual(worker.join_timeout, 2.0)
+        self.assertTrue(worker.stop_was_set_during_join)
+        status = self.engine.get_status()
+        self.assertFalse(status['is_enabled'])
+        self.assertEqual(status['uptime_seconds'], 0.0)
 
     def test_telemetry_fields(self):
         status = self.engine.get_status()

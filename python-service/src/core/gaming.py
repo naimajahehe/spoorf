@@ -50,6 +50,7 @@ class GamingEngine:
     """
     def __init__(self, event_callback: Optional[Callable[[str, Dict[str, Any]], None]] = None):
         self._lock = threading.Lock()
+        self._transition_lock = threading.Lock()
         self._is_enabled = False
         self._mode = "auto_airtime"  # "auto_airtime" | "blackhole_priority"
         self._target_ping_ms = 25.0
@@ -81,6 +82,10 @@ class GamingEngine:
 
     def toggle(self, enabled: bool, mode: str = "auto_airtime", target_ping_ms: float = 25.0) -> Dict[str, Any]:
         """Aktifkan atau nonaktifkan Mode Gaming."""
+        with self._transition_lock:
+            return self._toggle_transition(enabled, mode, target_ping_ms)
+
+    def _toggle_transition(self, enabled: bool, mode: str, target_ping_ms: float) -> Dict[str, Any]:
         with self._lock:
             if self._is_enabled == enabled:
                 if enabled:
@@ -129,7 +134,21 @@ class GamingEngine:
                 self._stop_event.clear()
                 self._watchdog_thread = watchdog_thread
                 status = self._get_status_unlocked()
-            watchdog_thread.start()
+            try:
+                watchdog_thread.start()
+            except Exception:
+                self._stop_event.set()
+                with self._lock:
+                    self._is_enabled = False
+                    self._activated_at = None
+
+                if watchdog_thread.is_alive():
+                    watchdog_thread.join(timeout=_WORKER_JOIN_TIMEOUT_SECONDS)
+
+                with self._lock:
+                    if self._watchdog_thread is watchdog_thread and not watchdog_thread.is_alive():
+                        self._watchdog_thread = None
+                raise
             logger.info(f"🎮 Mode Gaming DIAKTIFKAN (Mode: {self._mode}, Target Ping: {self._target_ping_ms}ms)")
         else:
             with self._lock:

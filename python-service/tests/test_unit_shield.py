@@ -1,7 +1,11 @@
 import unittest
+import threading
 from unittest.mock import patch, MagicMock
 from src.core.shield import SentinelShield
 from src.exceptions.custom import SpoofError
+
+
+REAL_THREAD = threading.Thread
 
 
 class FakeWorker:
@@ -30,6 +34,13 @@ class FakeWorker:
 
     def is_alive(self):
         return self.started and not self.joined
+
+
+class FailingStartWorker(FakeWorker):
+    def start(self):
+        self.started = True
+        raise RuntimeError("worker start failed")
+
 
 class TestSentinelShield(unittest.TestCase):
     def setUp(self):
@@ -134,6 +145,24 @@ class TestSentinelShield(unittest.TestCase):
     @patch('src.core.shield.get_network_info')
     @patch('src.core.shield.get_current_gateway')
     @patch('src.core.shield.SentinelShield._resolve_gateway_mac')
+    @patch('src.core.shield.subprocess.run')
+    @patch('src.core.shield.sys.platform', 'linux')
+    def test_enable_fails_closed_on_unsupported_platform(
+        self, mock_run, mock_resolve_mac, mock_gw, mock_info
+    ):
+        mock_info.return_value = {'ip': '192.168.110.99', 'interface': 'Wi-Fi'}
+        mock_gw.return_value = '192.168.110.1'
+        mock_resolve_mac.return_value = '98:4a:6b:0f:4a:97'
+
+        with self.assertRaises(SpoofError):
+            self.shield.enable()
+
+        self.assertFalse(self.shield.get_status()['is_enabled'])
+        mock_run.assert_not_called()
+
+    @patch('src.core.shield.get_network_info')
+    @patch('src.core.shield.get_current_gateway')
+    @patch('src.core.shield.SentinelShield._resolve_gateway_mac')
     @patch('src.core.shield.SentinelShield._lock_kernel_neighbor')
     def test_enable_runs_network_operations_outside_state_lock(
         self, mock_lock, mock_resolve_mac, mock_gw, mock_info
@@ -200,6 +229,98 @@ class TestSentinelShield(unittest.TestCase):
         self.assertTrue(all(worker.lock_was_free_during_join for worker in prior_workers))
         self.assertTrue(all(worker.started_after_prior_join for worker in replacement_workers))
 
+    @patch('src.core.shield.get_network_info')
+    @patch('src.core.shield.get_current_gateway')
+    @patch('src.core.shield.SentinelShield._resolve_gateway_mac')
+    @patch('src.core.shield.SentinelShield._lock_kernel_neighbor')
+    @patch('src.core.shield.SentinelShield._unlock_kernel_neighbor')
+    def test_enable_and_disable_transitions_do_not_overlap(
+        self, mock_unlock, mock_lock, mock_resolve_mac, mock_gw, mock_info
+    ):
+        enable_entered = threading.Event()
+        release_enable = threading.Event()
+        disable_started = threading.Event()
+        disable_done = threading.Event()
+        errors = []
+
+        def blocking_network_info():
+            enable_entered.set()
+            release_enable.wait(1.0)
+            return {'ip': '192.168.110.99', 'interface': 'Wi-Fi'}
+
+        def run_enable():
+            try:
+                self.shield.enable()
+            except Exception as exc:
+                errors.append(exc)
+
+        def run_disable():
+            disable_started.set()
+            try:
+                self.shield.disable()
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                disable_done.set()
+
+        mock_info.side_effect = blocking_network_info
+        mock_gw.return_value = '192.168.110.1'
+        mock_resolve_mac.return_value = '98:4a:6b:0f:4a:97'
+        mock_lock.return_value = True
+        enable_thread = REAL_THREAD(target=run_enable)
+        disable_thread = REAL_THREAD(target=run_disable)
+
+        enable_thread.start()
+        self.assertTrue(enable_entered.wait(1.0))
+        disable_thread.start()
+        self.assertTrue(disable_started.wait(1.0))
+        self.assertFalse(disable_done.wait(0.05))
+        release_enable.set()
+        enable_thread.join(1.0)
+        disable_thread.join(1.0)
+
+        self.assertFalse(enable_thread.is_alive())
+        self.assertFalse(disable_thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertFalse(self.shield.get_status()['is_enabled'])
+        mock_unlock.assert_called_once()
+
+    @patch('src.core.shield.get_network_info')
+    @patch('src.core.shield.get_current_gateway')
+    @patch('src.core.shield.SentinelShield._resolve_gateway_mac')
+    @patch('src.core.shield.SentinelShield._lock_kernel_neighbor')
+    @patch('src.core.shield.SentinelShield._unlock_kernel_neighbor')
+    def test_enable_rolls_back_lock_and_started_workers_when_start_fails(
+        self, mock_unlock, mock_lock, mock_resolve_mac, mock_gw, mock_info
+    ):
+        mock_info.return_value = {'ip': '192.168.110.99', 'interface': 'Wi-Fi'}
+        mock_gw.return_value = '192.168.110.1'
+        mock_resolve_mac.return_value = '98:4a:6b:0f:4a:97'
+        mock_lock.return_value = True
+        sniffer = FakeWorker(
+            stop_event=self.shield._sniffer_stop_event,
+            state_lock=self.shield._lock,
+        )
+        heartbeat = FailingStartWorker(
+            stop_event=self.shield._heartbeat_stop_event,
+            state_lock=self.shield._lock,
+        )
+
+        with patch('src.core.shield.threading.Thread', side_effect=[sniffer, heartbeat]):
+            with self.assertRaisesRegex(RuntimeError, "worker start failed"):
+                self.shield.enable()
+
+        self.assertTrue(sniffer.joined)
+        self.assertTrue(heartbeat.joined)
+        self.assertEqual(sniffer.join_timeout, 2.0)
+        self.assertEqual(heartbeat.join_timeout, 2.0)
+        self.assertTrue(sniffer.stop_was_set_during_join)
+        self.assertTrue(heartbeat.stop_was_set_during_join)
+        mock_unlock.assert_called_once_with('192.168.110.1', 'Wi-Fi')
+        status = self.shield.get_status()
+        self.assertFalse(status['is_enabled'])
+        self.assertIsNone(status['locked_at'])
+
     @patch('src.core.shield.SentinelShield._unlock_kernel_neighbor')
     def test_disable(self, mock_unlock):
         self.shield._is_enabled = True
@@ -221,7 +342,8 @@ class TestSentinelShield(unittest.TestCase):
         self.shield.clear_threats()
         self.assertEqual(len(self.shield.get_threats()), 0)
 
-    def test_set_mode(self):
+    @patch('src.core.shield.get_current_gateway', return_value='')
+    def test_set_mode(self, _mock_gateway):
         res = self.shield.set_mode('lan_healing', auto_retaliate=True)
         self.assertEqual(res['mode'], 'lan_healing')
         self.assertTrue(res['auto_retaliate'])
