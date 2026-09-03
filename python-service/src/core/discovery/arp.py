@@ -33,7 +33,11 @@ def probe_sleeping_host_via_gateway_arp(
     karena smartphone selalu membalas ARP dari router gateway agar IP sewaannya tidak dicabut.
     """
     try:
-        if not is_valid_private_ip(target_ip) or not is_valid_mac(target_mac) or not gateway_ip:
+        if (
+            not is_valid_private_ip(target_ip)
+            or not is_valid_mac(target_mac)
+            or not is_valid_private_ip(gateway_ip)
+        ):
             return
         if target_ip in discovered:
             return

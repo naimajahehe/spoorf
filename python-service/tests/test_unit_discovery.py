@@ -282,6 +282,22 @@ class TestCoreDiscovery(unittest.TestCase):
             self.assertIn(target_ip, discovered)
             self.assertEqual(discovered[target_ip], target_mac)
 
+    def test_sleeping_host_unicast_probe_rejects_non_private_gateway(self):
+        from src.core.discovery.arp import probe_sleeping_host_via_gateway_arp
+        from unittest.mock import patch
+
+        with patch('src.core.discovery.arp.get_self_mac', return_value='00:11:22:33:44:55'), \
+             patch('src.core.discovery.arp.srp', return_value=([], [])) as mock_srp:
+            probe_sleeping_host_via_gateway_arp(
+                '192.168.1.88',
+                'a8:3b:76:11:22:33',
+                '203.0.113.1',
+                {},
+                timeout=0.1,
+            )
+
+        mock_srp.assert_not_called()
+
     def test_scanner_device_history_structure_and_wakeup_integration(self):
         """Verify _DEVICE_HISTORY records valid IP/MAC/timestamp and scan_full dispatches unicast probes."""
         from src.core.scanner import NetworkScanner
@@ -336,6 +352,40 @@ class TestCoreDiscovery(unittest.TestCase):
             # Sleeping host must be returned in results
             result_ips = [d['ip'] for d in results]
             self.assertIn('192.168.1.150', result_ips)
+
+    def test_scan_full_unresolved_network_never_sends_arp(self):
+        from src.core.scanner import NetworkScanner
+        from unittest.mock import patch
+
+        NetworkScanner._DEVICE_HISTORY.clear()
+        NetworkScanner._DEVICE_HISTORY['b4:c8:10:99:88:77'] = {
+            'ip': '192.168.1.150',
+            'mac': 'b4:c8:10:99:88:77',
+        }
+
+        try:
+            with patch('src.core.scanner.get_current_gateway', return_value=''), \
+                 patch(
+                     'src.core.scanner.get_network_info',
+                     return_value={'ip': '', 'network': '', 'gateway': ''}
+                 ), \
+                 patch('src.core.scanner.collect_ssdp_sensors'), \
+                 patch('src.core.scanner.collect_mdns_sensors'), \
+                 patch('src.core.scanner.collect_from_arp_cache'), \
+                 patch('src.core.scanner.collect_from_arp_broadcast'), \
+                 patch('src.core.scanner.sweep_subnet_for_arp'), \
+                 patch('src.core.scanner.send_multicast_wakeup'), \
+                 patch('src.core.scanner.collect_from_ndp_cache'), \
+                 patch('src.core.scanner.send_ipv6_all_nodes_multicast'), \
+                 patch('src.core.scanner.get_self_mac', return_value=''), \
+                 patch('src.core.scanner.detect_ap_isolation', return_value={}), \
+                 patch('src.core.discovery.arp.get_self_mac', return_value='00:11:22:33:44:55'), \
+                 patch('src.core.discovery.arp.srp', return_value=([], [])) as mock_srp:
+                NetworkScanner.scan_full()
+
+            mock_srp.assert_not_called()
+        finally:
+            NetworkScanner._DEVICE_HISTORY.clear()
 
     def test_sweep_subnet_for_arp_resilience_and_fallbacks(self):
         """Edge Cases: sweep_subnet_for_arp with empty self_ip, supernet /16, and RFC 1918 enforcement."""

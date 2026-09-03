@@ -19,6 +19,7 @@ from .network import (
     get_self_mac,
     is_network_changed,
     is_valid_private_ip,
+    is_valid_private_network,
     is_valid_mac
 )
 from .discovery import (
@@ -347,48 +348,60 @@ class NetworkScanner:
 
         # 5. Kumpulkan kandidat dari DHCP Cache, OS ARP Cache, dan Device History yang belum terverifikasi
         candidates: Dict[str, str] = {}
-        collect_from_arp_cache(candidates)
 
         net_info = get_network_info()
         curr_net = None
-        if net_info.get('network'):
+        if is_valid_private_network(net_info.get('network', '')):
             try:
                 import ipaddress
                 curr_net = ipaddress.IPv4Network(net_info['network'], strict=False)
             except:
                 pass
 
+        if curr_net:
+            collect_from_arp_cache(candidates)
+
         dhcp_snapshot = dhcp_cache.get_snapshot()
         for k, d_info in dhcp_snapshot.items():
             d_ip = d_info.get('ip')
             d_mac = d_info.get('mac')
-            if d_ip and d_mac and is_valid_private_ip(d_ip) and is_valid_mac(d_mac):
-                if curr_net:
-                    try:
-                        import ipaddress
-                        if ipaddress.IPv4Address(d_ip) not in curr_net:
-                            continue
-                    except:
-                        pass
+            if curr_net and d_ip and d_mac and is_valid_private_ip(d_ip) and is_valid_mac(d_mac):
+                try:
+                    import ipaddress
+                    if ipaddress.IPv4Address(d_ip) not in curr_net:
+                        continue
+                except:
+                    continue
                 candidates[d_ip] = d_mac
 
         if cls._DEVICE_HISTORY:
             for entry in cls._DEVICE_HISTORY.values():
                 h_ip = entry.get('ip')
                 h_mac = entry.get('mac')
-                if h_ip and h_mac and is_valid_private_ip(h_ip) and is_valid_mac(h_mac):
-                    if curr_net:
-                        try:
-                            import ipaddress
-                            if ipaddress.IPv4Address(h_ip) not in curr_net:
-                                continue
-                        except:
-                            pass
+                if curr_net and h_ip and h_mac and is_valid_private_ip(h_ip) and is_valid_mac(h_mac):
+                    try:
+                        import ipaddress
+                        if ipaddress.IPv4Address(h_ip) not in curr_net:
+                            continue
+                    except:
+                        continue
                     if h_ip not in candidates:
                         candidates[h_ip] = h_mac
 
         # 6. Verifikasi Liveness untuk seluruh kandidat yang belum masuk 'discovered' (Doze Wakeup / Unicast ARP Probe)
-        unverified = [(ip, mac) for ip, mac in candidates.items() if ip not in discovered]
+        gateway_is_resolved = False
+        if curr_net and is_valid_private_ip(gateway_ip):
+            try:
+                import ipaddress
+                gateway_is_resolved = ipaddress.IPv4Address(gateway_ip) in curr_net
+            except:
+                pass
+
+        unverified = [
+            (ip, mac)
+            for ip, mac in candidates.items()
+            if gateway_is_resolved and ip not in discovered
+        ]
         if unverified:
             logger.info(f"📱 Memverifikasi {len(unverified)} host kandidat (Unicast ARP / Doze Probe)...")
             num_probe_workers = min(15, len(unverified))
@@ -396,7 +409,7 @@ class NetworkScanner:
                 futures = [
                     probe_executor.submit(
                         probe_sleeping_host_via_gateway_arp,
-                        target_ip, target_mac, gateway_ip or target_ip, discovered, 0.25
+                        target_ip, target_mac, gateway_ip, discovered, 0.25
                     )
                     for target_ip, target_mac in unverified
                 ]
