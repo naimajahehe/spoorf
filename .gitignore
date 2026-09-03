@@ -49,6 +49,8 @@ dist/
 python-service/build/
 dist-installer/
 **/dist-installer/
+dist-test/
+**/dist-test/
 spoorf-engine/
 **/spoorf-engine/
 *.egg-info/

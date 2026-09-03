@@ -6,6 +6,7 @@
   "main": "dist/main.js",
   "scripts": {
     "build:backend": "cd ../backend-node && npm run build",
+    "test": "tsc -p tsconfig.test.json && node dist-test/tests/run_tests.js",
     "build:ts": "npm run build:backend && tsc && powershell -Command \"if (Test-Path ./dist/backend) { Remove-Item -Recurse -Force ./dist/backend }; Copy-Item -Recurse -Force ../backend-node/dist ./dist/backend\"",
     "rebuild:native": "electron-builder install-app-deps",
     "build:exe": "npm run build:ts && npm run rebuild:native && electron-builder --win nsis",

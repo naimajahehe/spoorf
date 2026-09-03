@@ -4,6 +4,7 @@ import fs from 'fs';
 import crypto from 'crypto';
 import { spawn, ChildProcess } from 'child_process';
 import http from 'http';
+import { shouldRespawnAfterExit, buildTreeKillArgs } from './supervisor-logic';
 
 // KEAMANAN (P1): Ephemeral IPC Bearer Token (SPEC-010 §2.4 / §3).
 // Di-generate sekali per sesi & disuntik ke env SEBELUM Python di-spawn dan
@@ -128,6 +129,27 @@ function getPythonEnginePath(): string {
     return path.join(__dirname, '../../python-service/venv/Scripts/python.exe');
 }
 
+/**
+ * Matikan proses engine beserta SELURUH pohon anaknya. Di Windows memakai
+ * `taskkill /T /F` agar bootloader PyInstaller / subproses uvicorn tidak lolos
+ * menjadi zombie yang menahan port :8001 (penyebab tabrakan bind WinError 10048
+ * pada peluncuran berikutnya). Platform lain: fallback ke kill().
+ */
+function killProcessTree(proc: ChildProcess): void {
+    const pid = proc.pid;
+    if (pid && process.platform === 'win32') {
+        try {
+            spawn('taskkill', buildTreeKillArgs(pid), { windowsHide: true, stdio: 'ignore' });
+            return;
+        } catch (err) {
+            logElectron(`[Supervisor] taskkill gagal (${err}); fallback ke kill().`);
+        }
+    }
+    try {
+        proc.kill();
+    } catch {}
+}
+
 function startPythonEngine() {
     try {
         const enginePath = getPythonEnginePath();
@@ -164,8 +186,17 @@ function startPythonEngine() {
             if (pythonProcess === child) {
                 pythonProcess = null;
             }
-            // Jangan respawn bila: app sedang tutup, atau kill ini disengaja (restart manual).
-            if (isQuitting || (child as any).__intentionalKill) {
+            // Keluar bersih (exit 0) TIDAK di-respawn: itu tanda engine berhenti sengaja,
+            // termasuk guard preflight Python yang keluar 0 saat engine lain sudah aktif.
+            // Hanya crash (exit != 0) yang layak respawn. Kill sengaja & shutdown app juga skip.
+            const respawn = shouldRespawnAfterExit(code, {
+                isQuitting,
+                intentionalKill: !!(child as any).__intentionalKill
+            });
+            if (!respawn) {
+                if (code === 0 && !isQuitting && !(child as any).__intentionalKill) {
+                    logElectron('[Supervisor] Engine keluar bersih (exit 0) — kemungkinan engine lain sudah memegang :8001; tidak me-respawn.');
+                }
                 return;
             }
             scheduleEngineRespawn(`exit code=${code} signal=${signal}`);
@@ -211,9 +242,7 @@ function restartPythonEngine() {
         const dying = pythonProcess;
         (dying as any).__intentionalKill = true;
         pythonProcess = null;
-        try {
-            dying.kill();
-        } catch {}
+        killProcessTree(dying);
         // Beri jeda agar port :8001 sempat dilepas sebelum spawn baru.
         setTimeout(() => {
             if (!isQuitting) startPythonEngine();
@@ -276,9 +305,7 @@ async function stopAllEnginesGracefully(): Promise<void> {
                 },
                 () => {
                     if (pythonProcess) {
-                        try {
-                            pythonProcess.kill();
-                        } catch {}
+                        killProcessTree(pythonProcess);
                     }
                     resolve();
                 }
@@ -286,9 +313,7 @@ async function stopAllEnginesGracefully(): Promise<void> {
 
             req.on('error', () => {
                 if (pythonProcess) {
-                    try {
-                        pythonProcess.kill();
-                    } catch {}
+                    killProcessTree(pythonProcess);
                 }
                 resolve();
             });
@@ -296,9 +321,7 @@ async function stopAllEnginesGracefully(): Promise<void> {
             req.end();
         } catch {
             if (pythonProcess) {
-                try {
-                    pythonProcess.kill();
-                } catch {}
+                killProcessTree(pythonProcess);
             }
             resolve();
         }
