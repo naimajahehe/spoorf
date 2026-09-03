@@ -77,6 +77,37 @@ class TestCoreSpoofer(unittest.TestCase):
         self.assertFalse(self.spoofer.is_running)
         self.assertNotIn(session_id, self.spoofer.get_all_sessions())
 
+    @patch('src.core.spoofer.time.time', return_value=1725418980.0)
+    @patch('src.core.spoofer.threading.Thread')
+    def test_same_second_recovery_sessions_keep_distinct_ipv4_ids(
+        self, _mock_thread, _mock_time
+    ):
+        """Retained cleanup state must not be overwritten by a same-second restart."""
+        _mock_thread.return_value.is_alive.return_value = False
+        first_session_id = self.spoofer.start(
+            victim_ip="192.168.1.55",
+            victim_mac="00:11:22:33:44:55",
+            gateway_ip="192.168.1.1",
+            gateway_mac="00:aa:bb:cc:dd:ee",
+        )
+        self.spoofer._sessions[first_session_id]['active'] = False
+        self.spoofer._sessions[first_session_id]['restore_failed'] = True
+
+        recovery_session_id = self.spoofer.start(
+            victim_ip="192.168.1.55",
+            victim_mac="00:11:22:33:44:55",
+            gateway_ip="192.168.1.1",
+            gateway_mac="00:aa:bb:cc:dd:ee",
+        )
+
+        self.assertNotEqual(first_session_id, recovery_session_id)
+        self.assertTrue(first_session_id.startswith("192.168.1.55_"))
+        self.assertTrue(recovery_session_id.startswith("192.168.1.55_"))
+        sessions = self.spoofer.get_all_sessions()
+        self.assertEqual(len(sessions), 2)
+        self.assertTrue(sessions[first_session_id]['restore_failed'])
+        self.assertTrue(sessions[recovery_session_id]['active'])
+
     # ===== 2. Negative Tests =====
     def test_spoof_gateway_itself_negative(self):
         """Negative: Attempting to spoof gateway IP or MAC must raise SpoofError."""

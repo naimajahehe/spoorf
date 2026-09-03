@@ -12,6 +12,7 @@ import sys
 import time
 import threading
 import random
+import uuid
 import subprocess  # dipakai _ensure_host_gateway_locked (sebelumnya hilang → NameError senyap)
 from typing import Dict, Optional, Any, List, Tuple
 from scapy.all import sendp, ARP, Ether, conf, ifaces
@@ -470,7 +471,7 @@ class ARPSpoofer:
             except Exception as e:
                 logger.warning(f"Notice starting coordinated IPv6 session: {e}")
 
-        session_id = f"{victim_ip}_{int(time.time())}"
+        session_id = f"{victim_ip}_{uuid.uuid4().hex}"
         with self._lock:
             stop_event = threading.Event()
             session = {

@@ -18,7 +18,12 @@ from src.exceptions.custom import SpoofError, SessionNotFoundError
 
 class TestUnitSpooferV6(unittest.TestCase):
     def setUp(self):
+        refresh_patcher = patch.object(NDPSpoofer, 'refresh_interface')
+        refresh_patcher.start()
+        self.addCleanup(refresh_patcher.stop)
         self.spoofer = NDPSpoofer()
+        self.spoofer._interface = "test-interface"
+        self.spoofer._win_interface_name = "test-interface"
         self.spoofer._self_mac = "aa:bb:cc:dd:ee:ff"
         self.victim_ip = "fe80::100"
         self.victim_mac = "11:22:33:44:55:66"
@@ -111,6 +116,35 @@ class TestUnitSpooferV6(unittest.TestCase):
         # Stop non-existent raises SessionNotFoundError
         with self.assertRaises(SessionNotFoundError):
             self.spoofer.stop_spoof("non_existent_session")
+
+    @patch('src.core.spoofer_v6.time.time', return_value=1725418980.0)
+    @patch('src.core.spoofer_v6.threading.Thread')
+    def test_same_second_recovery_sessions_keep_distinct_ipv6_ids(
+        self, _mock_thread, _mock_time
+    ):
+        """Retained NDP cleanup state must survive a same-second restart."""
+        _mock_thread.return_value.is_alive.return_value = False
+        first_session_id = self.spoofer.start_spoof(
+            victim_ipv6=self.victim_ip,
+            victim_mac=self.victim_mac,
+            gateway_ipv6=self.gateway_ip,
+            gateway_mac=self.gateway_mac,
+        )
+        self.spoofer._sessions[first_session_id]['active'] = False
+
+        recovery_session_id = self.spoofer.start_spoof(
+            victim_ipv6=self.victim_ip,
+            victim_mac=self.victim_mac,
+            gateway_ipv6=self.gateway_ip,
+            gateway_mac=self.gateway_mac,
+        )
+
+        self.assertNotEqual(first_session_id, recovery_session_id)
+        self.assertTrue(first_session_id.startswith("v6_fe80__100_"))
+        self.assertTrue(recovery_session_id.startswith("v6_fe80__100_"))
+        self.assertEqual(len(self.spoofer._sessions), 2)
+        self.assertTrue(self.spoofer._sessions[first_session_id]['active'] is False)
+        self.assertTrue(self.spoofer._sessions[recovery_session_id]['active'])
 
     @patch('src.core.spoofer_v6.sendp')
     def test_ipv6_speed_limit_100_unrestricted_standby(self, mock_sendp):
