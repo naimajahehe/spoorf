@@ -1,6 +1,7 @@
 import unittest
 import threading
 from unittest.mock import patch, MagicMock
+from scapy.all import ARP, Ether
 from src.core.shield import SentinelShield
 from src.exceptions.custom import SpoofError
 
@@ -413,6 +414,37 @@ class TestSentinelShield(unittest.TestCase):
         self.assertEqual(len(self.shield.get_threats()), 1)
         self.shield.clear_threats()
         self.assertEqual(len(self.shield.get_threats()), 0)
+
+    @patch('src.core.shield.sniff')
+    def test_threat_event_uses_arp_protocol_source_for_attacker_ip(self, mock_sniff):
+        events = []
+        self.shield.set_event_callback(events.append)
+        self.shield._gateway_ip = '192.168.110.1'
+        self.shield._gateway_mac = '98:4a:6b:0f:4a:97'
+        self.shield._self_mac = '00:11:22:33:44:55'
+        packet = (
+            Ether(src='de:ad:be:ef:00:01')
+            / ARP(
+                op=2,
+                hwsrc='aa:bb:cc:dd:ee:ff',
+                psrc='192.168.110.1',
+                pdst='192.168.110.99',
+            )
+        )
+
+        def process_once(**kwargs):
+            self.assertTrue(kwargs['lfilter'](packet))
+            kwargs['prn'](packet)
+            self.shield._sniffer_stop_event.set()
+
+        mock_sniff.side_effect = process_once
+
+        self.shield._threat_sniffer_loop()
+
+        self.assertEqual(len(events), 1)
+        threat = events[0]['data']
+        self.assertEqual(threat['attacker_ip'], '192.168.110.1')
+        self.assertEqual(threat['attacker_mac'], 'aa:bb:cc:dd:ee:ff')
 
     @patch('src.core.shield.get_current_gateway', return_value='')
     def test_set_mode(self, _mock_gateway):

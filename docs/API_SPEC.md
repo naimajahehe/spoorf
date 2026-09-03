@@ -116,12 +116,15 @@ Pada mode dev (`npm run dev` tanpa Electron), `SENTINEL_API_TOKEN` tidak diset â
 - **`POST /api/spoof/stop`**
   - **Body**: `{ "session_id": "192.168.1.116_1788160000" }`
   - **Response `200 OK`**: `{ "success": true, "message": "Session ... stopped" }`
+  - **Response idempoten `200 OK`** untuk sesi yang tidak ada atau sudah
+    dibersihkan: `{ "success": true, "already_stopped": true, "message": "Session ... already stopped" }`
   - **Semantik cleanup**: Sesi dihapus hanya setelah restorasi ARP berhasil.
     Bila restorasi gagal, endpoint mengembalikan error dan mempertahankan sesi
     nonaktif dengan ID yang sama agar panggilan `stop` berikutnya dapat
-    mengulangi restorasi. Sesi yang tidak pernah ada, atau yang sudah berhasil
-    dibersihkan, tetap menghasilkan `SessionNotFoundError`; endpoint ini bukan
-    operasi sukses generik untuk ID yang tidak dikenal.
+    mengulangi restorasi. `SessionNotFoundError` dari sesi yang tidak ada atau
+    sudah berhasil dibersihkan dinormalisasi oleh endpoint menjadi respons
+    sukses idempoten dengan `already_stopped: true`; kegagalan restorasi lain
+    tetap dikembalikan sebagai error.
 
 - **`POST /api/spoof/restore`**
   - **Body**: `{ "session_id": "192.168.1.116_1788160000" }` (model `SpoofStopRequest` â€” hanya `session_id`)

@@ -193,7 +193,7 @@ class SentinelShield:
             threat = {
                 "id": f"threat_{int(time.time()*1000)}",
                 "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "attacker_ip": getattr(pkt.getlayer(Ether), 'src', '') or arp.psrc,
+                "attacker_ip": arp.psrc,
                 "attacker_mac": attacker_mac,
                 "target_ip": target_ip,
                 "claimed_ip": arp.psrc,
