@@ -922,18 +922,28 @@ export function useWebSocket() {
 
     const clearGatewayDnsLogs = async () => {
         try {
-            await fetch(`${WS_URL}/api/gateway/logs`, { method: 'DELETE' });
+            // Kosongkan daftar lokal hanya bila server mengonfirmasi. Tanpa cek ini
+            // log tampak terhapus lalu muncul lagi saat refresh berikutnya.
+            const res = await fetch(`${WS_URL}/api/gateway/logs`, { method: 'DELETE' });
+            if (!res.ok) {
+                throw new Error(`Gagal menghapus log DNS gateway (HTTP ${res.status})`);
+            }
             setGatewayDnsLogs([]);
         } catch (err: any) {
+            setError(err.message);
             console.warn('Error clearing gateway DNS logs:', err);
         }
     };
 
     const clearL7Flows = async () => {
         try {
-            await fetch(`${WS_URL}/api/interceptor/flows`, { method: 'DELETE' });
+            const res = await fetch(`${WS_URL}/api/interceptor/flows`, { method: 'DELETE' });
+            if (!res.ok) {
+                throw new Error(`Gagal menghapus L7 flows (HTTP ${res.status})`);
+            }
             setL7Flows([]);
         } catch (err: any) {
+            setError(err.message);
             console.warn('Error clearing L7 flows:', err);
         }
     };

@@ -104,6 +104,17 @@ export class PythonBridge extends EventEmitter {
         console.warn(`⚠️ Python FastAPI microservice (:8001) tidak lagi terjangkau — beralih ke mode offline.`);
     }
 
+    /**
+     * Error offline standar untuk fast-fail. Pesannya sengaja identik dengan yang
+     * dilempar fetchWithTimeout agar respondError mengklasifikasikannya sebagai 503.
+     * Dipakai oleh operasi yang TIDAK punya bentuk fallback yang jujur — yaitu
+     * mutasi dan pengambilan artefak biner, di mana nilai kosong akan terbaca
+     * sebagai keberhasilan.
+     */
+    private offlineError(): Error {
+        return new Error(`Python microservice (:8001) tidak dapat dihubungi (Offline).`);
+    }
+
     private async checkHealth(): Promise<boolean> {
         try {
             const res = await this.fetchWithTimeout(`${this.baseUrl}/health`, {}, 1000);
@@ -592,14 +603,15 @@ export class PythonBridge extends EventEmitter {
     }
 
     async getCACertPem(): Promise<string> {
-        if (!this.ready) return '';
-        try {
-            const res = await this.fetchWithTimeout(`${this.baseUrl}/api/interceptor/ca/cert`, {}, 2000);
-            if (!res.ok) return '';
-            return await res.text();
-        } catch {
-            return '';
+        // Sertifikat tidak punya bentuk "kosong yang sah". Mengembalikan '' membuat
+        // route download mengirim spoorf-ca.crt 0-byte dengan HTTP 200, dan user
+        // mengimpor file rusak tanpa tahu engine sedang offline. Selalu sinyalkan gagal.
+        if (!this.ready) throw this.offlineError();
+        const res = await this.fetchWithTimeout(`${this.baseUrl}/api/interceptor/ca/cert`, {}, 2000);
+        if (!res.ok) {
+            throw new Error(`Gagal mengambil sertifikat CA dari Python engine (HTTP ${res.status}).`);
         }
+        return await res.text();
     }
 
     async getL7Flows(query?: { limit?: number; search?: string; scheme?: string; method?: string; is_blocked?: boolean }): Promise<any> {
@@ -621,10 +633,13 @@ export class PythonBridge extends EventEmitter {
     }
 
     async clearL7Flows(): Promise<void> {
-        if (!this.ready) return;
-        try {
-            await this.fetchWithTimeout(`${this.baseUrl}/api/interceptor/flows`, { method: 'DELETE' }, 2000);
-        } catch {}
+        // Operasi mutasi: menelan error di sini membuat route melaporkan
+        // { success: true } padahal buffer di sisi Python tidak tersentuh.
+        if (!this.ready) throw this.offlineError();
+        const res = await this.fetchWithTimeout(`${this.baseUrl}/api/interceptor/flows`, { method: 'DELETE' }, 2000);
+        if (!res.ok) {
+            throw new Error(`Gagal menghapus L7 flows di Python engine (HTTP ${res.status}).`);
+        }
     }
 
     async generateLeafCert(domain: string): Promise<any> {
@@ -913,11 +928,15 @@ export class PythonBridge extends EventEmitter {
                     version: 'N/A',
                     details: 'FastAPI Python Engine (:8001) tidak merespons atau belum aktif.'
                 },
+                // Node tidak punya cara memverifikasi Npcap tanpa probe Python, jadi
+                // fallback ini HARUS mengaku tidak tahu. Melaporkan 'error' + "install
+                // Npcap" mengarahkan user memperbaiki driver yang sebenarnya sehat,
+                // padahal yang mati adalah FastAPI di :8001.
                 npcap_driver: {
-                    status: 'error',
+                    status: 'warning',
                     installed: false,
                     service_running: false,
-                    details: 'Npcap Driver tidak ditemukan di Windows. Harap install Npcap dari npcap.com.'
+                    details: 'Pemeriksaan driver Npcap tertunda (Python Engine Offline).'
                 },
                 network_adapter: {
                     status: 'warning',
@@ -927,7 +946,7 @@ export class PythonBridge extends EventEmitter {
             },
             logs: [
                 '[ERROR] Gagal menghubungi Python FastAPI Engine di http://127.0.0.1:8001',
-                '[NPCAP] Npcap NDIS 6 Kernel Driver tidak terdeteksi'
+                '[NPCAP] Pemeriksaan driver Npcap dilewati — memerlukan Python Engine aktif'
             ]
         };
     }
