@@ -9,13 +9,22 @@ REAL_THREAD = threading.Thread
 
 
 class FakeWorker:
-    def __init__(self, *, stop_event=None, state_lock=None, prior_workers=None):
+    def __init__(
+        self,
+        *,
+        stop_event=None,
+        state_lock=None,
+        prior_workers=None,
+        stops_on_join=True,
+    ):
         self.stop_event = stop_event
         self.state_lock = state_lock
         self.prior_workers = prior_workers or []
+        self.stops_on_join = stops_on_join
         self.started = False
         self.joined = False
         self.join_timeout = None
+        self.join_timeouts = []
         self.stop_was_set_during_join = False
         self.lock_was_free_during_join = False
         self.started_after_prior_join = False
@@ -26,11 +35,12 @@ class FakeWorker:
 
     def join(self, timeout=None):
         self.join_timeout = timeout
+        self.join_timeouts.append(timeout)
         self.stop_was_set_during_join = self.stop_event.is_set()
         self.lock_was_free_during_join = self.state_lock.acquire(blocking=False)
         if self.lock_was_free_during_join:
             self.state_lock.release()
-        self.joined = True
+        self.joined = self.stops_on_join
 
     def is_alive(self):
         return self.started and not self.joined
@@ -126,6 +136,32 @@ class TestGamingEngine(unittest.TestCase):
         self.assertTrue(workers[0].stop_was_set_during_join)
         self.assertTrue(workers[0].lock_was_free_during_join)
         self.assertTrue(workers[1].started_after_prior_join)
+
+    def test_enable_fails_closed_when_prior_worker_survives_bounded_join(self):
+        prior_worker = FakeWorker(
+            stop_event=self.engine._stop_event,
+            state_lock=self.engine._lock,
+            stops_on_join=False,
+        )
+        prior_worker.started = True
+        self.engine._watchdog_thread = prior_worker
+        self.engine._is_enabled = True
+        self.engine._activated_at = time.time()
+
+        self.engine.toggle(False)
+
+        with patch('src.core.gaming.threading.Thread') as thread_factory, \
+             patch('src.core.gaming.subprocess.run') as os_operation:
+            with self.assertRaisesRegex(RuntimeError, "sebelumnya belum berhenti"):
+                self.engine.toggle(True)
+
+        self.assertEqual(prior_worker.join_timeouts, [2.0, 2.0])
+        self.assertTrue(prior_worker.is_alive())
+        self.assertTrue(self.engine._stop_event.is_set())
+        self.assertIs(self.engine._watchdog_thread, prior_worker)
+        self.assertFalse(self.engine.is_enabled())
+        thread_factory.assert_not_called()
+        os_operation.assert_not_called()
 
     def test_enable_and_disable_transitions_do_not_overlap(self):
         construction_entered = threading.Event()
