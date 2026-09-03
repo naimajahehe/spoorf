@@ -873,11 +873,7 @@ export class DeviceManager extends EventEmitter {
         }
 
         if (device.session_id) {
-            try {
-                await this.python.stopSpoof(device.session_id);
-            } catch (e) {
-                console.warn(`Warning stopping spoof on ${ip}:`, e);
-            }
+            await this.python.stopSpoof(device.session_id);
         }
 
         device.is_blocked = false;
@@ -918,11 +914,7 @@ export class DeviceManager extends EventEmitter {
 
         // If device is actively blocked or throttled, unblock first
         if (device.is_blocked || (device.session_id && !device.is_redirected)) {
-            try {
-                if (device.session_id) await this.python.stopSpoof(device.session_id);
-            } catch (e) {
-                console.warn('Notice stopping existing spoof before redirect:', e);
-            }
+            if (device.session_id) await this.python.stopSpoof(device.session_id);
             device.is_blocked = false;
             device.speed_limit = 100;
             device.session_id = undefined;
@@ -968,11 +960,7 @@ export class DeviceManager extends EventEmitter {
             throw new Error(`Device ${ip} not found`);
         }
 
-        try {
-            await this.python.stopRedirect(device.ip);
-        } catch (e) {
-            console.warn(`Notice stopping redirect on python:`, e);
-        }
+        await this.python.stopRedirect(device.ip);
 
         device.is_redirected = false;
         device.redirect_url = undefined;
@@ -995,22 +983,23 @@ export class DeviceManager extends EventEmitter {
         const existing = await this.db.getDeviceByMac(normMac);
         const profileId = existing?.profile_id;
 
-        const ipsToDelete: string[] = [];
+        const devicesToDelete: Array<[string, Device]> = [];
         for (const [ip, dev] of this.devices.entries()) {
             if (dev.mac.toLowerCase() === normMac || (profileId && dev.profile_id === profileId)) {
-                ipsToDelete.push(ip);
-                if (dev.session_id) {
-                    try {
-                        await this.python.stopSpoof(dev.session_id);
-                    } catch (e) {
-                        console.warn('Error stopping spoof before delete:', e);
-                    }
-                }
+                devicesToDelete.push([ip, dev]);
+            }
+        }
+
+        for (const [, dev] of devicesToDelete) {
+            if (dev.is_redirected) {
+                await this.python.stopRedirect(dev.ip);
+            } else if (dev.session_id) {
+                await this.python.stopSpoof(dev.session_id);
             }
         }
 
         await this.db.deleteDevice(mac);
-        for (const ip of ipsToDelete) {
+        for (const [ip] of devicesToDelete) {
             this.devices.delete(ip);
         }
 
@@ -1079,16 +1068,10 @@ export class DeviceManager extends EventEmitter {
             await this._verifyPreFlightLiveness(device, gateway.ip);
         }
 
-        device.is_online = true;
-
         if (cleanLimit === 100) {
             // Pulihkan kecepatan penuh (100%): stop spoof jika ada
             if (device.session_id) {
-                try {
-                    await this.python.stopSpoof(device.session_id);
-                } catch (e) {
-                    console.warn(`Error stopping spoof for full speed:`, e);
-                }
+                await this.python.stopSpoof(device.session_id);
             }
             device.is_blocked = false;
             device.session_id = undefined;
@@ -1141,6 +1124,7 @@ export class DeviceManager extends EventEmitter {
             await this.db.setDeviceOnlineStatus(device.mac, true);
         }
 
+        device.is_online = true;
         this.devices.set(ip, device);
         this.emit('deviceUpdated', device);
         this.emit('devicesUpdated', Array.from(this.devices.values()));
@@ -1449,56 +1433,58 @@ export class DeviceManager extends EventEmitter {
                 }
             } else {
                 // Pulihkan seluruh perangkat yang dikelola oleh Gaming Mode ke kondisi semula
-                this.gamingActive = false;
                 console.log(`🎮 [GAMING MODE NONAKTIF] Memulihkan ${this.gamingManaged.size} perangkat yang dikelola Gaming Mode...`);
-                for (const [macKey, meta] of Array.from(this.gamingManaged.entries())) {
+                const restorePlans = Array.from(this.gamingManaged.entries()).map(([macKey, meta]) => {
                     // Cari device berdasarkan MAC; mungkin sudah hilang dari daftar (disconnect).
                     let dev: Device | undefined;
                     for (const d of this.devices.values()) {
                         if (d.mac.toLowerCase() === macKey) { dev = d; break; }
                     }
-                    try {
-                        // Hentikan sesi BLACKHOLE gaming via sessionId TERSIMPAN — bekerja walau
-                        // objek device sudah hilang (mencegah sesi bocor).
-                        const sidToStop = meta.sessionId || dev?.session_id;
-                        if (sidToStop) {
-                            await this.python.stopSpoof(sidToStop);
-                        }
-                        // Pemulihan state hanya bila device masih ada.
-                        if (!dev) continue;
-                        dev.session_id = undefined;
+                    return { meta, dev };
+                });
 
-                        if (meta.hadSession) {
-                            // Perangkat memang di-spoof manual sebelum gaming -> pulihkan sesi manual
-                            // (self_mac) pada limit semula.
-                            const sid = await this.python.startSpoof(
-                                dev.ip,
-                                dev.mac,
-                                gateway.ip,
-                                gateway.mac,
-                                meta.priorLimit,
-                                dev.ipv6_link_local,
-                                gateway.ipv6_link_local
-                                // blackhole default false -> sesi normal
-                            );
-                            dev.session_id = sid;
-                            dev.speed_limit = meta.priorLimit;
-                            dev.is_blocked = (meta.priorLimit <= 0);
-                            await this.db.setDeviceBlocked(dev.mac, meta.priorLimit <= 0, sid).catch(() => {});
-                            await this.db.setDeviceSpeedLimit(dev.mac, meta.priorLimit).catch(() => {});
-                        } else {
-                            // Gaming yang membuat sesi -> biarkan penuh 100%.
-                            dev.speed_limit = 100;
-                            dev.is_blocked = false;
-                            await this.db.setDeviceBlocked(dev.mac, false, undefined).catch(() => {});
-                            await this.db.setDeviceSpeedLimit(dev.mac, 100).catch(() => {});
-                        }
-                        this.devices.set(dev.ip, dev);
-                        this.emit('deviceUpdated', dev);
-                    } catch (err: any) {
-                        console.warn(`Notice memulihkan perangkat ${macKey}:`, err.message);
+                // Finish every teardown before changing Node or SQLite state. If any stop
+                // fails, the operation remains retryable with all recovery metadata intact.
+                for (const { meta, dev } of restorePlans) {
+                    const sidToStop = meta.sessionId || dev?.session_id;
+                    if (sidToStop) {
+                        await this.python.stopSpoof(sidToStop);
                     }
                 }
+
+                for (const { meta, dev } of restorePlans) {
+                    if (!dev) continue;
+
+                    let restoredSessionId: string | undefined;
+                    if (meta.hadSession) {
+                        // Perangkat memang di-spoof manual sebelum gaming -> pulihkan sesi manual
+                        // (self_mac) pada limit semula.
+                        restoredSessionId = await this.python.startSpoof(
+                            dev.ip,
+                            dev.mac,
+                            gateway.ip,
+                            gateway.mac,
+                            meta.priorLimit,
+                            dev.ipv6_link_local,
+                            gateway.ipv6_link_local
+                            // blackhole default false -> sesi normal
+                        );
+                        await this.db.setDeviceBlocked(dev.mac, meta.priorLimit <= 0, restoredSessionId);
+                        await this.db.setDeviceSpeedLimit(dev.mac, meta.priorLimit);
+                    } else {
+                        // Gaming yang membuat sesi -> biarkan penuh 100%.
+                        await this.db.setDeviceBlocked(dev.mac, false, undefined);
+                        await this.db.setDeviceSpeedLimit(dev.mac, 100);
+                    }
+
+                    dev.session_id = restoredSessionId;
+                    dev.speed_limit = meta.hadSession ? meta.priorLimit : 100;
+                    dev.is_blocked = meta.hadSession && meta.priorLimit <= 0;
+                    this.devices.set(dev.ip, dev);
+                    this.emit('deviceUpdated', dev);
+                }
+
+                this.gamingActive = false;
                 this.gamingManaged.clear();
             }
 
@@ -1573,7 +1559,11 @@ export class DeviceManager extends EventEmitter {
         const gm = this.gamingManaged.get(macKey);
         if (!gm) return;
         if (gm.sessionId) {
-            try { await this.python.stopSpoof(gm.sessionId); } catch {}
+            try {
+                await this.python.stopSpoof(gm.sessionId);
+            } catch (error) {
+                console.warn(`Notice stopping Gaming Mode session ${gm.sessionId}:`, error);
+            }
         }
         this.gamingManaged.delete(macKey);
     }

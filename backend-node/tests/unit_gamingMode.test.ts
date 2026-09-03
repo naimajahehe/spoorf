@@ -36,6 +36,7 @@ function makeManager() {
     let seq = 0;
     const startCalls: any[] = [];
     const stopCalls: string[] = [];
+    const persistenceCalls: string[] = [];
     python.startSpoof = async (
         victimIp: string, _vmac: string, _gip: string, _gmac: string,
         speedLimit: number, _v6?: string, _g6?: string, blackhole?: boolean
@@ -50,12 +51,12 @@ function makeManager() {
     });
 
     const db: any = {
-        setDeviceBlocked: async () => {},
-        setDeviceSpeedLimit: async () => {},
+        setDeviceBlocked: async () => { persistenceCalls.push('setDeviceBlocked'); },
+        setDeviceSpeedLimit: async () => { persistenceCalls.push('setDeviceSpeedLimit'); },
     };
 
     const dm = new DeviceManager(python as any, db as any);
-    return { dm, python, db, startCalls, stopCalls };
+    return { dm, python, db, startCalls, stopCalls, persistenceCalls };
 }
 
 export async function runGamingModeTests() {
@@ -208,6 +209,55 @@ export async function runGamingModeTests() {
         await (dm as any)._reapplyGamingSweep(gw);
         assert.strictEqual(startCalls.length, before, 'sweep tidak boleh throttle saat gamingActive=false');
         console.log('  ✓ Race guard: sweep scan no-op saat gaming non-aktif (tak throttle setelah disable)');
+    }
+
+    // Test 8: Gaming OFF must reject and preserve Node state when a managed spoof cannot stop.
+    {
+        const { dm, python, persistenceCalls } = makeManager();
+        const gw = makeDevice({ ip: '192.168.1.1', mac: '00:00:00:00:00:01', is_gateway: true });
+        const target = makeDevice({
+            ip: '192.168.1.140',
+            mac: 'f0:0d:00:00:01:40',
+            speed_limit: 20,
+            session_id: 'gaming-session-fail'
+        });
+        const macKey = target.mac.toLowerCase();
+        (dm as any).devices.set(gw.ip, gw);
+        (dm as any).devices.set(target.ip, target);
+        (dm as any).gamingActive = true;
+        (dm as any).gamingMode = 'auto_airtime';
+        (dm as any).gamingTargetLimit = 20;
+        (dm as any).gamingManaged.set(macKey, {
+            priorLimit: 100,
+            hadSession: false,
+            sessionId: target.session_id
+        });
+
+        const before = { ...target, open_ports: [...target.open_ports], services: [...target.services] };
+        const emitted: string[] = [];
+        dm.on('deviceUpdated', () => emitted.push('deviceUpdated'));
+        dm.on('devicesUpdated', () => emitted.push('devicesUpdated'));
+        dm.on('gamingStatusChanged', () => emitted.push('gamingStatusChanged'));
+        python.stopSpoof = async () => { throw new Error('gaming teardown failed'); };
+
+        let rejection: Error | undefined;
+        try {
+            await dm.toggleGamingMode(false);
+        } catch (error: any) {
+            rejection = error;
+        }
+
+        assert.strictEqual(rejection?.message, 'gaming teardown failed', 'Gaming OFF harus mempropagasi kegagalan stopSpoof');
+        assert.deepStrictEqual(target, before, 'State perangkat harus tetap sama');
+        assert.strictEqual((dm as any).gamingActive, true, 'Gaming state harus tetap aktif');
+        assert.deepStrictEqual(
+            Array.from((dm as any).gamingManaged.entries()),
+            [[macKey, { priorLimit: 100, hadSession: false, sessionId: 'gaming-session-fail' }]],
+            'Metadata pemulihan harus dipertahankan untuk retry'
+        );
+        assert.deepStrictEqual(persistenceCalls, [], 'SQLite tidak boleh dimutasi');
+        assert.deepStrictEqual(emitted, [], 'Event sukses tidak boleh dipancarkan');
+        console.log('  ✓ Failure safety: Gaming OFF mempertahankan state saat teardown gagal');
     }
 
 }
