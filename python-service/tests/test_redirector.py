@@ -9,8 +9,7 @@ Menguji:
 """
 
 import unittest
-import urllib.request
-import time
+from io import BytesIO
 from unittest.mock import MagicMock, patch
 
 from src.core.redirector.dns_spoofer import DNSSpoofer
@@ -82,41 +81,26 @@ class TestRedirector(unittest.TestCase):
         self.assertFalse(DNSSpoofer.is_whitelisted("detik.com"))
 
     def test_captive_portal_http_responses(self):
-        """Uji apakah Portal Server mengembalikan HTTP 302 Found ke URL Instagram."""
-        test_port = 18088
+        """Uji handler HTTP 302 tanpa membuka server/socket sungguhan."""
         target_url = "https://www.instagram.com/sentinel_ops/"
-        server = CaptivePortalServer(port=test_port, redirect_url=target_url, instagram_username="sentinel_ops")
-        server.start()
-        time.sleep(0.3)
+        for path in ("/", "/generate_204", "/hotspot-detect.html"):
+            with self.subTest(path=path):
+                handler = PortalRequestHandler.__new__(PortalRequestHandler)
+                handler.path = path
+                handler.redirect_url = target_url
+                handler.instagram_username = "sentinel_ops"
+                handler.wfile = BytesIO()
+                handler.send_response = MagicMock()
+                handler.send_header = MagicMock()
+                handler.end_headers = MagicMock()
 
-        try:
-            # Custom HTTP redirect handler agar tidak otomatis mengikuti URL eksternal
-            class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
-                def http_error_302(self, req, fp, code, msg, headers):
-                    return fp
+                handler.do_GET()
 
-            opener = urllib.request.build_opener(NoRedirectHandler)
-
-            # 1. Test standard GET /
-            req = urllib.request.Request(f"http://127.0.0.1:{test_port}/")
-            with opener.open(req) as resp:
-                self.assertEqual(resp.status, 302)
-                self.assertEqual(resp.headers.get("Location"), target_url)
-
-            # 2. Test Android Captive Portal Probe /generate_204
-            req_probe = urllib.request.Request(f"http://127.0.0.1:{test_port}/generate_204")
-            with opener.open(req_probe) as resp:
-                self.assertEqual(resp.status, 302)
-                self.assertEqual(resp.headers.get("Location"), target_url)
-
-            # 3. Test iOS Captive Portal Probe /hotspot-detect.html
-            req_apple = urllib.request.Request(f"http://127.0.0.1:{test_port}/hotspot-detect.html")
-            with opener.open(req_apple) as resp:
-                self.assertEqual(resp.status, 302)
-                self.assertEqual(resp.headers.get("Location"), target_url)
-
-        finally:
-            server.stop()
+                handler.send_response.assert_called_once_with(302)
+                self.assertIn(
+                    unittest.mock.call("Location", target_url),
+                    handler.send_header.call_args_list,
+                )
 
     @patch("src.core.redirector.manager.get_network_info")
     def test_redirect_invariants_enforced(self, mock_net_info):
@@ -160,28 +144,192 @@ class TestRedirector(unittest.TestCase):
             )
         self.assertIn("RFC 1918", str(ctx.exception))
 
+    @patch("src.core.redirector.manager.DNSSpoofer")
+    @patch("src.core.redirector.manager.CaptivePortalServer")
+    @patch("src.core.redirector.manager.set_ip_forwarding")
+    @patch("src.core.redirector.manager.get_network_info")
+    def test_redirect_validates_all_inputs_before_stopping_existing_session(
+        self,
+        mock_net_info,
+        mock_set_forwarding,
+        mock_portal_class,
+        mock_dns_class,
+    ):
+        """Malformed victim/gateway inputs cannot disrupt an existing redirect."""
+        mock_net_info.return_value = {"ip": "192.168.1.10", "gateway": "192.168.1.1"}
+        mock_spoofer = MagicMock()
+        mock_spoofer._self_mac = "a8:3b:76:0c:dc:55"
+        manager = RedirectManager(mock_spoofer)
+        victim_ip = "192.168.1.55"
+        manager._sessions[victim_ip] = {"victim_ip": victim_ip}
+
+        invalid_inputs = (
+            {"victim_mac": "not-a-mac"},
+            {"gateway_ip": "8.8.8.8"},
+            {"gateway_mac": "not-a-mac"},
+        )
+        defaults = {
+            "victim_ip": victim_ip,
+            "victim_mac": "00:11:22:33:44:55",
+            "gateway_ip": "192.168.1.1",
+            "gateway_mac": "00:aa:bb:cc:dd:ee",
+            "redirect_url": "https://www.instagram.com/sentinel_ops/",
+        }
+
+        with patch.object(manager, "_stop_session_unlocked") as mock_stop_existing:
+            for invalid in invalid_inputs:
+                with self.subTest(invalid=invalid):
+                    args = {**defaults, **invalid}
+                    with self.assertRaises(SpoofError):
+                        manager.start_redirect(**args)
+
+        mock_stop_existing.assert_not_called()
+        mock_portal_class.assert_not_called()
+        mock_spoofer.start.assert_not_called()
+        mock_set_forwarding.assert_not_called()
+        mock_dns_class.assert_not_called()
+
+    @patch("src.core.redirector.manager.CaptivePortalServer")
+    @patch("src.core.redirector.manager.get_network_info")
+    def test_redirect_start_rolls_back_portal_when_spoofer_fails(
+        self,
+        mock_net_info,
+        mock_portal_class,
+    ):
+        """A newly started portal is stopped if ARP spoof startup fails."""
+        mock_net_info.return_value = {"ip": "192.168.1.10", "gateway": "192.168.1.1"}
+        mock_spoofer = MagicMock()
+        mock_spoofer._self_mac = "a8:3b:76:0c:dc:55"
+        mock_spoofer._interface = "test-interface"
+        mock_spoofer.start.side_effect = SpoofError("ARP start failed")
+        portal = mock_portal_class.return_value
+        portal._running = False
+        manager = RedirectManager(mock_spoofer)
+
+        with self.assertRaises(SpoofError):
+            manager.start_redirect(
+                victim_ip="192.168.1.55",
+                victim_mac="00:11:22:33:44:55",
+                gateway_ip="192.168.1.1",
+                gateway_mac="00:aa:bb:cc:dd:ee",
+                redirect_url="https://www.instagram.com/sentinel_ops/",
+            )
+
+        portal.stop.assert_called_once_with()
+        self.assertIsNone(manager.portal_server)
+        self.assertEqual(manager.get_sessions(), {})
+
+    @patch("src.core.redirector.manager.DNSSpoofer")
+    @patch("src.core.redirector.manager.CaptivePortalServer")
+    @patch("src.core.redirector.manager.set_ip_forwarding", return_value=False)
+    @patch("src.core.redirector.manager.get_network_info")
+    def test_redirect_start_rolls_back_when_forwarding_enable_fails(
+        self,
+        mock_net_info,
+        mock_set_forwarding,
+        mock_portal_class,
+        mock_dns_class,
+    ):
+        """A failed forwarding enable unwinds ARP and portal before raising."""
+        mock_net_info.return_value = {"ip": "192.168.1.10", "gateway": "192.168.1.1"}
+        mock_spoofer = MagicMock()
+        mock_spoofer._self_mac = "a8:3b:76:0c:dc:55"
+        mock_spoofer._interface = "test-interface"
+        mock_spoofer._win_interface_name = "test-interface"
+        mock_spoofer.start.return_value = "arp-1"
+        portal = mock_portal_class.return_value
+        portal._running = False
+        manager = RedirectManager(mock_spoofer)
+
+        with self.assertRaises(SpoofError):
+            manager.start_redirect(
+                victim_ip="192.168.1.55",
+                victim_mac="00:11:22:33:44:55",
+                gateway_ip="192.168.1.1",
+                gateway_mac="00:aa:bb:cc:dd:ee",
+                redirect_url="https://www.instagram.com/sentinel_ops/",
+            )
+
+        mock_set_forwarding.assert_called_once_with(True, "test-interface")
+        mock_spoofer.stop.assert_called_once_with("arp-1")
+        portal.stop.assert_called_once_with()
+        mock_dns_class.assert_not_called()
+        self.assertIsNone(manager.portal_server)
+        self.assertEqual(manager.get_sessions(), {})
+
+    @patch("src.core.redirector.manager.DNSSpoofer")
+    @patch("src.core.redirector.manager.CaptivePortalServer")
+    @patch("src.core.redirector.manager.set_ip_forwarding")
+    @patch("src.core.redirector.manager.get_network_info")
+    def test_redirect_start_rolls_back_resources_in_reverse_order(
+        self,
+        mock_net_info,
+        mock_set_forwarding,
+        mock_portal_class,
+        mock_dns_class,
+    ):
+        """DNS startup failure unwinds DNS, ARP/forwarding, then portal."""
+        events = []
+        mock_net_info.return_value = {"ip": "192.168.1.10", "gateway": "192.168.1.1"}
+        mock_spoofer = MagicMock()
+        mock_spoofer._self_mac = "a8:3b:76:0c:dc:55"
+        mock_spoofer._interface = "test-interface"
+        mock_spoofer._win_interface_name = "test-interface"
+        mock_spoofer.start.side_effect = lambda **_: events.append("spoofer.start") or "arp-1"
+        mock_spoofer.stop.side_effect = lambda *_: events.append("spoofer.stop")
+        portal = mock_portal_class.return_value
+        portal._running = False
+        portal.start.side_effect = lambda: events.append("portal.start")
+        portal.stop.side_effect = lambda: events.append("portal.stop")
+        mock_set_forwarding.side_effect = lambda *_: events.append("forwarding.enable") or True
+        dns = mock_dns_class.return_value
+        dns.start.side_effect = lambda: (
+            events.append("dns.start"),
+            (_ for _ in ()).throw(RuntimeError("DNS start failed")),
+        )[-1]
+        dns.stop.side_effect = lambda: events.append("dns.stop")
+        manager = RedirectManager(mock_spoofer)
+
+        with self.assertRaises(RuntimeError):
+            manager.start_redirect(
+                victim_ip="192.168.1.55",
+                victim_mac="00:11:22:33:44:55",
+                gateway_ip="192.168.1.1",
+                gateway_mac="00:aa:bb:cc:dd:ee",
+                redirect_url="https://www.instagram.com/sentinel_ops/",
+            )
+
+        self.assertEqual(
+            events,
+            [
+                "portal.start",
+                "spoofer.start",
+                "forwarding.enable",
+                "dns.start",
+                "dns.stop",
+                "spoofer.stop",
+                "portal.stop",
+            ],
+        )
+        self.assertIsNone(manager.portal_server)
+        self.assertEqual(manager.get_sessions(), {})
+
     def test_portal_server_handle_error_resilience(self):
         """Uji apakah ThreadingHTTPServer.handle_error menangani ConnectionResetError tanpa NameError."""
         from src.core.redirector.portal_server import ThreadingHTTPServer, PortalRequestHandler
-        import sys
 
-        server = ThreadingHTTPServer(("127.0.0.1", 0), PortalRequestHandler)
+        server = ThreadingHTTPServer.__new__(ThreadingHTTPServer)
+        # 1. Simulate ConnectionResetError in handle_error
         try:
-            # 1. Simulate ConnectionResetError in handle_error
-            try:
-                raise ConnectionResetError("Client dropped connection abruptly")
-            except ConnectionResetError:
-                # Should cleanly return without throwing NameError
-                server.handle_error(None, ("127.0.0.1", 12345))
+            raise ConnectionResetError("Client dropped connection abruptly")
+        except ConnectionResetError:
+            server.handle_error(None, ("127.0.0.1", 12345))
 
-            # 2. Simulate BrokenPipeError in handle_error
-            try:
-                raise BrokenPipeError("Broken pipe")
-            except BrokenPipeError:
-                # Should cleanly return without throwing NameError
-                server.handle_error(None, ("127.0.0.1", 12345))
-        finally:
-            server.server_close()
+        # 2. Simulate BrokenPipeError in handle_error
+        try:
+            raise BrokenPipeError("Broken pipe")
+        except BrokenPipeError:
+            server.handle_error(None, ("127.0.0.1", 12345))
 
 if __name__ == "__main__":
     unittest.main()

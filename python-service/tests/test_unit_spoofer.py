@@ -4,7 +4,7 @@ Covers: Happy Path, Negative Tests, and Edge Cases (Clamping, Non-blocking, Limi
 """
 
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from src.core.spoofer import ARPSpoofer
 from src.exceptions.custom import SpoofError, SessionNotFoundError
 
@@ -20,10 +20,28 @@ class TestCoreSpoofer(unittest.TestCase):
         )
         self.mock_gw = gw_patcher.start()
         self.mock_net = net_patcher.start()
+        forwarding_patcher = patch('src.core.spoofer.set_ip_forwarding')
+        forwarding_state_patcher = patch(
+            'src.core.spoofer.is_forwarding_enabled',
+            return_value=False
+        )
+        subprocess_patcher = patch('src.core.spoofer.subprocess.run')
+        interface_patcher = patch.object(ARPSpoofer, 'refresh_interface')
+        self.mock_forwarding = forwarding_patcher.start()
+        self.mock_forwarding_state = forwarding_state_patcher.start()
+        self.mock_subprocess = subprocess_patcher.start()
+        interface_patcher.start()
         self.addCleanup(gw_patcher.stop)
         self.addCleanup(net_patcher.stop)
+        self.addCleanup(forwarding_patcher.stop)
+        self.addCleanup(forwarding_state_patcher.stop)
+        self.addCleanup(subprocess_patcher.stop)
+        self.addCleanup(interface_patcher.stop)
 
         self.spoofer = ARPSpoofer()
+        self.spoofer._interface = "test-interface"
+        self.spoofer._win_interface_name = "test-interface"
+        self.spoofer._self_mac = "aa:bb:cc:dd:ee:ff"
 
     def tearDown(self):
         with patch('src.core.spoofer.sendp'):
@@ -158,6 +176,69 @@ class TestCoreSpoofer(unittest.TestCase):
         """Negative: Stopping an unknown session ID must raise SessionNotFoundError."""
         with self.assertRaises(SessionNotFoundError):
             self.spoofer.stop("nonexistent_session_12345")
+
+    @patch('src.core.spoofer.time.sleep')
+    @patch('src.core.spoofer.sendp')
+    def test_stop_retains_session_when_restore_fails(self, mock_sendp, mock_sleep):
+        """A failed ARP restore remains inactive and can be retried successfully."""
+        session_id = "retryable-session"
+        stop_event = MagicMock()
+        worker = MagicMock()
+        worker.is_alive.return_value = False
+        self.spoofer._sessions[session_id] = {
+            'victim_ip': '192.168.1.55',
+            'victim_mac': '00:11:22:33:44:55',
+            'gateway_ip': '192.168.1.1',
+            'gateway_mac': '00:aa:bb:cc:dd:ee',
+            'speed_limit': 0,
+            'is_redirect': False,
+            'active': True,
+            'started_at': 1.0,
+            'packets_sent': 0,
+        }
+        self.spoofer._stop_events[session_id] = stop_event
+        self.spoofer._threads[session_id] = worker
+        self.spoofer._running = True
+
+        worker.join.side_effect = lambda timeout=None: self.assertFalse(
+            self.spoofer._lock.locked(),
+            "worker join must happen outside ARPSpoofer._lock",
+        )
+
+        def fail_restore(*args, **kwargs):
+            self.assertFalse(
+                self.spoofer._lock.locked(),
+                "packet restoration must happen outside ARPSpoofer._lock",
+            )
+            raise RuntimeError("send failed")
+
+        mock_sendp.side_effect = fail_restore
+        self.mock_forwarding.side_effect = lambda *args, **kwargs: self.assertFalse(
+            self.spoofer._lock.locked(),
+            "forwarding changes must happen outside ARPSpoofer._lock",
+        )
+
+        with self.assertRaises(SpoofError):
+            self.spoofer.stop(session_id)
+
+        retained = self.spoofer.get_all_sessions()[session_id]
+        self.assertFalse(retained['active'])
+        self.assertTrue(retained['restore_failed'])
+        self.assertFalse(self.spoofer.is_running)
+        stop_event.set.assert_called_once_with()
+        worker.join.assert_called_once()
+
+        mock_sendp.side_effect = lambda *args, **kwargs: self.assertFalse(
+            self.spoofer._lock.locked(),
+            "packet restoration retry must happen outside ARPSpoofer._lock",
+        )
+        mock_sleep.side_effect = lambda *_: self.assertFalse(
+            self.spoofer._lock.locked(),
+            "restore delay must happen outside ARPSpoofer._lock",
+        )
+
+        self.assertTrue(self.spoofer.stop(session_id))
+        self.assertNotIn(session_id, self.spoofer.get_all_sessions())
 
     def test_set_limit_nonexistent_session_negative(self):
         """Negative: Setting limit for unknown session must return False."""
