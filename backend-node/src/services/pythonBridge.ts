@@ -614,8 +614,26 @@ export class PythonBridge extends EventEmitter {
         return await res.text();
     }
 
+    /**
+     * Cerminan GET /api/interceptor/flows di Python (server.py -> flow_manager.get_stats()).
+     * Fallback lama memakai { total, active_connections } yang tidak pernah ada di
+     * kontrak, sekaligus menghilangkan `stats` yang justru dibaca konsumen.
+     */
+    private static readonly L7_FLOWS_OFFLINE = {
+        success: false,
+        stats: {
+            total_flows: 0,
+            blocked_flows: 0,
+            https_flows: 0,
+            http_flows: 0,
+            dns_flows: 0
+        },
+        flows: [] as any[]
+    };
+
     async getL7Flows(query?: { limit?: number; search?: string; scheme?: string; method?: string; is_blocked?: boolean }): Promise<any> {
-        if (!this.ready) return { total: 0, flows: [], active_connections: 0 };
+        const offline = PythonBridge.L7_FLOWS_OFFLINE;
+        if (!this.ready) return { ...offline };
         try {
             const params = new URLSearchParams();
             if (query?.limit) params.set('limit', String(query.limit));
@@ -625,10 +643,10 @@ export class PythonBridge extends EventEmitter {
             if (query?.is_blocked !== undefined) params.set('is_blocked', String(query.is_blocked));
 
             const res = await this.fetchWithTimeout(`${this.baseUrl}/api/interceptor/flows?${params.toString()}`, {}, 2000);
-            if (!res.ok) return { total: 0, flows: [], active_connections: 0 };
+            if (!res.ok) return { ...offline };
             return await res.json();
         } catch {
-            return { total: 0, flows: [], active_connections: 0 };
+            return { ...offline };
         }
     }
 
@@ -653,17 +671,29 @@ export class PythonBridge extends EventEmitter {
     }
 
     // ===== BETTERCAP SECURITY SUITE BRIDGE METHODS =====
+    /**
+     * Bentuk fallback WAJIB sama dengan GET /api/bettercap/status di Python
+     * (server.py) dan dengan interface BettercapStatus di kedua sisi TypeScript.
+     * Bentuk yang menyimpang membuat field bertipe `number` menjadi undefined saat
+     * runtime tanpa satu pun error dari compiler.
+     */
+    private static readonly BETTERCAP_STATUS_OFFLINE = {
+        success: false,
+        dns_rules_count: 0,
+        sniffed_credentials_count: 0,
+        active_gateway_sessions: 0
+    };
+
     async getBettercapStatus(): Promise<any> {
-        if (!this.ready) {
-            return { is_running: false, is_enabled: false, dns_spoof_active: false, sniffer_active: false, active_sessions: 0 };
-        }
+        const offline = PythonBridge.BETTERCAP_STATUS_OFFLINE;
+        if (!this.ready) return { ...offline };
         try {
             const res = await this.fetchWithTimeout(`${this.baseUrl}/api/bettercap/status`, {}, 2000);
-            if (!res.ok) return { is_running: false, is_enabled: false, dns_spoof_active: false, sniffer_active: false, active_sessions: 0 };
+            if (!res.ok) return { ...offline };
             const data: any = await res.json();
             return data;
         } catch {
-            return { is_running: false, is_enabled: false, dns_spoof_active: false, sniffer_active: false, active_sessions: 0 };
+            return { ...offline };
         }
     }
 
@@ -802,15 +832,29 @@ export class PythonBridge extends EventEmitter {
         }
     }
 
+    /** Cerminan shield_engine.get_status() di python-service/src/core/shield.py. */
+    private static readonly SHIELD_STATUS_OFFLINE = {
+        is_enabled: false,
+        mode: 'host_lock',
+        auto_retaliate: false,
+        gateway_ip: '',
+        gateway_mac: '',
+        win_alias: null as string | null,
+        locked_at: null as number | null,
+        threats_count: 0,
+        latest_threat: null as any
+    };
+
     async getShieldStatus(): Promise<any> {
-        if (!this.ready) return { is_enabled: false, mode: 'host_lock', gateway_ip: '', gateway_mac: '', threats_count: 0 };
+        const offline = PythonBridge.SHIELD_STATUS_OFFLINE;
+        if (!this.ready) return { ...offline };
         try {
             const res = await this.fetchWithTimeout(`${this.baseUrl}/api/shield/status`, {}, 2000);
-            if (!res.ok) throw new Error('Failed to get shield status');
+            if (!res.ok) return { ...offline };
             const data: any = await res.json();
-            return data.data;
-        } catch (e) {
-            return { is_enabled: false, mode: 'host_lock', gateway_ip: '', gateway_mac: '', threats_count: 0 };
+            return data.data ?? { ...offline };
+        } catch {
+            return { ...offline };
         }
     }
 
@@ -873,15 +917,28 @@ export class PythonBridge extends EventEmitter {
     }
 
 
+    /** Cerminan gaming_engine._get_status_unlocked() di python-service/src/core/gaming.py. */
+    private static readonly GAMING_STATUS_OFFLINE = {
+        is_enabled: false,
+        mode: 'auto_airtime',
+        target_ping_ms: 0,
+        ping_ms: 0,
+        jitter_ms: 0,
+        packet_loss_pct: 0,
+        uptime_seconds: 0,
+        timestamp: 0
+    };
+
     async getGamingStatus(): Promise<any> {
-        if (!this.ready) return { is_enabled: false, mode: 'auto_airtime', ping_ms: 0, jitter_ms: 0, packet_loss_pct: 0, uptime_seconds: 0 };
+        const offline = PythonBridge.GAMING_STATUS_OFFLINE;
+        if (!this.ready) return { ...offline };
         try {
             const res = await this.fetchWithTimeout(`${this.baseUrl}/api/gaming/status`, {}, 2000);
-            if (!res.ok) return { is_enabled: false, mode: 'auto_airtime', ping_ms: 0, jitter_ms: 0, packet_loss_pct: 0, uptime_seconds: 0 };
+            if (!res.ok) return { ...offline };
             const data: any = await res.json();
-            return data.data || { is_enabled: false, mode: 'auto_airtime', ping_ms: 0, jitter_ms: 0 };
+            return data.data ?? { ...offline };
         } catch {
-            return { is_enabled: false, mode: 'auto_airtime', ping_ms: 0, jitter_ms: 0, packet_loss_pct: 0, uptime_seconds: 0 };
+            return { ...offline };
         }
     }
 
