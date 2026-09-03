@@ -38,18 +38,38 @@ function makeManager() {
     const stopCalls: string[] = [];
     const callOrder: string[] = [];
     const persistenceCalls: string[] = [];
+    const networkCalls: string[] = [];
     python.startSpoof = async (
         victimIp: string, _vmac: string, _gip: string, _gmac: string,
         speedLimit: number, _v6?: string, _g6?: string, blackhole?: boolean
     ) => {
+        networkCalls.push('startSpoof');
         startCalls.push({ victimIp, speedLimit, blackhole });
         return `sess-${victimIp}-${++seq}`;
     };
     python.stopSpoof = async (sid: string) => {
+        networkCalls.push('stopSpoof');
         stopCalls.push(sid);
         callOrder.push(`stop:${sid}`);
     };
+    python.setSpoofLimit = async () => { networkCalls.push('setSpoofLimit'); };
+    python.pulseLiveness = async () => {
+        networkCalls.push('pulseLiveness');
+        return {};
+    };
+    python.startRedirect = async () => {
+        networkCalls.push('startRedirect');
+        return { arp_session_id: 'redirect-session' };
+    };
+    python.stopRedirect = async () => { networkCalls.push('stopRedirect'); };
+    python.startTransparentGateway = async () => {
+        networkCalls.push('startTransparentGateway');
+        return {};
+    };
+    python.stopTransparentGateway = async () => { networkCalls.push('stopTransparentGateway'); };
+    python.getTransparentGatewayStatus = async () => ({});
     python.toggleGamingMode = async (enabled: boolean, mode: string, targetPingMs: number) => {
+        networkCalls.push(`toggleGamingMode:${enabled}`);
         callOrder.push(`gaming:${enabled}`);
         return {
             is_enabled: enabled, mode, target_ping_ms: targetPingMs,
@@ -63,7 +83,7 @@ function makeManager() {
     };
 
     const dm = new DeviceManager(python as any, db as any);
-    return { dm, python, db, startCalls, stopCalls, callOrder, persistenceCalls };
+    return { dm, python, db, startCalls, stopCalls, callOrder, persistenceCalls, networkCalls };
 }
 
 export async function runGamingModeTests() {
@@ -618,6 +638,96 @@ export async function runGamingModeTests() {
         assert.strictEqual(target.speed_limit, 30);
         assert.deepStrictEqual(emitted, ['deviceUpdated', 'devicesUpdated', 'gamingStatusChanged']);
         console.log('  ✓ Recovery safety: second DB failure resumes only unfinished persistence');
+    }
+
+    // Test 14: while a persistence-failed Gaming disable is pending, every
+    // conflicting mutation is rejected before touching Python, SQLite, or local state.
+    {
+        const { dm, db, networkCalls } = makeManager();
+        const gateway = makeDevice({ ip: '192.168.1.1', mac: '00:00:00:00:00:01', is_gateway: true });
+        const managed = makeDevice({
+            ip: '192.168.1.147',
+            mac: 'f0:0d:00:00:01:47',
+            profile_id: 'family-profile',
+            speed_limit: 20,
+            session_id: 'gaming-session-pending'
+        });
+        const profilePeer = makeDevice({
+            ip: '192.168.1.148',
+            mac: 'f0:0d:00:00:01:48',
+            profile_id: 'family-profile',
+            speed_limit: 100
+        });
+        const managedMac = managed.mac.toLowerCase();
+        (dm as any).devices.set(gateway.ip, gateway);
+        (dm as any).devices.set(managed.ip, managed);
+        (dm as any).devices.set(profilePeer.ip, profilePeer);
+        (dm as any).gamingActive = true;
+        (dm as any).gamingManaged.set(managedMac, {
+            priorLimit: 35,
+            hadSession: true,
+            sessionId: managed.session_id
+        });
+
+        const sqliteCalls: string[] = [];
+        let failPersistence = true;
+        db.setDeviceBlocked = async () => {
+            sqliteCalls.push('setDeviceBlocked');
+            if (failPersistence) throw new Error('controlled persistence failure');
+        };
+        db.setDeviceSpeedLimit = async () => { sqliteCalls.push('setDeviceSpeedLimit'); };
+        db.setDeviceOnlineStatus = async () => { sqliteCalls.push('setDeviceOnlineStatus'); };
+        db.getDeviceByMac = async () => {
+            sqliteCalls.push('getDeviceByMac');
+            return profilePeer;
+        };
+        db.deleteDevice = async () => { sqliteCalls.push('deleteDevice'); };
+
+        const emitted: string[] = [];
+        dm.on('deviceUpdated', () => emitted.push('deviceUpdated'));
+        dm.on('devicesUpdated', () => emitted.push('devicesUpdated'));
+        dm.on('gamingStatusChanged', () => emitted.push('gamingStatusChanged'));
+
+        await assert.rejects(
+            () => dm.toggleGamingMode(false),
+            /controlled persistence failure/
+        );
+        assert.ok((dm as any).pendingGamingDisable, 'persistence failure must retain a recovery plan');
+
+        const beforeManaged = { ...managed, open_ports: [...managed.open_ports], services: [...managed.services] };
+        const beforePeer = { ...profilePeer, open_ports: [...profilePeer.open_ports], services: [...profilePeer.services] };
+        const pythonCallCount = networkCalls.length;
+        const sqliteCallCount = sqliteCalls.length;
+        const recoveryPending = /Gaming disable recovery is pending for a managed device\. Retry disabling Gaming Mode before changing its network state\./;
+
+        await assert.rejects(() => dm.blockDevice(managed.ip, gateway.ip), recoveryPending);
+        await assert.rejects(() => dm.unblockDevice(managed.ip), recoveryPending);
+        await assert.rejects(() => dm.setSpeedLimit(managed.ip, 70), recoveryPending);
+        await assert.rejects(() => dm.redirectDevice(managed.ip, 'https://example.test'), recoveryPending);
+        await assert.rejects(() => dm.stopRedirectDevice(managed.ip), recoveryPending);
+        await assert.rejects(() => dm.startTransparentGateway(managed.ip), recoveryPending);
+        await assert.rejects(() => dm.stopTransparentGateway(managed.ip), recoveryPending);
+        await assert.rejects(
+            () => dm.deleteDevice(profilePeer.mac),
+            recoveryPending,
+            'deleting a profile peer must be blocked when that profile includes a managed device'
+        );
+
+        assert.strictEqual(networkCalls.length, pythonCallCount, 'rejected mutations must not call Python');
+        assert.strictEqual(sqliteCalls.length, sqliteCallCount, 'rejected mutations must not call SQLite');
+        assert.deepStrictEqual(managed, beforeManaged, 'managed device state must not change while recovery is pending');
+        assert.deepStrictEqual(profilePeer, beforePeer, 'profile peer state must not change while recovery is pending');
+        assert.deepStrictEqual(emitted, [], 'rejected mutations must not emit state events');
+
+        failPersistence = false;
+        await dm.toggleGamingMode(false);
+        assert.strictEqual((dm as any).pendingGamingDisable, null, 'successful retry must clear recovery state');
+
+        await dm.setSpeedLimit(managed.ip, 70);
+        assert.strictEqual(managed.speed_limit, 70, 'the same mutation must proceed after recovery succeeds');
+        assert.ok(networkCalls.length > pythonCallCount, 'post-recovery mutation must reach Python');
+        assert.ok(sqliteCalls.length > sqliteCallCount, 'post-recovery mutation must reach SQLite');
+        console.log('  ✓ Recovery isolation: pending Gaming disable blocks mutations until retry completes');
     }
 
 }

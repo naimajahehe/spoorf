@@ -824,6 +824,7 @@ export class DeviceManager extends EventEmitter {
         if (!device) {
             throw new Error(`Device ${ip} not found`);
         }
+        this._assertNoPendingGamingRecoveryConflict([device]);
 
         if (device.is_self) {
             throw new Error(`Cannot block operator host / This PC (${ip})`);
@@ -894,6 +895,7 @@ export class DeviceManager extends EventEmitter {
         if (!device) {
             throw new Error(`Device ${ip} not found`);
         }
+        this._assertNoPendingGamingRecoveryConflict([device]);
 
         if (device.session_id) {
             await this.python.stopSpoof(device.session_id);
@@ -926,6 +928,7 @@ export class DeviceManager extends EventEmitter {
         if (!device) {
             throw new Error(`Device ${ip} not found`);
         }
+        this._assertNoPendingGamingRecoveryConflict([device]);
 
         if (device.is_gateway || (gatewayIp && device.ip === gatewayIp)) {
             throw new Error(`Cannot redirect the gateway (${ip})`);
@@ -982,6 +985,7 @@ export class DeviceManager extends EventEmitter {
         if (!device) {
             throw new Error(`Device ${ip} not found`);
         }
+        this._assertNoPendingGamingRecoveryConflict([device]);
 
         await this.python.stopRedirect(device.ip);
 
@@ -1003,8 +1007,15 @@ export class DeviceManager extends EventEmitter {
 
     private async _deleteDeviceImpl(mac: string): Promise<void> {
         const normMac = mac.toLowerCase();
+        const requestedDevice = this._findDeviceByMac(normMac);
+        const requestedProfileId = requestedDevice?.profile_id;
+        const inMemoryTargets = requestedProfileId
+            ? Array.from(this.devices.values()).filter(device => device.profile_id === requestedProfileId)
+            : requestedDevice ? [requestedDevice] : [];
+        this._assertNoPendingGamingRecoveryConflict(inMemoryTargets);
+
         const existing = await this.db.getDeviceByMac(normMac);
-        const profileId = existing?.profile_id;
+        const profileId = requestedProfileId || existing?.profile_id;
 
         const devicesToDelete: Array<[string, Device]> = [];
         for (const [ip, dev] of this.devices.entries()) {
@@ -1067,6 +1078,7 @@ export class DeviceManager extends EventEmitter {
         if (!device) {
             throw new Error(`Device with IP ${ip} not found`);
         }
+        this._assertNoPendingGamingRecoveryConflict([device]);
 
         if (device.is_gateway || device.is_self) {
             throw new Error(`Perangkat infrastruktur (${device.is_gateway ? 'Gateway' : 'Perangkat Ini'}) dilindungi dan tidak dapat dibatasi kecepatannya.`);
@@ -1194,6 +1206,7 @@ export class DeviceManager extends EventEmitter {
         if (!device) {
             throw new Error(`Device with IP ${ip} not found`);
         }
+        this._assertNoPendingGamingRecoveryConflict([device]);
         if (device.is_gateway || device.is_self) {
             throw new Error(`Perangkat infrastruktur (${device.is_gateway ? 'Gateway' : 'Perangkat Ini'}) dilindungi dan tidak dapat dijadikan target Transparent Gateway.`);
         }
@@ -1220,6 +1233,10 @@ export class DeviceManager extends EventEmitter {
     }
 
     private async _stopTransparentGatewayImpl(ip: string): Promise<void> {
+        const device = this.devices.get(ip);
+        if (device) {
+            this._assertNoPendingGamingRecoveryConflict([device]);
+        }
         await this.python.stopTransparentGateway(ip);
         this.emit('gatewayStatusChanged', await this.getTransparentGatewayStatus());
     }
@@ -1581,6 +1598,21 @@ export class DeviceManager extends EventEmitter {
             if (device.mac.toLowerCase() === macKey) return device;
         }
         return undefined;
+    }
+
+    private _assertNoPendingGamingRecoveryConflict(devices: Iterable<Device>): void {
+        if (!this.pendingGamingDisable) return;
+
+        const pendingMacs = new Set(
+            this.pendingGamingDisable.restorePlans.map(plan => plan.macKey)
+        );
+        for (const device of devices) {
+            if (pendingMacs.has(device.mac.toLowerCase())) {
+                throw new Error(
+                    'Gaming disable recovery is pending for a managed device. Retry disabling Gaming Mode before changing its network state.'
+                );
+            }
+        }
     }
 
     /**
