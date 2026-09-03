@@ -1407,15 +1407,14 @@ export class DeviceManager extends EventEmitter {
 
     async toggleGamingMode(enabled: boolean, mode: string = 'auto_airtime', targetPingMs: number = 25.0): Promise<any> {
         return this.runExclusive(async () => {
-            const result = await this.python.toggleGamingMode(enabled, mode, targetPingMs);
-
-            const gateway = selectGateway(Array.from(this.devices.values()));
-            if (!gateway) {
-                this.emit('gamingStatusChanged', result);
-                return result;
-            }
-
             if (enabled) {
+                const result = await this.python.toggleGamingMode(true, mode, targetPingMs);
+                const gateway = selectGateway(Array.from(this.devices.values()));
+                if (!gateway) {
+                    this.emit('gamingStatusChanged', result);
+                    return result;
+                }
+
                 // Auto-Isolate / Auto-Throttle seluruh perangkat LAN yang sedang online (kecuali Gateway & This PC)
                 const targetLimit = mode === 'blackhole_priority' ? 0 : 20;
                 this.gamingActive = true;
@@ -1431,6 +1430,10 @@ export class DeviceManager extends EventEmitter {
                 for (const target of onlineTargets) {
                     await this._applyGamingToDevice(target, gateway);
                 }
+
+                this.emit('devicesUpdated', Array.from(this.devices.values()));
+                this.emit('gamingStatusChanged', result);
+                return result;
             } else {
                 // Pulihkan seluruh perangkat yang dikelola oleh Gaming Mode ke kondisi semula
                 console.log(`🎮 [GAMING MODE NONAKTIF] Memulihkan ${this.gamingManaged.size} perangkat yang dikelola Gaming Mode...`);
@@ -1442,6 +1445,10 @@ export class DeviceManager extends EventEmitter {
                     }
                     return { meta, dev };
                 });
+                const gateway = selectGateway(Array.from(this.devices.values()));
+                if (restorePlans.some(({ meta, dev }) => meta.hadSession && dev) && !gateway) {
+                    throw new Error('Gateway not found');
+                }
 
                 // Finish every teardown before changing Node or SQLite state. If any stop
                 // fails, the operation remains retryable with all recovery metadata intact.
@@ -1452,11 +1459,18 @@ export class DeviceManager extends EventEmitter {
                     }
                 }
 
+                // Python must remain enabled through teardown. If this fails, retry uses
+                // the idempotent stop contract and the retained recovery metadata.
+                const result = await this.python.toggleGamingMode(false, mode, targetPingMs);
+
                 for (const { meta, dev } of restorePlans) {
                     if (!dev) continue;
 
                     let restoredSessionId: string | undefined;
                     if (meta.hadSession) {
+                        if (!gateway) {
+                            throw new Error('Gateway not found');
+                        }
                         // Perangkat memang di-spoof manual sebelum gaming -> pulihkan sesi manual
                         // (self_mac) pada limit semula.
                         restoredSessionId = await this.python.startSpoof(
@@ -1486,11 +1500,10 @@ export class DeviceManager extends EventEmitter {
 
                 this.gamingActive = false;
                 this.gamingManaged.clear();
+                this.emit('devicesUpdated', Array.from(this.devices.values()));
+                this.emit('gamingStatusChanged', result);
+                return result;
             }
-
-            this.emit('devicesUpdated', Array.from(this.devices.values()));
-            this.emit('gamingStatusChanged', result);
-            return result;
         });
     }
 

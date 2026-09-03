@@ -36,6 +36,7 @@ function makeManager() {
     let seq = 0;
     const startCalls: any[] = [];
     const stopCalls: string[] = [];
+    const callOrder: string[] = [];
     const persistenceCalls: string[] = [];
     python.startSpoof = async (
         victimIp: string, _vmac: string, _gip: string, _gmac: string,
@@ -44,11 +45,17 @@ function makeManager() {
         startCalls.push({ victimIp, speedLimit, blackhole });
         return `sess-${victimIp}-${++seq}`;
     };
-    python.stopSpoof = async (sid: string) => { stopCalls.push(sid); };
-    python.toggleGamingMode = async (enabled: boolean, mode: string, targetPingMs: number) => ({
-        is_enabled: enabled, mode, target_ping_ms: targetPingMs,
-        ping_ms: 18, jitter_ms: 1, packet_loss_pct: 0, uptime_seconds: 0, timestamp: Date.now()
-    });
+    python.stopSpoof = async (sid: string) => {
+        stopCalls.push(sid);
+        callOrder.push(`stop:${sid}`);
+    };
+    python.toggleGamingMode = async (enabled: boolean, mode: string, targetPingMs: number) => {
+        callOrder.push(`gaming:${enabled}`);
+        return {
+            is_enabled: enabled, mode, target_ping_ms: targetPingMs,
+            ping_ms: 18, jitter_ms: 1, packet_loss_pct: 0, uptime_seconds: 0, timestamp: Date.now()
+        };
+    };
 
     const db: any = {
         setDeviceBlocked: async () => { persistenceCalls.push('setDeviceBlocked'); },
@@ -56,7 +63,7 @@ function makeManager() {
     };
 
     const dm = new DeviceManager(python as any, db as any);
-    return { dm, python, db, startCalls, stopCalls, persistenceCalls };
+    return { dm, python, db, startCalls, stopCalls, callOrder, persistenceCalls };
 }
 
 export async function runGamingModeTests() {
@@ -213,7 +220,7 @@ export async function runGamingModeTests() {
 
     // Test 8: Gaming OFF must reject and preserve Node state when a managed spoof cannot stop.
     {
-        const { dm, python, persistenceCalls } = makeManager();
+        const { dm, python, callOrder, persistenceCalls } = makeManager();
         const gw = makeDevice({ ip: '192.168.1.1', mac: '00:00:00:00:00:01', is_gateway: true });
         const target = makeDevice({
             ip: '192.168.1.140',
@@ -238,7 +245,10 @@ export async function runGamingModeTests() {
         dm.on('deviceUpdated', () => emitted.push('deviceUpdated'));
         dm.on('devicesUpdated', () => emitted.push('devicesUpdated'));
         dm.on('gamingStatusChanged', () => emitted.push('gamingStatusChanged'));
-        python.stopSpoof = async () => { throw new Error('gaming teardown failed'); };
+        python.stopSpoof = async (sid: string) => {
+            callOrder.push(`stop:${sid}`);
+            throw new Error('gaming teardown failed');
+        };
 
         let rejection: Error | undefined;
         try {
@@ -257,7 +267,137 @@ export async function runGamingModeTests() {
         );
         assert.deepStrictEqual(persistenceCalls, [], 'SQLite tidak boleh dimutasi');
         assert.deepStrictEqual(emitted, [], 'Event sukses tidak boleh dipancarkan');
+        assert.deepStrictEqual(
+            callOrder,
+            ['stop:gaming-session-fail'],
+            'Python Gaming OFF tidak boleh dipanggil sebelum semua teardown berhasil'
+        );
         console.log('  ✓ Failure safety: Gaming OFF mempertahankan state saat teardown gagal');
+    }
+
+    // Test 9: A partially completed disable retries every managed session before
+    // turning Python Gaming Mode OFF, so idempotent stops can reconcile session A.
+    {
+        const { dm, python, callOrder, persistenceCalls } = makeManager();
+        const gateway = makeDevice({ ip: '192.168.1.1', mac: '00:00:00:00:00:01', is_gateway: true });
+        const first = makeDevice({
+            ip: '192.168.1.141',
+            mac: 'f0:0d:00:00:01:41',
+            speed_limit: 20,
+            session_id: 'gaming-session-a'
+        });
+        const second = makeDevice({
+            ip: '192.168.1.142',
+            mac: 'f0:0d:00:00:01:42',
+            speed_limit: 20,
+            session_id: 'gaming-session-b'
+        });
+        (dm as any).devices.set(gateway.ip, gateway);
+        (dm as any).devices.set(first.ip, first);
+        (dm as any).devices.set(second.ip, second);
+        (dm as any).gamingActive = true;
+        (dm as any).gamingMode = 'auto_airtime';
+        (dm as any).gamingTargetLimit = 20;
+        (dm as any).gamingManaged.set(first.mac.toLowerCase(), {
+            priorLimit: 100, hadSession: false, sessionId: first.session_id
+        });
+        (dm as any).gamingManaged.set(second.mac.toLowerCase(), {
+            priorLimit: 100, hadSession: false, sessionId: second.session_id
+        });
+
+        let secondStopAttempts = 0;
+        python.stopSpoof = async (sid: string) => {
+            callOrder.push(`stop:${sid}`);
+            if (sid === 'gaming-session-b' && secondStopAttempts++ === 0) {
+                throw new Error('session B restore failed');
+            }
+        };
+
+        await assert.rejects(
+            () => dm.toggleGamingMode(false),
+            /session B restore failed/
+        );
+        assert.strictEqual((dm as any).gamingActive, true, 'Node harus tetap aktif setelah partial teardown');
+        assert.strictEqual((dm as any).gamingManaged.size, 2, 'Metadata retry tidak boleh dibuang');
+        assert.deepStrictEqual(persistenceCalls, [], 'SQLite tidak boleh berubah sebelum semua stop berhasil');
+        assert.deepStrictEqual(
+            callOrder,
+            ['stop:gaming-session-a', 'stop:gaming-session-b'],
+            'Python Gaming OFF tidak boleh menyusul partial teardown'
+        );
+
+        await dm.toggleGamingMode(false);
+
+        assert.deepStrictEqual(
+            callOrder,
+            [
+                'stop:gaming-session-a',
+                'stop:gaming-session-b',
+                'stop:gaming-session-a',
+                'stop:gaming-session-b',
+                'gaming:false'
+            ],
+            'Retry harus merekonsiliasi A yang sudah berhenti, lalu menghentikan B sebelum Gaming OFF'
+        );
+        assert.strictEqual((dm as any).gamingActive, false, 'Node hanya nonaktif setelah Python OFF berhasil');
+        assert.strictEqual((dm as any).gamingManaged.size, 0, 'Metadata retry dibersihkan setelah commit');
+        assert.strictEqual(first.speed_limit, 100, 'Perangkat A dipulihkan setelah commit');
+        assert.strictEqual(second.speed_limit, 100, 'Perangkat B dipulihkan setelah commit');
+        assert.deepStrictEqual(
+            persistenceCalls,
+            ['setDeviceBlocked', 'setDeviceSpeedLimit', 'setDeviceBlocked', 'setDeviceSpeedLimit'],
+            'SQLite hanya berubah setelah teardown dan Python OFF berhasil'
+        );
+        console.log('  ✓ Retry safety: partial teardown direkonsiliasi sebelum Gaming OFF dan commit lokal');
+    }
+
+    // Test 10: a final Python OFF failure preserves Node recovery metadata despite
+    // all managed stops having already completed.
+    {
+        const { dm, python, callOrder, persistenceCalls } = makeManager();
+        const gateway = makeDevice({ ip: '192.168.1.1', mac: '00:00:00:00:00:01', is_gateway: true });
+        const target = makeDevice({
+            ip: '192.168.1.143',
+            mac: 'f0:0d:00:00:01:43',
+            speed_limit: 20,
+            session_id: 'gaming-session-off-fail'
+        });
+        const macKey = target.mac.toLowerCase();
+        (dm as any).devices.set(gateway.ip, gateway);
+        (dm as any).devices.set(target.ip, target);
+        (dm as any).gamingActive = true;
+        (dm as any).gamingManaged.set(macKey, {
+            priorLimit: 100, hadSession: false, sessionId: target.session_id
+        });
+
+        let pythonGamingEnabled = true;
+        python.toggleGamingMode = async (enabled: boolean) => {
+            callOrder.push(`gaming:${enabled}`);
+            if (!enabled) throw new Error('Python Gaming OFF failed');
+            pythonGamingEnabled = true;
+            return { is_enabled: true };
+        };
+
+        await assert.rejects(
+            () => dm.toggleGamingMode(false),
+            /Python Gaming OFF failed/
+        );
+
+        assert.deepStrictEqual(
+            callOrder,
+            ['stop:gaming-session-off-fail', 'gaming:false'],
+            'Python OFF harus dipanggil hanya setelah seluruh session stop'
+        );
+        assert.strictEqual(pythonGamingEnabled, true, 'Python tetap dianggap aktif saat perintah OFF gagal');
+        assert.strictEqual((dm as any).gamingActive, true, 'Node tetap aktif saat Python OFF gagal');
+        assert.deepStrictEqual(
+            Array.from((dm as any).gamingManaged.entries()),
+            [[macKey, { priorLimit: 100, hadSession: false, sessionId: 'gaming-session-off-fail' }]],
+            'Metadata pemulihan tetap tersedia untuk retry OFF'
+        );
+        assert.strictEqual(target.speed_limit, 20, 'State perangkat tidak boleh di-commit sebelum Python OFF sukses');
+        assert.deepStrictEqual(persistenceCalls, [], 'SQLite tidak boleh diubah bila Python OFF gagal');
+        console.log('  ✓ Failure safety: Python OFF failure mempertahankan recovery metadata dan state Node');
     }
 
 }

@@ -6,6 +6,7 @@ Covers: Happy Path, Negative Tests, and Edge Cases
 import unittest
 from unittest.mock import patch
 from fastapi import HTTPException
+from src.exceptions.custom import SpoofError
 from src.server import (
     health_check,
     get_wifi_status,
@@ -120,11 +121,22 @@ class TestServerAPI(unittest.TestCase):
         self.assertEqual(ctx.exception.status_code, 400)
 
     # ===== 4. Negative Tests =====
-    def test_stop_spoof_nonexistent_negative(self):
-        """Negative: Stopping non-existent session ID must raise HTTPException 500."""
+    def test_stop_spoof_nonexistent_is_successfully_idempotent(self):
+        """Boundary: an absent session is a successful, explicitly marked stop."""
         req_stop = SpoofStopRequest(session_id="invalid_session_id_999")
+        response = stop_spoof(req_stop)
+
+        self.assertTrue(response.get('success'))
+        self.assertTrue(response.get('already_stopped'))
+
+    @patch('src.server.spoofer.stop', side_effect=SpoofError('restore packets failed'))
+    def test_stop_spoof_restore_failure_remains_an_http_error(self, _mock_stop):
+        """Boundary: retained restore-failed sessions must not be reported as stopped."""
+        req_stop = SpoofStopRequest(session_id="restore_failed_session")
+
         with self.assertRaises(HTTPException) as ctx:
             stop_spoof(req_stop)
+
         self.assertEqual(ctx.exception.status_code, 500)
 
     def test_update_limit_nonexistent_negative(self):

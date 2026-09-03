@@ -23,6 +23,7 @@ from pydantic import BaseModel
 
 from .core.scanner import NetworkScanner
 from .core.spoofer import ARPSpoofer
+from .exceptions.custom import SessionNotFoundError
 from .core.telemetry import NetworkTelemetrySampler
 from .core.redirector import RedirectManager, TransparentGatewayManager
 from .core.discovery import dhcp_cache, send_multicast_wakeup, pulse_batch, pulse_host, LivenessWatchdogDaemon
@@ -632,6 +633,12 @@ def stop_spoof(req: SpoofStopRequest):
             "success": True,
             "message": f"Session {req.session_id} stopped"
         }
+    except SessionNotFoundError:
+        return {
+            "success": True,
+            "already_stopped": True,
+            "message": f"Session {req.session_id} already stopped"
+        }
     except Exception as e:
         logger.error(f"Error stopping spoof: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -1052,5 +1059,4 @@ async def toggle_gaming_mode(req: GamingToggleRequest):
         "success": True,
         "data": status
     }
-
 
