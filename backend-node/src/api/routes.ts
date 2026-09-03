@@ -1,17 +1,20 @@
 import { Router, Request, Response } from 'express';
 import { DeviceManager } from '../services/deviceManager';
 import { LicenseManager, FeatureLimitError, FeatureLockedError } from '../services/licenseManager';
+import { isBridgeUnavailable } from '../services/pythonBridge';
 
 /**
  * KEAMANAN (P2): Sanitasi respons error 500 — hindari kebocoran detail internal.
  * Detail lengkap selalu di-log ke server; klien hanya menerima pesan operasional
  * yang dikenal (validasi/feature-gate/"not found"), selain itu pesan generik.
  */
-const OPERATIONAL_ERROR_RE = /not found|required|already|invalid|cannot|gateway|tidak valid|tidak ditemukan|diperlukan|dilindungi|kebal|di luar jangkauan|terkunci|format|batas|upgrade/i;
+const OPERATIONAL_ERROR_RE = /not found|required|already|invalid|cannot|gateway|tidak valid|tidak ditemukan|tidak merespons|diperlukan|dilindungi|kebal|di luar jangkauan|terkunci|format|batas|upgrade/i;
 
 function respondError(res: Response, err: any, status = 500): void {
     const msg = typeof err?.message === 'string' ? err.message : '';
-    const isOffline = msg.includes('Offline') || msg.includes('timeout') || msg.includes('tidak dapat dihubungi') || err?.name === 'AbortError';
+    // Klasifikasi offline lewat tipe error yang stabil (BridgeUnavailableError.code),
+    // bukan substring pesan yang bisa berubah saat terjemahan diubah.
+    const isOffline = isBridgeUnavailable(err);
     if (isOffline) {
         // eslint-disable-next-line no-console
         console.warn(`⚠️ [API Warning] ${msg || 'Python Engine Offline / Aborted'}`);

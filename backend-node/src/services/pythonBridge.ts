@@ -5,6 +5,28 @@ import * as fs from 'fs';
 import WebSocket from 'ws';
 import { Device } from '../types';
 
+/**
+ * Error yang menandai Python engine tak terjangkau/timeout. `code` adalah sumber
+ * klasifikasi yang stabil untuk respondError — menggantikan pencocokan substring
+ * pesan (yang rapuh terhadap perubahan terjemahan). Pesan tetap berbahasa
+ * Indonesia untuk log & klien, tapi keputusan 503 tidak lagi bergantung padanya.
+ */
+export type BridgeErrorCode = 'BRIDGE_OFFLINE' | 'BRIDGE_TIMEOUT';
+
+export class BridgeUnavailableError extends Error {
+    readonly code: BridgeErrorCode;
+    constructor(code: BridgeErrorCode, message: string) {
+        super(message);
+        this.name = 'BridgeUnavailableError';
+        this.code = code;
+    }
+}
+
+/** True untuk error apa pun yang berasal dari Python bridge yang tak terjangkau. */
+export function isBridgeUnavailable(err: unknown): err is BridgeUnavailableError {
+    return err instanceof BridgeUnavailableError;
+}
+
 export class PythonBridge extends EventEmitter {
     private process: ChildProcess | null = null;
     private baseUrl: string;
@@ -72,11 +94,11 @@ export class PythonBridge extends EventEmitter {
             if (err.name === 'AbortError' || err.code === 'ABORT_ERR' || err.message?.includes('aborted')) {
                 // Timeout tidak membuktikan engine mati (bisa satu endpoint yang lambat),
                 // jadi status `ready` sengaja tidak diubah di sini.
-                throw new Error(`Koneksi ke Python microservice (${url}) timeout setelah ${timeoutMs}ms.`);
+                throw new BridgeUnavailableError('BRIDGE_TIMEOUT', `Koneksi ke Python microservice (${url}) timeout setelah ${timeoutMs}ms.`);
             }
             if (err.code === 'ECONNREFUSED' || err.message?.includes('fetch failed')) {
                 this.markUnreachable();
-                throw new Error(`Python microservice (:8001) tidak dapat dihubungi (Offline).`);
+                throw new BridgeUnavailableError('BRIDGE_OFFLINE', `Python microservice (:8001) tidak dapat dihubungi (Offline).`);
             }
             throw err;
         } finally {
@@ -105,14 +127,41 @@ export class PythonBridge extends EventEmitter {
     }
 
     /**
-     * Error offline standar untuk fast-fail. Pesannya sengaja identik dengan yang
-     * dilempar fetchWithTimeout agar respondError mengklasifikasikannya sebagai 503.
-     * Dipakai oleh operasi yang TIDAK punya bentuk fallback yang jujur — yaitu
-     * mutasi dan pengambilan artefak biner, di mana nilai kosong akan terbaca
-     * sebagai keberhasilan.
+     * Error offline standar untuk fast-fail, membawa code BRIDGE_OFFLINE agar
+     * respondError mengklasifikasikannya sebagai 503. Dipakai oleh operasi yang
+     * TIDAK punya bentuk fallback yang jujur — yaitu mutasi dan pengambilan
+     * artefak biner, di mana nilai kosong akan terbaca sebagai keberhasilan.
      */
-    private offlineError(): Error {
-        return new Error(`Python microservice (:8001) tidak dapat dihubungi (Offline).`);
+    private offlineError(): BridgeUnavailableError {
+        return new BridgeUnavailableError('BRIDGE_OFFLINE', `Python microservice (:8001) tidak dapat dihubungi (Offline).`);
+    }
+
+    /**
+     * Pola baca ber-fallback yang seragam untuk endpoint yang PUNYA bentuk offline
+     * yang jujur. Menggantikan triad `if (!ready) return X / try / if (!ok) return X
+     * / catch return X` yang dulu disalin di ~8 method, sehingga setiap endpoint baru
+     * tidak perlu menyalin ulang tiga titik-keluar yang mudah menyimpang.
+     * Fallback selalu dikembalikan sebagai salinan agar konstanta bersama tak termutasi.
+     * (Bukan untuk operasi mutasi/artefak — itu harus fast-fail via offlineError().)
+     */
+    private async fetchOrDefault<T>(
+        endpoint: string,
+        fallback: T,
+        transform: (json: any) => T = (j) => j as T,
+        init: RequestInit = {},
+        timeoutMs = 2000
+    ): Promise<T> {
+        const clone = (): T =>
+            Array.isArray(fallback) ? ([...(fallback as any)] as T)
+            : (fallback && typeof fallback === 'object' ? ({ ...(fallback as any) } as T) : fallback);
+        if (!this.ready) return clone();
+        try {
+            const res = await this.fetchWithTimeout(`${this.baseUrl}${endpoint}`, init, timeoutMs);
+            if (!res.ok) return clone();
+            return transform(await res.json());
+        } catch {
+            return clone();
+        }
     }
 
     private async checkHealth(): Promise<boolean> {
@@ -590,16 +639,10 @@ export class PythonBridge extends EventEmitter {
         }
     }
 
+    private static readonly CA_INFO_OFFLINE = { status: 'offline', common_name: 'Spoorf Root CA (Offline)', total_cached_leafs: 0 };
+
     async getCAInfo(): Promise<any> {
-        if (!this.ready) return { status: 'offline', common_name: 'Spoorf Root CA (Offline)', total_cached_leafs: 0 };
-        try {
-            const res = await this.fetchWithTimeout(`${this.baseUrl}/api/interceptor/ca`, {}, 2000);
-            if (!res.ok) return { status: 'offline', common_name: 'Spoorf Root CA', total_cached_leafs: 0 };
-            const data: any = await res.json();
-            return data.data;
-        } catch {
-            return { status: 'offline', common_name: 'Spoorf Root CA', total_cached_leafs: 0 };
-        }
+        return this.fetchOrDefault('/api/interceptor/ca', PythonBridge.CA_INFO_OFFLINE, (d) => d.data);
     }
 
     async getCACertPem(): Promise<string> {
@@ -632,22 +675,13 @@ export class PythonBridge extends EventEmitter {
     };
 
     async getL7Flows(query?: { limit?: number; search?: string; scheme?: string; method?: string; is_blocked?: boolean }): Promise<any> {
-        const offline = PythonBridge.L7_FLOWS_OFFLINE;
-        if (!this.ready) return { ...offline };
-        try {
-            const params = new URLSearchParams();
-            if (query?.limit) params.set('limit', String(query.limit));
-            if (query?.search) params.set('search', query.search);
-            if (query?.scheme) params.set('scheme', query.scheme);
-            if (query?.method) params.set('method', query.method);
-            if (query?.is_blocked !== undefined) params.set('is_blocked', String(query.is_blocked));
-
-            const res = await this.fetchWithTimeout(`${this.baseUrl}/api/interceptor/flows?${params.toString()}`, {}, 2000);
-            if (!res.ok) return { ...offline };
-            return await res.json();
-        } catch {
-            return { ...offline };
-        }
+        const params = new URLSearchParams();
+        if (query?.limit) params.set('limit', String(query.limit));
+        if (query?.search) params.set('search', query.search);
+        if (query?.scheme) params.set('scheme', query.scheme);
+        if (query?.method) params.set('method', query.method);
+        if (query?.is_blocked !== undefined) params.set('is_blocked', String(query.is_blocked));
+        return this.fetchOrDefault(`/api/interceptor/flows?${params.toString()}`, PythonBridge.L7_FLOWS_OFFLINE);
     }
 
     async clearL7Flows(): Promise<void> {
@@ -685,28 +719,11 @@ export class PythonBridge extends EventEmitter {
     };
 
     async getBettercapStatus(): Promise<any> {
-        const offline = PythonBridge.BETTERCAP_STATUS_OFFLINE;
-        if (!this.ready) return { ...offline };
-        try {
-            const res = await this.fetchWithTimeout(`${this.baseUrl}/api/bettercap/status`, {}, 2000);
-            if (!res.ok) return { ...offline };
-            const data: any = await res.json();
-            return data;
-        } catch {
-            return { ...offline };
-        }
+        return this.fetchOrDefault('/api/bettercap/status', PythonBridge.BETTERCAP_STATUS_OFFLINE);
     }
 
     async getBettercapDnsRules(): Promise<any[]> {
-        if (!this.ready) return [];
-        try {
-            const res = await this.fetchWithTimeout(`${this.baseUrl}/api/bettercap/dns/rules`, {}, 2000);
-            if (!res.ok) return [];
-            const data: any = await res.json();
-            return data.rules || [];
-        } catch {
-            return [];
-        }
+        return this.fetchOrDefault<any[]>('/api/bettercap/dns/rules', [], (d) => d.rules || []);
     }
 
     async addBettercapDnsRule(domain: string, target_ip: string, action: string = 'spoof', is_enabled: boolean = true): Promise<any> {
@@ -820,16 +837,10 @@ export class PythonBridge extends EventEmitter {
         }
     }
 
+    private static readonly STATUS_OFFLINE = { sessions: {}, interface: 'N/A', self_mac: '00:00:00:00:00:00', active_count: 0 };
+
     async getStatus(): Promise<any> {
-        if (!this.ready) return { sessions: {}, interface: 'N/A', self_mac: '00:00:00:00:00:00', active_count: 0 };
-        try {
-            const res = await this.fetchWithTimeout(`${this.baseUrl}/api/status`, {}, 2000);
-            if (!res.ok) return { sessions: {}, interface: 'N/A', self_mac: '00:00:00:00:00:00', active_count: 0 };
-            const data: any = await res.json();
-            return data.status;
-        } catch {
-            return { sessions: {}, interface: 'N/A', self_mac: '00:00:00:00:00:00', active_count: 0 };
-        }
+        return this.fetchOrDefault('/api/status', PythonBridge.STATUS_OFFLINE, (d) => d.status);
     }
 
     /** Cerminan shield_engine.get_status() di python-service/src/core/shield.py. */
@@ -846,16 +857,8 @@ export class PythonBridge extends EventEmitter {
     };
 
     async getShieldStatus(): Promise<any> {
-        const offline = PythonBridge.SHIELD_STATUS_OFFLINE;
-        if (!this.ready) return { ...offline };
-        try {
-            const res = await this.fetchWithTimeout(`${this.baseUrl}/api/shield/status`, {}, 2000);
-            if (!res.ok) return { ...offline };
-            const data: any = await res.json();
-            return data.data ?? { ...offline };
-        } catch {
-            return { ...offline };
-        }
+        return this.fetchOrDefault('/api/shield/status', PythonBridge.SHIELD_STATUS_OFFLINE,
+            (d) => d.data ?? { ...PythonBridge.SHIELD_STATUS_OFFLINE });
     }
 
     async toggleShield(enabled: boolean, mode: string = 'host_lock', autoRetaliate: boolean = false, lanTargets: any[] = []): Promise<any> {
@@ -895,15 +898,7 @@ export class PythonBridge extends EventEmitter {
     }
 
     async getShieldThreats(): Promise<any[]> {
-        if (!this.ready) return [];
-        try {
-            const res = await this.fetchWithTimeout(`${this.baseUrl}/api/shield/threats`, {}, 2000);
-            if (!res.ok) return [];
-            const data: any = await res.json();
-            return data.data || [];
-        } catch {
-            return [];
-        }
+        return this.fetchOrDefault<any[]>('/api/shield/threats', [], (d) => d.data || []);
     }
 
     async clearShieldThreats(): Promise<boolean> {
@@ -930,16 +925,8 @@ export class PythonBridge extends EventEmitter {
     };
 
     async getGamingStatus(): Promise<any> {
-        const offline = PythonBridge.GAMING_STATUS_OFFLINE;
-        if (!this.ready) return { ...offline };
-        try {
-            const res = await this.fetchWithTimeout(`${this.baseUrl}/api/gaming/status`, {}, 2000);
-            if (!res.ok) return { ...offline };
-            const data: any = await res.json();
-            return data.data ?? { ...offline };
-        } catch {
-            return { ...offline };
-        }
+        return this.fetchOrDefault('/api/gaming/status', PythonBridge.GAMING_STATUS_OFFLINE,
+            (d) => d.data ?? { ...PythonBridge.GAMING_STATUS_OFFLINE });
     }
 
     async toggleGamingMode(enabled: boolean, mode: string = 'auto_airtime', targetPingMs: number = 25.0): Promise<any> {
