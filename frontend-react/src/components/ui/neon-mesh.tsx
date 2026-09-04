@@ -44,11 +44,18 @@ export function NeonMesh({
     const [isDarkMode, setIsDarkMode] = useState<boolean>(true);
 
     useEffect(() => {
+        const updateTheme = () => {
+            const isLight = document.documentElement.classList.contains("light") || document.documentElement.getAttribute("data-theme") === "light";
+            setIsDarkMode(!isLight);
+        };
+        updateTheme();
+        window.addEventListener("sentinel-theme-changed", updateTheme);
         const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
-        setIsDarkMode(mediaQuery.matches);
-        const handler = (e: MediaQueryListEvent) => setIsDarkMode(e.matches);
-        mediaQuery.addEventListener("change", handler);
-        return () => mediaQuery.removeEventListener("change", handler);
+        mediaQuery.addEventListener("change", updateTheme);
+        return () => {
+            window.removeEventListener("sentinel-theme-changed", updateTheme);
+            mediaQuery.removeEventListener("change", updateTheme);
+        };
     }, []);
 
     useEffect(() => {
@@ -196,8 +203,8 @@ export function NeonMesh({
             const cosY = Math.cos(mouse.angleY);
             const sinY = Math.sin(mouse.angleY);
 
-            // Match exact background #090a0c
-            ctx.fillStyle = "#090a0c";
+            // Match background based on theme mode
+            ctx.fillStyle = isDarkMode ? "#090a0c" : "#f8fafc";
             ctx.fillRect(0, 0, width, height);
 
             // Verlet Integration Step with 3D Spatial Wave Dynamics
@@ -308,7 +315,7 @@ export function NeonMesh({
                     ? Math.min(0.16, Math.max(0.06, 0.08 * avgScale + 0.05))
                     : Math.min(0.065, Math.max(0.015, 0.035 * avgScale));
 
-                ctx.strokeStyle = `rgba(255, 255, 255, ${opacity})`;
+                ctx.strokeStyle = isDarkMode ? `rgba(255, 255, 255, ${opacity})` : `rgba(15, 23, 42, ${opacity * 1.5})`;
                 ctx.lineWidth = isHot ? 0.65 * avgScale : 0.38 * avgScale;
 
                 ctx.beginPath();
@@ -325,7 +332,7 @@ export function NeonMesh({
                 const dist = Math.sqrt(dx * dx + dy * dy);
 
                 if (dist < 60) {
-                    ctx.fillStyle = "rgba(255, 255, 255, 0.15)";
+                    ctx.fillStyle = isDarkMode ? "rgba(255, 255, 255, 0.15)" : "rgba(15, 23, 42, 0.2)";
                     ctx.beginPath();
                     ctx.arc(p.projX, p.projY, 1.0 * p.projScale, 0, Math.PI * 2);
                     ctx.fill();

@@ -45,6 +45,7 @@ export interface BouncyAccordionProps {
   collapsible?: boolean;
   className?: string;
   classNames?: BouncyAccordionClassNames;
+  variant?: "boxed" | "clean";
 }
 
 // Local springs keep the accordion's connected groups moving together while
@@ -111,6 +112,7 @@ function BouncyAccordionRow({
   triggerId,
   reduce,
   classNames,
+  variant = "boxed",
   onToggle,
 }: {
   item: BouncyAccordionItem;
@@ -119,6 +121,7 @@ function BouncyAccordionRow({
   triggerId: string;
   reduce: boolean | null;
   classNames?: BouncyAccordionClassNames;
+  variant?: "boxed" | "clean";
   onToggle: () => void;
 }) {
   const contentRef = useRef<HTMLDivElement>(null);
@@ -149,17 +152,25 @@ function BouncyAccordionRow({
       layout="position"
       initial={false}
       transition={reduce ? { duration: 0 } : ROW_TRANSITION}
-      className="mb-2.5 last:mb-0"
+      className={cn(
+        variant === "clean"
+          ? "mb-0 border-b border-white/[0.04] last:border-b-0"
+          : "mb-2.5 last:mb-0"
+      )}
     >
       <motion.div
         data-state={open ? "open" : "closed"}
         initial={false}
         transition={reduce ? { duration: 0 } : ROW_TRANSITION}
         className={cn(
-          "overflow-hidden rounded-xl border transition-colors",
-          open
-            ? "bg-white/[0.035] border-white/[0.12] shadow-lg shadow-black/40"
-            : "bg-white/[0.015] border-white/[0.06] hover:bg-white/[0.025] hover:border-white/[0.09]",
+          variant === "clean"
+            ? cn("transition-colors", open ? "bg-white/[0.018]" : "hover:bg-white/[0.012]")
+            : cn(
+                "overflow-hidden rounded-xl border transition-colors",
+                open
+                  ? "bg-white/[0.035] border-white/[0.12] shadow-lg shadow-black/40"
+                  : "bg-white/[0.015] border-white/[0.06] hover:bg-white/[0.025] hover:border-white/[0.09]"
+              ),
           item.disabled && "opacity-50",
           classNames?.item
         )}
@@ -172,7 +183,8 @@ function BouncyAccordionRow({
           aria-controls={contentId}
           onClick={onToggle}
           className={cn(
-            "flex min-h-[48px] w-full items-center gap-3 px-4 py-3 text-left outline-none transition-colors select-none",
+            "flex w-full items-center gap-3 text-left outline-none transition-colors select-none",
+            variant === "clean" ? "px-3.5 py-3 min-h-[46px]" : "min-h-[48px] px-4 py-3",
             "focus-visible:bg-white/[0.04]",
             "disabled:pointer-events-none",
             classNames?.trigger
@@ -255,7 +267,9 @@ function BouncyAccordionRow({
               y: open ? 0 : -6,
             }}
             transition={reduce ? { duration: 0 } : DESCRIPTION_TRANSITION}
-            className="px-4 pb-4 pt-1 border-t border-white/[0.04]"
+            className={cn(
+              variant === "clean" ? "px-3.5 pb-4 pt-1" : "px-4 pb-4 pt-1 border-t border-white/[0.04]"
+            )}
           >
             {item.content}
           </motion.div>
@@ -273,6 +287,7 @@ export function BouncyAccordion({
   collapsible = true,
   className,
   classNames,
+  variant = "boxed",
 }: BouncyAccordionProps) {
   const reduce = useReducedMotion();
   const baseId = useId();
@@ -311,6 +326,7 @@ export function BouncyAccordion({
             triggerId={triggerId}
             reduce={reduce}
             classNames={classNames}
+            variant={variant}
             onToggle={() => toggleItem(item.id)}
           />
         );

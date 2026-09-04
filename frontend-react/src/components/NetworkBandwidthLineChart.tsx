@@ -159,16 +159,16 @@ export const NetworkBandwidthLineChart: FC<NetworkBandwidthLineChartProps> = ({
     const lastUploadPt = uploadPoints[uploadPoints.length - 1];
 
     return (
-        <div className={cn("rounded-xl bg-white/[0.02] border border-white/[0.06] p-3 space-y-2.5", className)}>
+        <div className={cn("space-y-2.5", className)}>
             {/* Header: Title & Real-time Rate Chips with Lucide Icons */}
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between pb-1 border-b border-white/[0.04]">
                 <div className="flex items-center gap-1.5">
-                    <Activity size={13} className="text-zinc-400" />
+                    <Activity size={12} className="text-zinc-400" />
                     <span className="text-[11px] font-mono uppercase tracking-wider text-zinc-300 font-semibold">
                         Live Throughput
                     </span>
-                    <span className="px-1.5 py-0.2 rounded text-[9px] font-mono bg-white/[0.05] text-zinc-400 border border-white/[0.08]">
-                        10s Window
+                    <span className="text-[10px] font-mono text-zinc-500">
+                        (10s)
                     </span>
                 </div>
 
@@ -180,30 +180,24 @@ export const NetworkBandwidthLineChart: FC<NetworkBandwidthLineChartProps> = ({
                 )}
             </div>
 
-            {/* Top Stat Counters (Download & Upload Badges) */}
-            <div className="grid grid-cols-2 gap-2">
+            {/* Top Stat Counters (Clean, unboxed inline indicators) */}
+            <div className="flex items-center justify-between px-1 py-1 text-xs font-mono">
                 {/* Download Counter */}
-                <div className="flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-emerald-500/10 border border-emerald-500/20">
-                    <div className="flex items-center gap-1.5">
-                        <div className="size-5 rounded-md bg-emerald-500/20 flex items-center justify-center text-emerald-400">
-                            <ArrowDown size={12} strokeWidth={2.5} />
-                        </div>
-                        <span className="text-[10px] font-mono uppercase text-emerald-300/80">Down</span>
-                    </div>
-                    <span className="text-xs font-mono font-bold text-emerald-300">
+                <div className="flex items-center gap-2">
+                    <ArrowDown size={12} strokeWidth={2.5} className="text-emerald-400" />
+                    <span className="text-[10px] uppercase text-zinc-400">Down</span>
+                    <span className="font-bold text-emerald-300">
                         {currentDownload.toFixed(1)} <span className="text-[10px] font-normal text-emerald-400/80">Mbps</span>
                     </span>
                 </div>
 
+                <span className="text-zinc-700 font-light">|</span>
+
                 {/* Upload Counter */}
-                <div className="flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-cyan-500/10 border border-cyan-500/20">
-                    <div className="flex items-center gap-1.5">
-                        <div className="size-5 rounded-md bg-cyan-500/20 flex items-center justify-center text-cyan-400">
-                            <ArrowUp size={12} strokeWidth={2.5} />
-                        </div>
-                        <span className="text-[10px] font-mono uppercase text-cyan-300/80">Up</span>
-                    </div>
-                    <span className="text-xs font-mono font-bold text-cyan-300">
+                <div className="flex items-center gap-2">
+                    <ArrowUp size={12} strokeWidth={2.5} className="text-cyan-400" />
+                    <span className="text-[10px] uppercase text-zinc-400">Up</span>
+                    <span className="font-bold text-cyan-300">
                         {currentUpload.toFixed(1)} <span className="text-[10px] font-normal text-cyan-400/80">Mbps</span>
                     </span>
                 </div>

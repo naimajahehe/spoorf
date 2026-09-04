@@ -4,7 +4,6 @@ import {
     Menu,
     PanelLeft,
     Search,
-    Gamepad2,
     AlertTriangle,
     X,
     Wifi,
@@ -29,7 +28,9 @@ import {
     Trash2,
     Laptop,
     CheckCircle2,
-    BookOpen
+    BookOpen,
+    Sun,
+    Moon
 } from 'lucide-react';
 import { Select, SelectTrigger, SelectContent, SelectItem } from './components/motion/select';
 import { AnimatedSidebar, AnimatedSidebarProvider } from './components/AnimatedSidebar';
@@ -66,7 +67,8 @@ import { useNetwork } from './context/NetworkContext';
 import { Device, ApIsolationInfo } from './types';
 import { apiClient } from './api/client';
 import { sortDevices } from './lib/deviceSort';
-import { playChimeSound, requestNotificationPermission, sendDesktopNotification } from './lib/notifications';
+import { playChimeSound, requestNotificationPermission, sendDesktopNotification, isNotificationMuted, setNotificationMuted } from './lib/notifications';
+import { ThemeMode, getInitialTheme, applyTheme, toggleTheme } from './lib/theme';
 import { cn } from './lib/utils';
 import './App.css';
 
@@ -202,15 +204,47 @@ function App() {
     const [apIsolation, setApIsolation] = useState<ApIsolationInfo | null>(null);
     const [isWifiPopoverOpen, setIsWifiPopoverOpen] = useState<boolean>(false);
     const [isRefreshingApIsolation, setIsRefreshingApIsolation] = useState<boolean>(false);
-    const [isMuted, setIsMuted] = useState<boolean>(() => {
-        try {
-            return localStorage.getItem('sentinel_notifications_muted') === 'true';
-        } catch {
-            return false;
-        }
-    });
+    const [isMuted, setIsMuted] = useState<boolean>(() => isNotificationMuted());
     const deviceOnlineStatusRef = useRef<Map<string, boolean>>(new Map());
     const isInitialScanDoneRef = useRef<boolean>(false);
+
+    // Synchronize mute state across tabs/windows or custom events
+    useEffect(() => {
+        const handleMuteChange = (e: any) => {
+            if (e?.detail && typeof e.detail.muted === 'boolean') {
+                setIsMuted(e.detail.muted);
+            } else {
+                setIsMuted(isNotificationMuted());
+            }
+        };
+        window.addEventListener('sentinel-mute-changed', handleMuteChange);
+        window.addEventListener('storage', handleMuteChange);
+        return () => {
+            window.removeEventListener('sentinel-mute-changed', handleMuteChange);
+            window.removeEventListener('storage', handleMuteChange);
+        };
+    }, []);
+
+    // Theme Mode Management (Dark Mode / Day Mode)
+    const [theme, setTheme] = useState<ThemeMode>(() => getInitialTheme());
+
+    useEffect(() => {
+        applyTheme(theme);
+    }, [theme]);
+
+    useEffect(() => {
+        const handleThemeChange = (e: any) => {
+            if (e?.detail && (e.detail.theme === 'light' || e.detail.theme === 'dark')) {
+                setTheme(e.detail.theme);
+            }
+        };
+        window.addEventListener('sentinel-theme-changed', handleThemeChange);
+        return () => window.removeEventListener('sentinel-theme-changed', handleThemeChange);
+    }, []);
+
+    const handleToggleTheme = () => {
+        setTheme(prev => toggleTheme(prev));
+    };
 
     const fetchApIsolation = async () => {
         try {
@@ -238,10 +272,10 @@ function App() {
     const handleToggleMute = () => {
         setIsMuted(prev => {
             const next = !prev;
-            try {
-                localStorage.setItem('sentinel_notifications_muted', String(next));
-            } catch {
-                // ignore
+            setNotificationMuted(next);
+            if (next) {
+                // When muting: dismiss any active floating toasts immediately
+                setActiveToasts([]);
             }
             return next;
         });
@@ -359,11 +393,11 @@ function App() {
             },
             {
                 id: 'action-toggle-mute',
-                label: isMuted ? 'Aktifkan Suara Notifikasi (Unmute)' : 'Matikan Suara & Pop-up Notifikasi (Mute)',
+                label: isMuted ? 'Aktifkan Notifikasi (Unmute)' : 'Heningkan Notifikasi (Mute)',
                 group: 'Aksi Cepat',
                 icon: isMuted ? Bell : BellOff,
-                hint: isMuted ? 'Muted' : 'Sound On',
-                keywords: ['mute', 'unmute', 'suara', 'sound', 'notifikasi', 'silent'],
+                hint: isMuted ? 'Muted' : 'Aktif',
+                keywords: ['mute', 'unmute', 'suara', 'sound', 'notifikasi', 'silent', 'hening'],
                 onSelect: () => handleToggleMute()
             },
             {
@@ -374,6 +408,15 @@ function App() {
                 hint: 'Clear History',
                 keywords: ['clear', 'hapus', 'notifikasi', 'clean'],
                 onSelect: () => handleClearAllNotifications()
+            },
+            {
+                id: 'action-toggle-theme',
+                label: theme === 'dark' ? 'Ganti ke Mode Siang / Day Mode (White Mode)' : 'Ganti ke Mode Malam / Night Mode (Dark Mode)',
+                group: 'Aksi Cepat',
+                icon: theme === 'dark' ? Sun : Moon,
+                hint: theme === 'dark' ? 'Day Mode' : 'Night Mode',
+                keywords: ['theme', 'dark', 'light', 'white', 'day', 'night', 'mode', 'tema', 'siang', 'malam', 'terang', 'gelap'],
+                onSelect: () => handleToggleTheme()
             }
         ];
 
@@ -420,7 +463,7 @@ function App() {
         });
 
         return items;
-    }, [devices, isMuted, scan, toggleShield]);
+    }, [devices, isMuted, theme, scan, toggleShield]);
 
     const selectedInspectorMacRef = useRef<string | null>(null);
 
@@ -436,17 +479,21 @@ function App() {
         }
     }, [selectedInspectorIp, devices]);
 
+    const handleCloseInspector = () => {
+        selectedInspectorMacRef.current = null;
+        setSelectedInspectorIp(null);
+    };
+
     const inspectorDevice = useMemo(() => {
-        if (!selectedInspectorIp && !selectedInspectorMacRef.current) return null;
+        if (!selectedInspectorIp) return null;
         // 1. Try finding by IP
-        if (selectedInspectorIp) {
-            const dev = devices.find(d => d.ip === selectedInspectorIp);
-            if (dev) return dev;
-        }
-        // 2. If IP changed, resolve by MAC to keep inspector open seamlessly
+        const devByIp = devices.find(d => d.ip === selectedInspectorIp);
+        if (devByIp) return devByIp;
+
+        // 2. If IP changed while inspector is open, resolve by MAC to keep inspector open seamlessly
         if (selectedInspectorMacRef.current) {
-            const dev = devices.find(d => d.mac.toLowerCase() === selectedInspectorMacRef.current);
-            if (dev) return dev;
+            const devByMac = devices.find(d => d.mac.toLowerCase() === selectedInspectorMacRef.current);
+            if (devByMac) return devByMac;
         }
         return null;
     }, [devices, selectedInspectorIp]);
@@ -661,7 +708,7 @@ function App() {
         }
     }, [autoReblockedEvent]);
 
-    // Handle Disconnected Device Toast Notifications (Small, Pure Info, Close Button Only, Max 3 Capped)
+    // Handle Disconnected Device Toast Notifications (Suppressed if muted, recorded to history)
     useEffect(() => {
         if (disconnectedDeviceEvent) {
             const dev = disconnectedDeviceEvent;
@@ -669,19 +716,40 @@ function App() {
             if (dev.mac) {
                 deviceOnlineStatusRef.current.set(dev.mac.toLowerCase(), false);
             }
-            const newToast: ActiveToastItem = {
+
+            // Record to Notification Center History silently
+            const entry: NotificationItem = {
                 id: `disconn-${dev.mac || dev.ip}-${Date.now()}`,
-                type: 'disconnected',
+                category: 'device',
+                senderName: dev.alias || dev.hostname || dev.ip,
+                actionText: 'terputus dari jaringan',
+                targetName: dev.ip,
+                timestamp: new Date(),
+                timeAgo: 'Baru saja',
+                isRead: false,
+                bubbleText: `Perangkat ${dev.alias || dev.hostname || dev.ip} (${dev.mac || dev.ip}) tidak lagi aktif di Wi-Fi.`,
+                type: 'system',
                 device: dev,
-                timestamp: Date.now()
+                deviceIp: dev.ip
             };
-            setActiveToasts(prev => {
-                const filtered = prev.filter(d => (d.device ? (d.device.mac || d.device.ip).toLowerCase() !== devKey : true));
-                return [newToast, ...filtered].slice(0, 3);
-            });
+            setNotificationHistory(prev => [entry, ...prev]);
+
+            // Only show floating toast if not muted
+            if (!isMuted) {
+                const newToast: ActiveToastItem = {
+                    id: `disconn-${dev.mac || dev.ip}-${Date.now()}`,
+                    type: 'disconnected',
+                    device: dev,
+                    timestamp: Date.now()
+                };
+                setActiveToasts(prev => {
+                    const filtered = prev.filter(d => (d.device ? (d.device.mac || d.device.ip).toLowerCase() !== devKey : true));
+                    return [newToast, ...filtered].slice(0, 3);
+                });
+            }
             clearDisconnectedDeviceEvent();
         }
-    }, [disconnectedDeviceEvent, clearDisconnectedDeviceEvent]);
+    }, [disconnectedDeviceEvent, clearDisconnectedDeviceEvent, isMuted]);
 
     // Record Rogue DHCP event to notification history
     useEffect(() => {
@@ -746,8 +814,12 @@ function App() {
             if (e.key === '/' && document.activeElement !== searchInputRef.current && !['INPUT', 'TEXTAREA'].includes((document.activeElement as HTMLElement)?.tagName)) {
                 e.preventDefault();
                 searchInputRef.current?.focus();
-            } else if (e.key === 'Escape' && document.activeElement === searchInputRef.current) {
-                searchInputRef.current?.blur();
+            } else if (e.key === 'Escape') {
+                if (document.activeElement === searchInputRef.current) {
+                    searchInputRef.current?.blur();
+                } else {
+                    handleCloseInspector();
+                }
             }
         };
         window.addEventListener('keydown', handleKeyDown);
@@ -1100,53 +1172,39 @@ function App() {
                         </div>
 
                         <div className="flex items-center gap-2.5 relative">
-                                                        {/* 1-Click Gaming Mode Button & Live Ping Badge */}
-                            <button
-                                type="button"
-                                onClick={() => setActiveNav('gaming')}
-                                className={cn(
-                                    "flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold font-mono transition-all border outline-none cursor-pointer",
-                                    gamingStatus.is_enabled
-                                        ? "bg-cyan-500/20 text-cyan-300 border-cyan-500/40 shadow-md shadow-cyan-500/20"
-                                        : "bg-white/[0.04] text-zinc-400 border-white/[0.08] hover:text-white hover:bg-white/[0.08]"
-                                )}
-                                title="Buka Mode Gaming (Ultra-Low Latency & Anti-Jitter)"
-                            >
-                                <Gamepad2 size={13} className={cn("shrink-0", gamingStatus.is_enabled ? "text-cyan-400 animate-pulse" : "text-zinc-400")} />
-                                <span className="hidden sm:inline">Gaming</span>
-                                {gamingStatus.is_enabled && (
-                                    <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-cyan-400 text-black leading-none">
-                                        {gamingTelemetry.ping_ms ? `${gamingTelemetry.ping_ms.toFixed(0)}ms` : 'ON'}
-                                    </span>
-                                )}
-                            </button>
-
-                            {/* Wi-Fi Name + AP Isolation Button & Popover (Clean, Borderless Style) */}
+                            {/* Wi-Fi Name + AP Isolation Button & Popover */}
                             <div className="relative">
                                 <button
                                     type="button"
                                     onClick={() => setIsWifiPopoverOpen(prev => !prev)}
                                     className={cn(
-                                        "flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs font-mono transition-all outline-none cursor-pointer",
+                                        "flex items-center gap-2 px-2 py-1.5 rounded-lg text-xs font-mono transition-all outline-none cursor-pointer",
                                         isWifiPopoverOpen
-                                            ? "bg-white/[0.08] text-white"
-                                            : "text-zinc-300 hover:text-white hover:bg-white/[0.04]",
+                                            ? "bg-white/[0.08]"
+                                            : "hover:bg-white/[0.04]",
                                         isCheckingWifi && "opacity-60"
                                     )}
-                                    title="Klik untuk melihat Detail Jaringan & AP Isolation"
+                                    title={apIsolation?.is_isolated ? `Wi-Fi: ${wifiInfo.ssid || 'Terhubung'} (AP Isolation ${apIsolation.percentage}%)` : "Klik untuk melihat Detail Jaringan & AP Isolation"}
                                 >
                                     {wifiInfo.state === 'detecting' ? (
                                         <Radio size={13} className="text-amber-400 shrink-0 animate-pulse" />
                                     ) : wifiInfo.connected ? (
                                         wifiInfo.interface_type === 'ethernet' ? (
-                                            <Network size={13} className="text-cyan-400 shrink-0" />
+                                            <Network size={13} className={apIsolation?.is_isolated ? "text-amber-400 shrink-0" : "text-cyan-400 shrink-0"} />
                                         ) : (
-                                            <Wifi size={13} className={cn("text-emerald-400 shrink-0", isCheckingWifi && "animate-pulse")} />
+                                            <Wifi size={13} className={cn(
+                                                apIsolation?.is_isolated ? "text-amber-400" : "text-emerald-400",
+                                                "shrink-0",
+                                                isCheckingWifi && "animate-pulse"
+                                            )} />
                                         )
                                     ) : (
                                         <WifiOff size={13} className="text-zinc-500 shrink-0" />
                                     )}
-                                    <span className="truncate max-w-[140px] font-medium text-white">
+                                    <span className={cn(
+                                        "truncate max-w-[160px] font-medium transition-colors",
+                                        apIsolation?.is_isolated ? "text-amber-400 font-semibold" : "text-zinc-300 hover:text-white"
+                                    )}>
                                         {wifiInfo.state === 'detecting'
                                             ? (wifiInfo.ssid ? wifiInfo.ssid : 'Mendeteksi Jaringan…')
                                             : wifiInfo.connected
@@ -1154,7 +1212,7 @@ function App() {
                                                 : 'Tidak Ada Jaringan'}
                                     </span>
 
-                                    <ChevronDown size={12} className={cn("text-zinc-400 transition-transform duration-200 shrink-0", isWifiPopoverOpen && "rotate-180 text-white")} />
+                                    <ChevronDown size={12} className={cn("transition-transform duration-200 shrink-0", apIsolation?.is_isolated ? "text-amber-400/80" : "text-zinc-400", isWifiPopoverOpen && "rotate-180 text-white")} />
                                 </button>
 
                                 <WifiDetailsPopover
@@ -1187,12 +1245,17 @@ function App() {
                                         "relative size-8 rounded-full bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.08] flex items-center justify-center text-zinc-400 hover:text-white transition-all outline-none",
                                         isNotificationOpen && "bg-white/[0.1] text-white border-white/[0.2]"
                                     )}
-                                    title="Notifikasi Jaringan"
+                                    title={isMuted ? "Pusat Notifikasi (Muted - Suara & Pop-up Hening)" : "Pusat Notifikasi (Aktif)"}
                                     aria-label="Buka Notifikasi"
                                 >
-                                    {isMuted ? <BellOff size={14} className="text-amber-400" /> : <Bell size={14} />}
+                                    {isMuted ? <BellOff size={14} className="text-zinc-400" /> : <Bell size={14} />}
                                     {unreadCount > 0 && (
-                                        <span className="absolute -top-0.5 -right-0.5 size-4 rounded-full bg-emerald-500 text-[9px] font-bold text-black flex items-center justify-center shadow-md shadow-emerald-500/40">
+                                        <span className={cn(
+                                            "absolute -top-0.5 -right-0.5 size-4 rounded-full text-[9px] font-bold flex items-center justify-center shadow-md",
+                                            isMuted
+                                                ? "bg-zinc-700 text-zinc-300 border border-zinc-600 shadow-none"
+                                                : "bg-emerald-500 text-black shadow-emerald-500/40"
+                                        )}>
                                             {unreadCount > 9 ? '9+' : unreadCount}
                                         </span>
                                     )}
@@ -1210,6 +1273,21 @@ function App() {
                                     onInspectDevice={(ip) => setSelectedInspectorIp(ip)}
                                 />
                             </div>
+
+                            {/* Theme Toggle Button (Day Mode / Night Mode) */}
+                            <button
+                                type="button"
+                                onClick={handleToggleTheme}
+                                className="size-8 rounded-full bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.08] flex items-center justify-center text-zinc-400 hover:text-white transition-all outline-none cursor-pointer"
+                                title={theme === 'dark' ? "Beralih ke Day Mode (White Mode)" : "Beralih ke Dark Mode (Night Mode)"}
+                                aria-label="Ganti Tema Tampilan"
+                            >
+                                {theme === 'dark' ? (
+                                    <Sun size={14} className="text-zinc-400 hover:text-amber-400 transition-colors" />
+                                ) : (
+                                    <Moon size={14} className="text-zinc-400 hover:text-cyan-400 transition-colors" />
+                                )}
+                            </button>
                         </div>
                     </header>
 
@@ -1385,29 +1463,6 @@ function App() {
                                 >
                                     <X size={16} />
                                 </button>
-                            </motion.div>
-                        )}
-                    </AnimatePresence>
-
-                    {/* AP Isolation Alert Banner */}
-                    <AnimatePresence>
-                        {apIsolation && apIsolation.is_isolated && (
-                            <motion.div
-                                initial={{ opacity: 0, y: -10 }}
-                                animate={{ opacity: 1, y: 0 }}
-                                exit={{ opacity: 0, y: -10 }}
-                                className="flex items-center justify-between p-3.5 mb-6 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-300 text-xs"
-                            >
-                                <div className="flex items-center gap-2.5">
-                                    <ShieldAlert size={16} className="text-amber-400 shrink-0" />
-                                    <div>
-                                        <span className="font-semibold text-amber-200">AP Isolation Terdeteksi ({apIsolation.percentage}%): </span>
-                                        <span className="text-amber-300/90">{apIsolation.reason}</span>
-                                    </div>
-                                </div>
-                                <span className="px-2 py-0.5 rounded text-[10px] font-mono uppercase tracking-wider bg-amber-500/20 text-amber-300 border border-amber-500/30">
-                                    {apIsolation.status}
-                                </span>
                             </motion.div>
                         )}
                     </AnimatePresence>
@@ -1785,7 +1840,7 @@ function App() {
                                     >
                                         <SecurityTelemetrySidebar
                                             device={inspectorDevice}
-                                            onClose={() => setSelectedInspectorIp(null)}
+                                            onClose={handleCloseInspector}
                                             onSetSpeedLimit={setSpeedLimit}
                                             onUpdateAlias={updateAlias}
                                             onToggleInternet={handleToggleInternet}
@@ -1861,8 +1916,8 @@ function App() {
                 onQuickReauth={quickReauth}
             />
 
-            {/* In-App Floating Toast Notification Stack (Bottom-Right, Max 3 Non-Overlapping Toasts with Smooth Spring Slide-Up) */}
-            {!isNotificationOpen && activeToasts.length > 0 && (
+            {/* In-App Floating Toast Notification Stack (Bottom-Right, Suppressed if Muted or Popover Open) */}
+            {!isMuted && !isNotificationOpen && activeToasts.length > 0 && (
                 <div className="fixed bottom-6 right-6 z-50 flex flex-col-reverse gap-2 w-[320px] pointer-events-none">
                     {activeToasts.length > 1 && (
                         <div className="flex justify-end pointer-events-auto mb-0.5">

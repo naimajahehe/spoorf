@@ -26,10 +26,39 @@ function getAudioContext(): AudioContext | null {
     }
 }
 
+export const NOTIFICATION_MUTED_KEY = 'sentinel_notifications_muted';
+
+/**
+ * Check whether notifications are muted via localStorage.
+ */
+export function isNotificationMuted(): boolean {
+    if (typeof window === 'undefined') return false;
+    try {
+        return localStorage.getItem(NOTIFICATION_MUTED_KEY) === 'true';
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * Set notification mute state in localStorage and notify listeners.
+ */
+export function setNotificationMuted(muted: boolean): void {
+    if (typeof window === 'undefined') return;
+    try {
+        localStorage.setItem(NOTIFICATION_MUTED_KEY, String(muted));
+        window.dispatchEvent(new CustomEvent('sentinel-mute-changed', { detail: { muted } }));
+    } catch {
+        // ignore
+    }
+}
+
 /**
  * Play a pleasant 2-tone melodic chime (440Hz -> 880Hz) using Web Audio synthesis.
+ * Automatically suppressed if notifications are muted.
  */
 export function playChimeSound(): void {
+    if (isNotificationMuted()) return;
     try {
         const ctx = getAudioContext();
         if (!ctx) return;
@@ -101,6 +130,10 @@ export function sendDesktopNotification(
         onClick?: () => void;
     }
 ): Notification | null {
+    if (isNotificationMuted()) {
+        return null;
+    }
+
     if (typeof window === 'undefined' || !('Notification' in window)) {
         return null;
     }

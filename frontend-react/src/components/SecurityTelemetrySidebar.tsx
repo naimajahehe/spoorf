@@ -12,7 +12,6 @@ import {
     Lock,
     Sliders,
     X,
-    Cpu,
     Radio,
     Info,
     Fingerprint,
@@ -22,7 +21,6 @@ import {
 import { Device, AuthStatusResponse } from '../types';
 import { TelemetryData } from '../hooks/useWebSocket';
 import { RangeSlider } from './motion/RangeSlider';
-import { PullToRefresh } from './motion/pull-to-refresh';
 import { BouncyAccordion, BouncyAccordionItem } from './motion/bouncy-accordion';
 import { NetworkBandwidthLineChart, BandwidthDataPoint } from './NetworkBandwidthLineChart';
 import { InstagramIcon } from './icons/InstagramIcon';
@@ -236,12 +234,12 @@ export const SecurityTelemetrySidebar: FC<SecurityTelemetrySidebarProps> = ({
             icon: <Info size={16} className="text-zinc-400" />,
             trailingIcon: authStatus?.license?.tier === 'free' ? <Lock size={13} className="text-zinc-500" /> : undefined,
             content: authStatus?.license?.tier === 'free' ? (
-                <div className="p-3.5 rounded-xl bg-white/[0.02] border border-white/[0.06] text-center space-y-2.5 my-1">
-                    <div className="size-8 mx-auto rounded-lg bg-white/[0.04] border border-white/[0.08] flex items-center justify-center text-zinc-400">
-                        <Lock size={15} />
+                <div className="py-3 px-1 text-center space-y-2">
+                    <div className="size-7 mx-auto rounded-full bg-white/[0.04] flex items-center justify-center text-zinc-400">
+                        <Lock size={13} />
                     </div>
-                    <div className="space-y-1">
-                        <span className="text-xs font-semibold text-zinc-200 block">Informasi Perangkat Terkunci</span>
+                    <div className="space-y-0.5">
+                        <span className="text-xs font-medium text-zinc-200 block">Informasi Perangkat Terkunci</span>
                         <span className="text-[11px] text-zinc-500 block leading-relaxed max-w-[240px] mx-auto">
                             Deteksi OS mendalam, riwayat MAC acak, dan profil sidik jari DHCP khusus pengguna PRO.
                         </span>
@@ -250,7 +248,7 @@ export const SecurityTelemetrySidebar: FC<SecurityTelemetrySidebarProps> = ({
                         <button
                             type="button"
                             onClick={() => onOpenUpgradeModal('Buka analisis informasi perangkat dan deteksi OS mendalam dengan upgrade ke PRO.')}
-                            className="px-3 py-1 rounded-md text-[11px] font-mono text-purple-300 bg-purple-500/15 hover:bg-purple-500/25 border border-purple-500/30 transition-all cursor-pointer inline-flex items-center gap-1 mt-1"
+                            className="px-3 py-1 rounded-full text-[11px] font-mono text-purple-300 bg-purple-500/10 hover:bg-purple-500/20 border border-purple-500/20 transition-all cursor-pointer inline-flex items-center gap-1 mt-0.5"
                         >
                             <span>Upgrade ke PRO</span>
                         </button>
@@ -326,13 +324,13 @@ export const SecurityTelemetrySidebar: FC<SecurityTelemetrySidebarProps> = ({
                         <span className="text-zinc-400">MAC Architecture</span>
                         <div>
                             {device.is_randomized_mac ? (
-                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono bg-purple-500/10 text-white border border-purple-500/20">
-                                    <Radio size={9} />
+                                <span className="inline-flex items-center gap-1.5 text-[11px] font-mono text-purple-300">
+                                    <span className="size-1.5 rounded-full bg-purple-400 shrink-0" />
                                     Private MAC
                                 </span>
                             ) : (
-                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono bg-blue-500/10 text-white border border-blue-500/20">
-                                    <Cpu size={9} />
+                                <span className="inline-flex items-center gap-1.5 text-[11px] font-mono text-blue-300">
+                                    <span className="size-1.5 rounded-full bg-blue-400 shrink-0" />
                                     Hardware OUI
                                 </span>
                             )}
@@ -354,12 +352,9 @@ export const SecurityTelemetrySidebar: FC<SecurityTelemetrySidebarProps> = ({
                                 {device.linked_macs.map((m) => {
                                     const isCurrent = m.toLowerCase() === device.mac.toLowerCase();
                                     return (
-                                        <div key={m} className={cn(
-                                            "flex items-center justify-between text-[10px] font-mono px-2 py-1 rounded border",
-                                            isCurrent ? "bg-purple-500/15 border-purple-500/30 text-purple-200" : "bg-white/[0.02] border-white/[0.05] text-zinc-400"
-                                        )}>
-                                            <span>{m}</span>
-                                            <span className="text-[9px] uppercase tracking-wider">
+                                        <div key={m} className="flex items-center justify-between text-[10px] font-mono py-0.5">
+                                            <span className={isCurrent ? "text-purple-300 font-medium" : "text-zinc-500"}>{m}</span>
+                                            <span className={cn("text-[9px] uppercase tracking-wider", isCurrent ? "text-purple-400" : "text-zinc-600")}>
                                                 {isCurrent ? "Aktif" : "Diarsipkan"}
                                             </span>
                                         </div>
@@ -414,7 +409,7 @@ export const SecurityTelemetrySidebar: FC<SecurityTelemetrySidebarProps> = ({
                                 <Fingerprint size={11} className="text-cyan-400" />
                                 OS Signature (Opt 55)
                             </span>
-                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono bg-cyan-500/10 text-cyan-300 border border-cyan-500/20 truncate max-w-[160px]" title={device.dhcp_fingerprint}>
+                            <span className="text-[11px] font-mono text-cyan-300 truncate max-w-[160px]" title={device.dhcp_fingerprint}>
                                 {device.dhcp_fingerprint}
                             </span>
                         </div>
@@ -423,7 +418,7 @@ export const SecurityTelemetrySidebar: FC<SecurityTelemetrySidebarProps> = ({
                     {device.dhcp_vendor_class && (
                         <div className="flex items-center justify-between text-xs pt-1 border-t border-white/[0.04]">
                             <span className="text-zinc-400">Vendor Class (Opt 60)</span>
-                            <span className="font-mono text-[10px] text-zinc-300 bg-white/[0.05] px-1.5 py-0.5 rounded border border-white/[0.08] truncate max-w-[150px]" title={device.dhcp_vendor_class}>
+                            <span className="font-mono text-[11px] text-zinc-300 truncate max-w-[150px]" title={device.dhcp_vendor_class}>
                                 {device.dhcp_vendor_class}
                             </span>
                         </div>
@@ -466,12 +461,12 @@ export const SecurityTelemetrySidebar: FC<SecurityTelemetrySidebarProps> = ({
             icon: <Gauge size={16} className="text-zinc-400" />,
             trailingIcon: authStatus?.license?.tier === 'free' ? <Lock size={13} className="text-zinc-500" /> : undefined,
             content: authStatus?.license?.tier === 'free' ? (
-                <div className="p-3.5 rounded-xl bg-white/[0.02] border border-white/[0.06] text-center space-y-2.5 my-1">
-                    <div className="size-8 mx-auto rounded-lg bg-white/[0.04] border border-white/[0.08] flex items-center justify-center text-zinc-400">
-                        <Lock size={15} />
+                <div className="py-3 px-1 text-center space-y-2">
+                    <div className="size-7 mx-auto rounded-full bg-white/[0.04] flex items-center justify-center text-zinc-400">
+                        <Lock size={13} />
                     </div>
-                    <div className="space-y-1">
-                        <span className="text-xs font-semibold text-zinc-200 block">Bandwidth Throttle Terkunci</span>
+                    <div className="space-y-0.5">
+                        <span className="text-xs font-medium text-zinc-200 block">Bandwidth Throttle Terkunci</span>
                         <span className="text-[11px] text-zinc-500 block leading-relaxed max-w-[240px] mx-auto">
                             Fitur pembatasan kecepatan bandwidth presisi (PWM Bandwidth Shaper 0% - 99%) khusus untuk pengguna PRO.
                         </span>
@@ -480,7 +475,7 @@ export const SecurityTelemetrySidebar: FC<SecurityTelemetrySidebarProps> = ({
                         <button
                             type="button"
                             onClick={() => onOpenUpgradeModal('Fitur Bandwidth Throttling khusus untuk pengguna PRO. Upgrade untuk mengatur batas kecepatan!')}
-                            className="px-3 py-1 rounded-md text-[11px] font-mono text-purple-300 bg-purple-500/15 hover:bg-purple-500/25 border border-purple-500/30 transition-all cursor-pointer inline-flex items-center gap-1 mt-1"
+                            className="px-3 py-1 rounded-full text-[11px] font-mono text-purple-300 bg-purple-500/10 hover:bg-purple-500/20 border border-purple-500/20 transition-all cursor-pointer inline-flex items-center gap-1 mt-0.5"
                         >
                             <span>Upgrade ke PRO</span>
                         </button>
@@ -520,52 +515,60 @@ export const SecurityTelemetrySidebar: FC<SecurityTelemetrySidebarProps> = ({
                                 />
                             </div>
 
-                            {/* Quick Presets with Dynamic Colors */}
-                            <div className="grid grid-cols-4 gap-1 text-[10px] font-mono">
+                            {/* Segmented Quick Presets */}
+                            <div className="flex items-center rounded-lg bg-black/40 p-0.5 text-[10px] font-mono border border-white/[0.06]">
                                 {[
-                                    { label: '0%', val: 0, title: 'Cut Off (Block)', activeClass: 'bg-rose-500/20 text-rose-300 border-rose-500/30 font-semibold' },
-                                    { label: '25%', val: 25, title: 'Heavy (~128 Kbps)', activeClass: 'bg-rose-500/20 text-rose-300 border-rose-500/30 font-semibold' },
-                                    { label: '50%', val: 50, title: 'Medium (~512 Kbps)', activeClass: 'bg-amber-500/20 text-amber-300 border-amber-500/30 font-semibold' },
-                                    { label: '100%', val: 100, title: 'Full Speed', activeClass: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30 font-semibold' }
-                                ].map(preset => (
-                                    <button
-                                        key={preset.val}
-                                        type="button"
-                                        onClick={() => {
-                                            if (preset.val > 0 && preset.val < 100 && authStatus?.license?.tier === 'free') {
-                                                onOpenUpgradeModal?.('Fitur Bandwidth Throttling khusus untuk pengguna PRO.');
-                                                return;
-                                            }
-                                            onSetSpeedLimit && onSetSpeedLimit(device.ip, preset.val);
-                                        }}
-                                        className={cn(
-                                            "py-1 rounded border transition-all text-center",
-                                            (device.speed_limit ?? 100) === preset.val
-                                                ? preset.activeClass
-                                                : "bg-white/[0.02] text-zinc-400 border-white/[0.05] hover:text-white hover:bg-white/[0.05]"
-                                        )}
-                                        title={preset.title}
-                                    >
-                                        {preset.label}
-                                    </button>
-                                ))}
+                                    { label: '0%', val: 0, title: 'Cut Off (Block)' },
+                                    { label: '25%', val: 25, title: 'Heavy (~128 Kbps)' },
+                                    { label: '50%', val: 50, title: 'Medium (~512 Kbps)' },
+                                    { label: '100%', val: 100, title: 'Full Speed' }
+                                ].map(preset => {
+                                    const isSelected = (device.speed_limit ?? 100) === preset.val;
+                                    return (
+                                        <button
+                                            key={preset.val}
+                                            type="button"
+                                            onClick={() => {
+                                                if (preset.val > 0 && preset.val < 100 && authStatus?.license?.tier === 'free') {
+                                                    onOpenUpgradeModal?.('Fitur Bandwidth Throttling khusus untuk pengguna PRO.');
+                                                    return;
+                                                }
+                                                onSetSpeedLimit && onSetSpeedLimit(device.ip, preset.val);
+                                            }}
+                                            className={cn(
+                                                "flex-1 py-1 rounded-md transition-all text-center select-none",
+                                                isSelected
+                                                    ? cn(
+                                                        "font-semibold shadow-sm",
+                                                        preset.val === 0 || preset.val === 25 ? "bg-rose-500/20 text-rose-300" :
+                                                        preset.val === 50 ? "bg-amber-500/20 text-amber-300" :
+                                                        "bg-emerald-500/20 text-emerald-300"
+                                                      )
+                                                    : "text-zinc-500 hover:text-zinc-300"
+                                            )}
+                                            title={preset.title}
+                                        >
+                                            {preset.label}
+                                        </button>
+                                    );
+                                })}
                             </div>
                         </>
                     ) : device.is_gateway ? (
-                        <div className="p-2.5 rounded-lg bg-emerald-500/5 border border-emerald-500/15 flex items-start gap-2 text-xs text-zinc-400">
+                        <div className="py-2 flex items-start gap-2.5 text-xs text-zinc-400">
                             <ShieldCheck className="size-4 text-emerald-400 shrink-0 mt-0.5" />
                             <div className="space-y-0.5">
-                                <span className="text-white font-medium block">Gateway Protected Node</span>
+                                <span className="text-zinc-200 font-medium block text-xs">Gateway Protected Node</span>
                                 <span className="text-[11px] text-zinc-500 block leading-relaxed">
                                     Simpul router inti dilindungi permanen dari pemotongan kecepatan.
                                 </span>
                             </div>
                         </div>
                     ) : (
-                        <div className="p-2.5 rounded-lg bg-emerald-500/5 border border-emerald-500/15 flex items-start gap-2 text-xs text-zinc-400">
+                        <div className="py-2 flex items-start gap-2.5 text-xs text-zinc-400">
                             <Lock className="size-4 text-emerald-400 shrink-0 mt-0.5" />
                             <div className="space-y-0.5">
-                                <span className="text-white font-medium block">Host Operator</span>
+                                <span className="text-zinc-200 font-medium block text-xs">Host Operator</span>
                                 <span className="text-[11px] text-zinc-500 block leading-relaxed">
                                     Laptop ini adalah kontroler sistem dan terlindungi dari isolasi.
                                 </span>
@@ -664,14 +667,14 @@ export const SecurityTelemetrySidebar: FC<SecurityTelemetrySidebarProps> = ({
                         </button>
                     )}
 
-                    <div className="flex items-center gap-2 pt-1">
+                    <div className="flex items-center gap-2 pt-1 border-t border-white/[0.04]">
                         <button
                             type="button"
                             onClick={(e) => {
                                 const specs = `Device: ${deviceName}\nIP: ${device.ip}\nMAC: ${device.mac} (${device.is_randomized_mac ? 'Private MAC' : 'Hardware MAC'})\nVendor: ${device.vendor || 'Unknown'}\nType: ${device.device_type || 'Network Device'}\nOS: ${device.os || 'Unknown'}${device.dhcp_fingerprint ? `\nDHCP Signature: ${device.dhcp_fingerprint}` : ''}${device.dhcp_vendor_class ? `\nVendor Class: ${device.dhcp_vendor_class}` : ''}${device.dhcp_client_id ? `\nDUID: ${device.dhcp_client_id}` : ''}\nTTL: ${ttlValue} (${ttlDesc})\nPing: ${device.rtt_ms || '<1'} ms\nStatus: ${isOnline ? 'Online' : 'Offline'}\nAccess: ${isInternetActive ? 'Active' : 'Blocked'}`;
                                 handleCopy(`specs-${device.ip}`, specs, e);
                             }}
-                            className="flex-1 flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-mono text-zinc-300 bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.08] hover:text-white transition-colors"
+                            className="flex-1 flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-mono text-zinc-400 hover:text-zinc-200 hover:bg-white/[0.04] transition-colors"
                         >
                             {copiedKey === `specs-${device.ip}` ? (
                                 <>
@@ -690,7 +693,7 @@ export const SecurityTelemetrySidebar: FC<SecurityTelemetrySidebarProps> = ({
                             <button
                                 type="button"
                                 onClick={() => onDeleteDevice(device.mac)}
-                                className="px-2.5 py-1.5 rounded-lg text-xs font-mono text-zinc-500 hover:text-rose-400 hover:bg-rose-500/10 border border-transparent hover:border-rose-500/20 transition-colors flex items-center gap-1.5"
+                                className="px-2.5 py-1.5 rounded-lg text-xs font-mono text-zinc-500 hover:text-rose-400 hover:bg-rose-500/10 transition-colors flex items-center gap-1.5"
                                 title="Hapus riwayat perangkat"
                             >
                                 <Trash2 size={11} />
@@ -771,14 +774,14 @@ export const SecurityTelemetrySidebar: FC<SecurityTelemetrySidebarProps> = ({
                     </div>
                 </div>
 
-                <div className="flex items-center gap-1.5 shrink-0">
-                    {/* Telemetry Refresh / Sync Button */}
+                <div className="flex items-center gap-2 shrink-0">
+                    {/* Telemetry Refresh / Sync Button (Clean unboxed style) */}
                     <button
                         type="button"
                         onClick={() => onRefresh && onRefresh()}
                         disabled={isRefreshing}
                         className={cn(
-                            "h-7 px-2 rounded-lg bg-white/[0.04] hover:bg-white/[0.08] text-zinc-400 hover:text-white border border-white/[0.08] flex items-center gap-1.5 text-[11px] font-mono transition-colors outline-none",
+                            "h-7 px-1 text-zinc-400 hover:text-white flex items-center gap-1.5 text-[11px] font-mono transition-colors outline-none cursor-pointer",
                             isRefreshing && "opacity-80 cursor-wait text-zinc-300"
                         )}
                         title="Perbarui telemetry"
@@ -795,45 +798,39 @@ export const SecurityTelemetrySidebar: FC<SecurityTelemetrySidebarProps> = ({
                             </>
                         ) : (
                             <>
-                                <RotateCw size={11} className="text-zinc-400" />
+                                <RotateCw size={12} className="text-zinc-400" />
                                 <span>Sync</span>
                             </>
                         )}
                     </button>
 
-                    {/* Close Button */}
+                    {/* Close Button (Clean unboxed style) */}
                     <button
                         type="button"
-                        onClick={onClose}
-                        className="size-7 rounded-lg bg-white/[0.04] hover:bg-white/[0.1] text-zinc-400 hover:text-white border border-white/[0.08] flex items-center justify-center transition-colors shrink-0"
+                        onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            onClose();
+                        }}
+                        className="size-7 text-zinc-400 hover:text-white flex items-center justify-center transition-colors shrink-0 outline-none cursor-pointer"
                         title="Tutup panel inspeksi"
+                        aria-label="Tutup panel inspeksi"
                     >
-                        <X size={14} />
+                        <X size={15} />
                     </button>
                 </div>
             </div>
 
-            {/* BeUI Pull to Refresh Wrapper */}
-            <PullToRefresh
-                onRefresh={onRefresh || (() => {})}
-                refreshing={isRefreshing}
-                threshold={65}
-                maxPull={110}
-                holdDistance={60}
-                pullingLabel="Tarik untuk refresh telemetry"
-                releaseLabel="Lepaskan untuk memperbarui"
-                refreshingLabel="Sync"
-                className="flex-1 max-h-[720px]"
-            >
-                <div className="p-3.5">
-                    {/* Bouncy Accordion for the 4 Sub-menus */}
-                    <BouncyAccordion
-                        items={accordionItems}
-                        defaultValue="network-telemetry"
-                        collapsible={true}
-                    />
-                </div>
-            </PullToRefresh>
+            {/* Smooth Scrollable Content Viewport (Native scroll without PullToRefresh loading) */}
+            <div className="flex-1 overflow-y-auto max-h-[720px] overscroll-y-contain">
+                {/* Bouncy Accordion for the Sub-menus (Clean Directory style, closed by default) */}
+                <BouncyAccordion
+                    items={accordionItems}
+                    defaultValue={null}
+                    collapsible={true}
+                    variant="clean"
+                />
+            </div>
         </aside>
     );
 };

@@ -2,6 +2,55 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.33.0] - 2026-09-04
+
+### Gaming Mode QoS 2.0 & Automated Device Retention
+- **Gaming Mode QoS 2.0 Enforcement — `backend-node/src/services/deviceManager.ts` & `unit_gamingMode.test.ts`**:
+  - **Dual-Mode Engine**: Menyediakan 2 profil operasional: `auto_airtime` (limit bandwidth target ke 20% secara proporsional) dan `blackhole_priority` (limit 0% untuk isolasi penuh).
+  - **Preservasi Baseline Limit**: Menghilangkan bug di mana `priorLimit` menimpa baseline kecepatan awal perangkat saat ganti mode / target ping.
+  - **Late-Joiners Auto-Throttle**: Perangkat yang baru tersambung saat Gaming Mode aktif langsung di-throttle via hook scan dan DHCP.
+  - **Anti-Self-Cut Hardening**: Membuktikan via unit test bahwa perangkat host operator (`is_self: true`) terlindungi secara mutlak dan tidak pernah dibatasi.
+  - **Lifecycle & Session Leak Fix**: `gamingManaged` dikunci berbasis MAC dan mencatat `sessionId`. Sesi dihentikan via `_stopGamingSession` saat perangkat offline, mencegah kebocoran sesi spoof Python. Pemindaian ulang gaming dipindahkan ke `_reapplyGamingSweep` berpagar `runExclusive`.
+- **True ICMP RTT & Jitter Parser — `python-service/src/core/gaming.py` & `test_unit_gaming.py`**:
+  - Menggantikan pengukuran latensi berbasis *subprocess wall-clock* (yang rentan lonjakan palsu saat beban CPU tinggi) dengan parser murni `parse_ping_rtt_ms` yang membaca nilai asli `time=` / `waktu=` dari output ICMP fisik Windows.
+- **Gaming Mode Cyberpunk UI Redesign — `frontend-react/src/components/GamingModeWidget.tsx` & `components/charts/*`**:
+  - Hero live trace chart berbasis komponen `@visx/*` dan `d3-array` dengan skala kesehatan latensi berwarna.
+  - Indikator loading jujur (*honest loading*) yang menunggu konfirmasi timestamp status asli backend.
+- **Automated Stale Device Retention (14 Hari) — `backend-node` (`database.ts`, `deviceManager.ts`)**:
+  - Menambahkan `DatabaseService.archiveStaleDevices(thresholdDays=14)` untuk mengarsipkan secara otomatis perangkat tamu lama yang tidak aktif > 14 hari via SQLite WAL (`is_archived = 1`).
+  - Berpagar ketat: melewati perangkat ber-alias, tersimpan di profil DUID, sedang diblokir, atau merupakan gateway/self.
+- **Redesain Halaman Dokumentasi (Eliminasi Card Fatigue) — `frontend-react/src/components/DocumentationView.tsx`**:
+  - Mengubah desain dari pola kartu/kotak bertingkat (*nested card boxes*) menjadi layout editorial modern mirip Stripe/Linear Docs.
+  - Mengganti grid kotak langkah dengan timeline bergaris vertikal halus, mengubah kartu peringatan menjadi callout beraksen kiri minimalis, dan merapikan glosarium menjadi definition list (`dl`) yang bersih.
+  - Menghilangkan border tebal ganda pada sidebar dan viewport konten agar pengalaman membaca terasa menyatu dan elegan.
+- **Interactive Cyberpunk Flow Diagram Engines — `frontend-react/src/components/DocumentationView.tsx`**:
+  - `DocFlowCut`: Simulator topologi visual interaktif dengan auto-play timer loop, animasi status fase, dan *Live Kernel ARP Table Inspector* per-node.
+  - `DocFlowPwm`: Osiloskop gelombang kotak digital SVG dinamis dengan slider limit interaktif, estimasi throughput real-time, status TCP socket health, dan animasi scanning laser line.
+  - `DocFlowDiscovery`: Simulator pipeline multi-sensor interaktif dengan simulasi penemuan bertahap (0.0s s.d. 1.6s) melintasi Layer 2 ARP, Layer 3 SSDP/mDNS, Layer 4 NetBIOS, dan Layer 7 DUID.
+- **Penyatuan Komprehensif Dokumentasi & Anatomi Jaringan — `frontend-react/src/components/DocumentationView.tsx`**:
+  - Menggabungkan *Cara Kerja Jaringan* dan *Diagram Alur Nyata Interaktif* langsung ke dalam setiap bab *Panduan Penggunaan*.
+  - Menyajikan penjelasan teknis mendalam (RFC 826, RFC 4361 DUID, Npcap NDIS 6, SQLite WAL, PWM Duty-Cycle 1Hz, TLS Leaf Interception, True ICMP RTT) berdampingan dengan panduan operasional UI dan simulator visual interaktif.
+- **Implementasi White Mode / Day Mode (Light Theme Engine) — `src/lib/theme.ts`, `src/App.css`, `src/App.tsx`, `index.html`**:
+  - Menyediakan switch tema Day Mode (White Mode) & Night Mode (Dark Mode) yang dapat diakses langsung dari header topbar (ikon Sun/Moon) dan Command Palette (`Ctrl + K`).
+  - Menuliskan mesin CSS Light Theme komprehensif di `App.css` (`html.light`) yang memetakan kanvas ke slate bersih `#f8fafc`, kartu/tabel ke `#ffffff`, tipografi kontras tinggi `#0f172a`, dan border lembut `#e2e8f0`.
+  - Mengintegrasikan deteksi anti-flash FOUT di `index.html` dan sinkronisasi canvas 3D `NeonMesh` yang otomatis beradaptasi dengan palet terang saat Day Mode aktif.
+  - Persistensi tema ke `localStorage ('sentinel_theme')` dan event sinkronisasi `sentinel-theme-changed`.
+- **Penyederhanaan Header Topbar & Indikator Wi-Fi AP Isolation — `frontend-react/src/App.tsx`**:
+  - Menghilangkan banner teks panjang peringatan AP Isolation di atas tabel host untuk mengeliminasi gangguan visual (*banner fatigue*).
+  - Mengalihkan indikasi AP Isolation langsung ke tombol Wi-Fi di topbar header: nama Wi-Fi dan ikon otomatis menyala kuning (*amber*) dengan teks tebal (`text-amber-400 font-semibold`) saat AP Isolation aktif, dan detail lengkap tetap dapat dibuka melalui popover saat tombol diklik.
+  - Menghilangkan tombol Gaming yang menempel di sebelah nama Wi-Fi pada header topbar untuk tampilan yang jauh lebih bersih dan minimalis (Mode Gaming tetap dapat diakses penuh via menu sidebar dan Command Palette `Ctrl + K`).
+- **Penyempurnaan Panel Security & Telemetry — `frontend-react/src/components/SecurityTelemetrySidebar.tsx`, `frontend-react/src/App.tsx`**:
+  - Menghilangkan animasi loading dan tulisan *"Sync"* saat digeser ke bawah dengan mengganti wrapper `PullToRefresh` menjadi viewport *native smooth-scroll* biasa (`overflow-y-auto max-h-[720px]`).
+  - Memperbaiki tombol Close (`X`) yang sebelumnya macet/tidak berfungsi karena `inspectorDevice` terus membangkitkan IP dari `selectedInspectorMacRef`; kini `handleCloseInspector` membersihkan IP dan MAC ref secara atomik seketika serta mendukung penutupan via tombol `Escape`.
+  - Menghilangkan kotak (*border & background*) pada tombol Sync dan tombol Close di header panel, menjadikannya tombol ikon/teks bersih tanpa kotak.
+  - **Unboxing & Editorial Directory Redesign (Bebas Kotak-Kotak)**:
+    - Mengubah perilaku saat pertama kali membuka panel inspeksi agar tidak langsung membuka *Pemantauan Jaringan* (`defaultValue={null}`), sehingga pengguna langsung disajikan direktori menu bersih yang rapi (*Pemantauan Jaringan, Informasi Perangkat, Bandwidth Throttle, Status & Keamanan, Pengaturan Target*).
+    - Menghilangkan *nested box-in-box* card fatigue dengan memperkenalkan mode `variant="clean"` pada `BouncyAccordion`: menggantikan kartu kotak rounded dengan baris direktori edge-to-edge bergaris pembatas halus (*subtle hairline dividers*).
+    - Mengubah 4 tombol kotak terpisah pada preset bandwidth throttle menjadi satu bilah kontrol tersegmentasi terpadu (*unified segmented pill control*).
+    - Membersihkan banner peringatan gateway/operator dan notice fitur Pro menjadi tipografi inline dengan bullet status bercahaya tanpa kotak tebal yang mengurung.
+    - Menghilangkan kotak pembungkus luar pada grafik throughput real-time dan mengintegrasikan indikator kecepatan Download & Upload menjadi badge meter inline minimalis.
+- **Verifikasi:** 162/162 test Python + 34/34 test Node lulus 100%; `npm run build` frontend bersih (0 error).
+
 ## [v2.32.0] - 2026-09-01
 
 ### Real System Diagnostics & True Npcap Initialization Bootstrap

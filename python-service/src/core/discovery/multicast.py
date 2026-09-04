@@ -12,6 +12,46 @@ from typing import Dict, Any
 _SSDP_DISCOVERED: Dict[str, Dict[str, str]] = {}
 _MDNS_DISCOVERED: Dict[str, Dict[str, str]] = {}
 
+# KEAMANAN (M1): batasi ukuran baca deskriptor UPnP dari peer tak-tepercaya di LAN.
+# 512KB = ribuan kali lebih besar dari deskriptor UPnP nyata (~1–50KB), jadi tak ada
+# perangkat sah yang terpotong, tetapi mencegah DoS kehabisan memori dari respons raksasa.
+MAX_SSDP_DESCRIPTOR_BYTES = 512 * 1024
+
+
+def _fetch_ssdp_descriptor(loc, ip, opener=urlopen, max_bytes=MAX_SSDP_DESCRIPTOR_BYTES):
+    """Ambil & parse satu deskriptor perangkat UPnP dengan aman.
+
+    - SSRF-guard: hanya ambil bila host URL == IP pengirim SSDP.
+    - Baca TERBATAS `max_bytes` (BUKAN res.read() tanpa batas) agar tak boros memori
+      saat peer mengirim respons raksasa/lambat.
+    - Kembalikan dict metadata atau None (tak pernah melempar) untuk degradasi mulus.
+    `opener` dapat diinjeksi pada test agar tak menyentuh jaringan.
+    """
+    try:
+        parsed = urllib.parse.urlparse(loc)
+        if parsed.hostname != ip:
+            return None
+        req = Request(loc, headers={'User-Agent': 'NetCut-Sentinel/2.0'})
+        with opener(req, timeout=0.35) as res:
+            xml_content = res.read(max_bytes)
+        root = ET.fromstring(xml_content)
+        ns = {'ns': 'urn:schemas-upnp-org:device-1-0'}
+
+        def find_text(tag):
+            el = root.find(f".//ns:{tag}", ns)
+            if el is None:
+                el = root.find(f".//{tag}")
+            return el.text.strip() if el is not None and el.text else ""
+
+        return {
+            'friendly_name': find_text('friendlyName'),
+            'manufacturer': find_text('manufacturer'),
+            'model_name': find_text('modelName'),
+            'model_desc': find_text('modelDescription')
+        }
+    except Exception:
+        return None
+
 def collect_ssdp_sensors(timeout: float = 0.4) -> Dict[str, Dict[str, str]]:
     """Kirim SSDP M-SEARCH (UPnP) multicast pada 239.255.255.250:1900."""
     global _SSDP_DISCOVERED
@@ -50,35 +90,13 @@ def collect_ssdp_sensors(timeout: float = 0.4) -> Dict[str, Dict[str, str]]:
         if s:
             s.close()
 
-    try:
-        # Parse XML device descriptor
-        for ip, loc in list(locations_to_fetch.items())[:8]:
-            try:
-                parsed = urllib.parse.urlparse(loc)
-                if parsed.hostname != ip:
-                    continue
-                req = Request(loc, headers={'User-Agent': 'NetCut-Sentinel/2.0'})
-                with urlopen(req, timeout=0.35) as res:
-                    xml_content = res.read()
-                root = ET.fromstring(xml_content)
-                ns = {'ns': 'urn:schemas-upnp-org:device-1-0'}
+    # Ambil & parse deskriptor perangkat (maks 8 lokasi), masing-masing dengan
+    # SSRF-guard + baca terbatas via _fetch_ssdp_descriptor (M1 hardening).
+    for ip, loc in list(locations_to_fetch.items())[:8]:
+        info = _fetch_ssdp_descriptor(loc, ip)
+        if info:
+            _SSDP_DISCOVERED[ip] = info
 
-                def find_text(tag):
-                    el = root.find(f".//ns:{tag}", ns)
-                    if el is None:
-                        el = root.find(f".//{tag}")
-                    return el.text.strip() if el is not None and el.text else ""
-
-                _SSDP_DISCOVERED[ip] = {
-                    'friendly_name': find_text('friendlyName'),
-                    'manufacturer': find_text('manufacturer'),
-                    'model_name': find_text('modelName'),
-                    'model_desc': find_text('modelDescription')
-                }
-            except:
-                pass
-    except:
-        pass
     return dict(_SSDP_DISCOVERED)
 
 def collect_mdns_sensors(timeout: float = 0.4) -> Dict[str, Dict[str, str]]:

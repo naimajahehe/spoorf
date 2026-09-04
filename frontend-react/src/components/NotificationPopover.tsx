@@ -183,15 +183,15 @@ export const NotificationPopover: FC<Props> = ({
                                     type="button"
                                     onClick={onToggleMute}
                                     className={cn(
-                                        "px-2 py-0.5 rounded-md text-[11px] font-mono flex items-center gap-1 border transition-all",
+                                        "px-2.5 py-0.5 rounded-md text-[11px] font-mono flex items-center gap-1.5 border transition-all cursor-pointer",
                                         isMuted
-                                            ? "bg-amber-500/10 border-amber-500/30 text-amber-400 hover:bg-amber-500/20"
-                                            : "bg-white/[0.04] border-white/[0.08] text-zinc-400 hover:text-white hover:bg-white/[0.08]"
+                                            ? "bg-zinc-800/80 border-zinc-700 text-zinc-300 hover:bg-zinc-700"
+                                            : "bg-white/[0.04] border-white/[0.08] text-zinc-300 hover:text-white hover:bg-white/[0.08]"
                                     )}
-                                    title={isMuted ? "Notifikasi Dinonaktifkan (Klik untuk Aktifkan)" : "Notifikasi Aktif (Klik untuk Mematikan)"}
+                                    title={isMuted ? "Notifikasi saat ini disenyapkan. Suara & pop-up dinonaktifkan (Klik untuk mengaktifkan)" : "Notifikasi aktif. Suara & pop-up akan berbunyi (Klik untuk membisukan)"}
                                 >
-                                    {isMuted ? <BellOff size={11} className="text-amber-400" /> : <Bell size={11} />}
-                                    <span>{isMuted ? 'Muted' : 'Sound On'}</span>
+                                    {isMuted ? <BellOff size={11} className="text-zinc-400" /> : <Bell size={11} className="text-zinc-400" />}
+                                    <span>{isMuted ? 'Muted' : 'Aktif'}</span>
                                 </button>
                             )}
                         </div>

@@ -555,5 +555,100 @@ class TestCoreDiscovery(unittest.TestCase):
         with patch('src.core.discovery.multicast.socket.socket'):
             send_multicast_wakeup()
 
+    # ===== 4. SSDP Descriptor Fetch — M1 unbounded-read hardening =====
+    def test_ssdp_descriptor_read_is_capped(self):
+        """Security (M1): descriptor fetch must cap res.read() to a bounded size, never unbounded."""
+        from src.core.discovery.multicast import _fetch_ssdp_descriptor, MAX_SSDP_DESCRIPTOR_BYTES
+
+        read_calls = []
+
+        class _FakeResp:
+            def __enter__(self_inner):
+                return self_inner
+
+            def __exit__(self_inner, *a):
+                return False
+
+            def read(self_inner, n=-1):
+                read_calls.append(n)
+                return (b'<root xmlns="urn:schemas-upnp-org:device-1-0">'
+                        b'<device><friendlyName>Cap Test</friendlyName></device></root>')
+
+        def fake_opener(req, timeout=None):
+            return _FakeResp()
+
+        info = _fetch_ssdp_descriptor('http://192.168.1.50/desc.xml', '192.168.1.50', opener=fake_opener)
+
+        # read() must be asked for a POSITIVE byte cap — never unbounded (-1 / None)
+        self.assertTrue(read_calls, "res.read() was never called")
+        self.assertIn(MAX_SSDP_DESCRIPTOR_BYTES, read_calls)
+        self.assertNotIn(-1, read_calls)
+        self.assertNotIn(None, read_calls)
+        self.assertEqual(info['friendly_name'], 'Cap Test')
+
+    def test_ssdp_descriptor_parses_normal_within_cap(self):
+        """A normal small descriptor still parses fully (no legit device loses its name)."""
+        from src.core.discovery.multicast import _fetch_ssdp_descriptor
+
+        xml = (b'<?xml version="1.0"?>'
+               b'<root xmlns="urn:schemas-upnp-org:device-1-0"><device>'
+               b'<friendlyName>Living Room TV</friendlyName>'
+               b'<manufacturer>Acme</manufacturer>'
+               b'<modelName>X-100</modelName></device></root>')
+
+        class _R:
+            def __enter__(self_inner):
+                return self_inner
+
+            def __exit__(self_inner, *a):
+                return False
+
+            def read(self_inner, n=-1):
+                return xml[:n] if (n is not None and n >= 0) else xml
+
+        info = _fetch_ssdp_descriptor('http://10.0.0.5/d.xml', '10.0.0.5',
+                                      opener=lambda req, timeout=None: _R())
+        self.assertEqual(info['friendly_name'], 'Living Room TV')
+        self.assertEqual(info['manufacturer'], 'Acme')
+        self.assertEqual(info['model_name'], 'X-100')
+
+    def test_ssdp_descriptor_rejects_ssrf_mismatch(self):
+        """SSRF-guard preserved: URL host != SSDP sender IP must NOT be fetched."""
+        from src.core.discovery.multicast import _fetch_ssdp_descriptor
+
+        opened = []
+
+        def opener(req, timeout=None):
+            opened.append(True)
+            raise AssertionError("opener must not be called on host/ip mismatch")
+
+        res = _fetch_ssdp_descriptor('http://evil.example.com/d.xml', '192.168.1.50', opener=opener)
+        self.assertIsNone(res)
+        self.assertEqual(opened, [])
+
+    def test_ssdp_descriptor_oversize_degrades_gracefully(self):
+        """Oversize/garbage payload: read stays bounded and helper returns None (no raise)."""
+        from src.core.discovery.multicast import _fetch_ssdp_descriptor, MAX_SSDP_DESCRIPTOR_BYTES
+
+        huge = b'A' * (MAX_SSDP_DESCRIPTOR_BYTES * 4)
+        read_sizes = []
+
+        class _R:
+            def __enter__(self_inner):
+                return self_inner
+
+            def __exit__(self_inner, *a):
+                return False
+
+            def read(self_inner, n=-1):
+                read_sizes.append(n)
+                return huge[:n] if (n is not None and n >= 0) else huge
+
+        res = _fetch_ssdp_descriptor('http://192.168.1.9/d.xml', '192.168.1.9',
+                                     opener=lambda req, timeout=None: _R())
+        self.assertIsNone(res)
+        self.assertTrue(read_sizes)
+        self.assertTrue(all(s is not None and 0 <= s <= MAX_SSDP_DESCRIPTOR_BYTES for s in read_sizes))
+
 if __name__ == '__main__':
     unittest.main()

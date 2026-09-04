@@ -84,8 +84,8 @@
 
   /* Prevent browser autofill from turning inputs bright white/light blue */
   input:-webkit-autofill,
-  input:-webkit-autofill:hover, 
-  input:-webkit-autofill:focus, 
+  input:-webkit-autofill:hover,
+  input:-webkit-autofill:focus,
   input:-webkit-autofill:active,
   textarea:-webkit-autofill,
   select:-webkit-autofill {
@@ -95,6 +95,7 @@
     border-color: rgba(255, 255, 255, 0.15) !important;
     transition: background-color 5000s ease-in-out 0s;
   }
+
   .dark {
     --chart-1: oklch(1 0 none);
     --chart-2: oklch(0.73 0 none);
@@ -135,7 +136,7 @@
   }
 }
 
-/* Pure Ultra-Smooth Perimeter Border Beam (Warna Konsisten Cyan Laser) */
+/* Pure Ultra-Smooth Perimeter Border Beam */
 .scanning-card-active {
   position: relative;
 }
@@ -145,7 +146,7 @@
   position: absolute;
   inset: 0;
   border-radius: inherit;
-  padding: 1.5px; /* Tebal garis border persis 1.5px */
+  padding: 1.5px;
   background: conic-gradient(
     from var(--scan-angle, 0deg),
     rgba(255, 255, 255, 0.04) 0deg,
@@ -223,4 +224,446 @@
   pointer-events: none;
   z-index: 10;
   will-change: transform;
+}
+
+/* ========================================================================= */
+/* WHITE MODE ENGINE — "Instrumen di Siang Hari" (token-driven light theme)   */
+/* Cool daylight instrument: cool paper, white cards separated by elevation,  */
+/* cyan live-signal, blue-charcoal ink, and a full legible status scale.      */
+/* ========================================================================= */
+
+html.light {
+  color-scheme: light;
+
+  /* Surfaces (3-step elevation over a cool paper) */
+  --paper: #eef1f6;
+  --surface: #ffffff;
+  --surface-elevated: #ffffff;
+  --surface-sunken: #e7ebf1;
+
+  /* Ink scale (desaturated blue-charcoal → technical, not slate-generic) */
+  --ink: #0e1a2b;
+  --ink-strong: #0a1420;
+  --ink-2: #1f2b3d;
+  --ink-3: #3a4a5f;
+  --ink-muted: #5a6b80;
+  --ink-faint: #8493a6;
+  --ink-ghost: #a7b3c2;
+
+  /* Lines + signal + elevation */
+  --line: #d3dae4;
+  --line-strong: #bcc6d4;
+  --signal: #0891b2;
+  --shadow-md: 0 4px 12px -2px rgba(15, 23, 42, 0.08), 0 1px 3px rgba(15, 23, 42, 0.05);
+  --shadow-lg: 0 16px 40px -8px rgba(15, 23, 42, 0.18);
+
+  /* Semantic status triplets — text / fill / border (all legible on white) */
+  --st-online-text: #047857;  --st-online-fill: rgba(5, 150, 105, 0.10);  --st-online-border: rgba(5, 150, 105, 0.28);
+  --st-danger-text: #e11d48;  --st-danger-fill: rgba(225, 29, 72, 0.10);  --st-danger-border: rgba(225, 29, 72, 0.28);
+  --st-warn-text: #b45309;    --st-warn-fill: rgba(217, 119, 6, 0.12);    --st-warn-border: rgba(217, 119, 6, 0.30);
+  --st-info-text: #0e7490;    --st-info-fill: rgba(8, 145, 178, 0.10);    --st-info-border: rgba(8, 145, 178, 0.28);
+  --st-redir-text: #be185d;   --st-redir-fill: rgba(219, 39, 119, 0.10);  --st-redir-border: rgba(219, 39, 119, 0.26);
+  --st-pro-text: #7c3aed;     --st-pro-fill: rgba(124, 58, 237, 0.10);    --st-pro-border: rgba(124, 58, 237, 0.26);
+  --st-blue-text: #1d4ed8;    --st-blue-fill: rgba(37, 99, 235, 0.10);    --st-blue-border: rgba(37, 99, 235, 0.26);
+}
+
+html.light * {
+  border-color: var(--line);
+}
+
+html.light body {
+  background-color: var(--paper) !important;
+  color: var(--ink) !important;
+}
+
+/* ---------- 1. SURFACES ---------- */
+/* App shell / page bases → cool paper */
+html.light .bg-\[\#090a0c\],
+html.light .bg-\[\#090a0d\],
+html.light .bg-\[\#0a0b0d\] {
+  background-color: var(--paper) !important;
+}
+
+/* Header → clean white with a real bottom rule */
+html.light header.bg-\[\#090a0c\] {
+  background-color: var(--surface) !important;
+  border-bottom: 1px solid var(--line) !important;
+}
+
+/* Sticky table header */
+html.light thead.bg-\[\#090a0c\]\/95 {
+  background-color: rgba(238, 241, 246, 0.95) !important;
+}
+
+/* Cards & panels → white surface */
+html.light .bg-\[\#0e1014\],
+html.light .bg-\[\#0e1014\]\/98,
+html.light .bg-\[\#0f1013\],
+html.light .bg-\[\#0e1015\],
+html.light .bg-\[\#111318\],
+html.light .bg-\[\#12141a\],
+html.light .bg-\[\#0c0d10\],
+html.light .bg-\[\#1c1e24\] {
+  background-color: var(--surface) !important;
+}
+
+/* Elevated floating surfaces (popover / tooltip / dock / inspector / select) */
+html.light .bg-\[\#121316\],
+html.light .bg-\[\#16171b\] {
+  background-color: var(--surface-elevated) !important;
+  box-shadow: var(--shadow-lg);
+}
+
+/* Sunken surfaces (inputs, wells, rows, toasts) */
+html.light .bg-\[\#14151a\],
+html.light .bg-\[\#16171d\],
+html.light .bg-\[\#18191d\],
+html.light .bg-\[\#141720\],
+html.light .bg-\[\#14161b\],
+html.light .bg-\[\#14161d\] {
+  background-color: var(--surface-sunken) !important;
+}
+
+/* Inline-styled dark gradient panels (e.g. Gaming netgraph screen) — reachable
+   only via the style attribute; stylesheet !important beats non-!important inline. */
+html.light [style*="linear-gradient(rgb(13, 16, 22)"] {
+  background: linear-gradient(180deg, var(--surface), var(--paper)) !important;
+  border: 1px solid var(--line);
+}
+
+/* 2. WifiDetailsPopover status-tinted panels → light status tints */
+html.light .bg-\[\#1e1315\] {
+  background-color: var(--st-danger-fill) !important;
+}
+html.light .bg-\[\#1c1712\],
+html.light .bg-\[\#1a1812\] {
+  background-color: var(--st-warn-fill) !important;
+}
+html.light .bg-\[\#111c16\] {
+  background-color: var(--st-online-fill) !important;
+}
+html.light .bg-\[\#191c24\],
+html.light .bg-\[\#181a22\] {
+  background-color: var(--surface-sunken) !important;
+}
+
+/* ---------- 3. TRANSLUCENT FILLS ---------- */
+/* Dark scrims: keep subtle tints for surfaces, real dim only for modal backdrops */
+html.light .bg-black\/30,
+html.light .bg-black\/35,
+html.light .bg-black\/40,
+html.light .bg-black\/50,
+html.light .bg-black\/60 {
+  background-color: rgba(15, 23, 42, 0.05) !important;
+}
+html.light .bg-black\/70,
+html.light .bg-black\/75,
+html.light .bg-black\/80,
+html.light .bg-black\/90 {
+  background-color: rgba(15, 23, 42, 0.45) !important;
+}
+
+/* White translucent surfaces → graduated slate tints (bracket + slash forms) */
+html.light .bg-white\/\[0\.01\],
+html.light .bg-white\/\[0\.015\],
+html.light .bg-white\/\[0\.02\],
+html.light .bg-white\/\[0\.025\],
+html.light .bg-white\/\[0\.03\],
+html.light .bg-white\/\[0\.035\],
+html.light .bg-white\/\[0\.04\] {
+  background-color: rgba(14, 26, 43, 0.035) !important;
+}
+html.light .bg-white\/\[0\.05\],
+html.light .bg-white\/\[0\.06\],
+html.light .bg-white\/\[0\.07\],
+html.light .bg-white\/\[0\.08\],
+html.light .bg-white\/5 {
+  background-color: rgba(14, 26, 43, 0.06) !important;
+}
+html.light .bg-white\/\[0\.1\],
+html.light .bg-white\/\[0\.12\],
+html.light .bg-white\/\[0\.14\],
+html.light .bg-white\/10 {
+  background-color: rgba(14, 26, 43, 0.09) !important;
+}
+html.light .bg-white\/\[0\.16\],
+html.light .bg-white\/\[0\.2\],
+html.light .bg-white\/20 {
+  background-color: rgba(14, 26, 43, 0.14) !important;
+}
+
+/* Hover fills */
+html.light .hover\:bg-white\/\[0\.02\]:hover,
+html.light .hover\:bg-white\/\[0\.03\]:hover,
+html.light .hover\:bg-white\/\[0\.04\]:hover {
+  background-color: rgba(14, 26, 43, 0.05) !important;
+}
+html.light .hover\:bg-white\/\[0\.05\]:hover,
+html.light .hover\:bg-white\/\[0\.06\]:hover,
+html.light .hover\:bg-white\/\[0\.07\]:hover,
+html.light .hover\:bg-white\/\[0\.08\]:hover {
+  background-color: rgba(14, 26, 43, 0.08) !important;
+}
+html.light .hover\:bg-white\/\[0\.1\]:hover,
+html.light .hover\:bg-white\/\[0\.12\]:hover,
+html.light .hover\:bg-white\/10:hover {
+  background-color: rgba(14, 26, 43, 0.12) !important;
+}
+
+/* ---------- 4. TYPOGRAPHY ---------- */
+html.light .text-white,
+html.light .text-zinc-100 {
+  color: var(--ink) !important;
+}
+html.light .text-zinc-200 {
+  color: var(--ink-2) !important;
+}
+html.light .text-zinc-300 {
+  color: var(--ink-3) !important;
+}
+html.light .text-zinc-400 {
+  color: var(--ink-muted) !important;
+}
+html.light .text-zinc-500 {
+  color: var(--ink-faint) !important;
+}
+html.light .text-zinc-600 {
+  color: var(--ink-ghost) !important;
+}
+html.light .hover\:text-white:hover,
+html.light .group:hover .group-hover\:text-white {
+  color: var(--ink) !important;
+}
+html.light .hover\:text-zinc-200:hover,
+html.light .hover\:text-zinc-300:hover {
+  color: var(--ink-2) !important;
+}
+html.light .hover\:text-zinc-400:hover {
+  color: var(--ink-muted) !important;
+}
+
+/* Semantic text — every shade of each family, via class-substring match */
+html.light [class*="text-emerald-"],
+html.light [class*="text-green-"] {
+  color: var(--st-online-text) !important;
+}
+html.light [class*="text-teal-"] {
+  color: #0f766e !important;
+}
+html.light [class*="text-rose-"],
+html.light [class*="text-red-"] {
+  color: var(--st-danger-text) !important;
+}
+html.light [class*="text-amber-"],
+html.light [class*="text-yellow-"],
+html.light [class*="text-orange-"] {
+  color: var(--st-warn-text) !important;
+}
+html.light [class*="text-cyan-"],
+html.light [class*="text-sky-"] {
+  color: var(--st-info-text) !important;
+}
+html.light [class*="text-blue-"],
+html.light [class*="text-indigo-"] {
+  color: var(--st-blue-text) !important;
+}
+html.light [class*="text-pink-"],
+html.light [class*="text-fuchsia-"] {
+  color: var(--st-redir-text) !important;
+}
+html.light [class*="text-purple-"],
+html.light [class*="text-violet-"] {
+  color: var(--st-pro-text) !important;
+}
+
+/* Primary contrast (white-on-black) buttons → dark-on-white */
+html.light .bg-white.text-black,
+html.light button.bg-white.text-black {
+  background-color: var(--ink-strong) !important;
+  color: #ffffff !important;
+}
+html.light .bg-white.text-black:hover,
+html.light button.bg-white.text-black:hover {
+  background-color: var(--ink) !important;
+  color: #ffffff !important;
+}
+
+/* ---------- 5. BORDERS & RINGS ---------- */
+/* All white borders (bracket + slash forms) → visible cool hairline */
+html.light [class*="border-white"] {
+  border-color: var(--line) !important;
+}
+html.light .border-\[\#090a0c\] {
+  border-color: var(--line) !important;
+}
+html.light [class*="ring-white"] {
+  --tw-ring-color: var(--line-strong) !important;
+}
+
+/* ---------- 6. SEMANTIC FILLS & BORDERS (translucent -500/x) ---------- */
+html.light [class*="bg-emerald-500/"],
+html.light [class*="bg-green-500/"] {
+  background-color: var(--st-online-fill) !important;
+}
+html.light [class*="border-emerald-500/"],
+html.light [class*="border-green-500/"] {
+  border-color: var(--st-online-border) !important;
+}
+html.light [class*="bg-rose-500/"],
+html.light [class*="bg-red-500/"] {
+  background-color: var(--st-danger-fill) !important;
+}
+html.light [class*="border-rose-500/"],
+html.light [class*="border-red-500/"] {
+  border-color: var(--st-danger-border) !important;
+}
+html.light [class*="bg-amber-500/"],
+html.light [class*="bg-yellow-500/"],
+html.light [class*="bg-orange-500/"] {
+  background-color: var(--st-warn-fill) !important;
+}
+html.light [class*="border-amber-500/"],
+html.light [class*="border-yellow-500/"],
+html.light [class*="border-orange-500/"] {
+  border-color: var(--st-warn-border) !important;
+}
+html.light [class*="bg-cyan-500/"],
+html.light [class*="bg-sky-500/"] {
+  background-color: var(--st-info-fill) !important;
+}
+html.light [class*="border-cyan-500/"],
+html.light [class*="border-sky-500/"] {
+  border-color: var(--st-info-border) !important;
+}
+html.light [class*="bg-blue-500/"],
+html.light [class*="bg-indigo-500/"] {
+  background-color: var(--st-blue-fill) !important;
+}
+html.light [class*="border-blue-500/"],
+html.light [class*="border-indigo-500/"] {
+  border-color: var(--st-blue-border) !important;
+}
+html.light [class*="bg-pink-500/"],
+html.light [class*="bg-fuchsia-500/"] {
+  background-color: var(--st-redir-fill) !important;
+}
+html.light [class*="border-pink-500/"],
+html.light [class*="border-fuchsia-500/"] {
+  border-color: var(--st-redir-border) !important;
+}
+html.light [class*="bg-purple-500/"],
+html.light [class*="bg-violet-500/"] {
+  background-color: var(--st-pro-fill) !important;
+}
+html.light [class*="border-purple-500/"],
+html.light [class*="border-violet-500/"] {
+  border-color: var(--st-pro-border) !important;
+}
+
+/* ---------- 7. GRADIENTS ---------- */
+/* Neutralize near-black gradient stops so scrims don't become dark blotches.
+   Colored mid-tone brand gradients (from-cyan-500, from-purple-500, …) are
+   left intact — they read fine on light. */
+html.light [class*="from-black"],
+html.light [class*="from-zinc-950"],
+html.light [class*="from-zinc-900"],
+html.light [class*="from-slate-950"],
+html.light [class*="from-slate-900"] {
+  --tw-gradient-from: rgba(15, 23, 42, 0.06) var(--tw-gradient-from-position) !important;
+}
+html.light .to-\[\#0c0d10\],
+html.light [class*="to-black"],
+html.light [class*="to-zinc-950"],
+html.light [class*="to-zinc-900"],
+html.light [class*="to-slate-950"],
+html.light [class*="to-slate-900"] {
+  --tw-gradient-to: var(--surface) var(--tw-gradient-to-position) !important;
+}
+html.light .from-emerald-950\/40 {
+  --tw-gradient-from: var(--st-online-fill) var(--tw-gradient-from-position) !important;
+}
+html.light .from-red-950\/90,
+html.light .from-rose-950\/90 {
+  --tw-gradient-from: var(--st-danger-fill) var(--tw-gradient-from-position) !important;
+}
+
+/* ---------- 8. SHADOWS & GLOWS ---------- */
+html.light .shadow-2xl,
+html.light .shadow-xl {
+  box-shadow: var(--shadow-lg) !important;
+}
+html.light .shadow-lg,
+html.light .shadow-md,
+html.light [class*="shadow-black"],
+html.light [class*="shadow-["],
+html.light [class*="shadow-emerald"],
+html.light [class*="shadow-cyan"],
+html.light [class*="shadow-amber"],
+html.light [class*="shadow-rose"],
+html.light [class*="shadow-red"],
+html.light [class*="shadow-purple"],
+html.light [class*="shadow-pink"],
+html.light [class*="shadow-sky"],
+html.light [class*="shadow-blue"] {
+  box-shadow: var(--shadow-md) !important;
+}
+html.light .shadow-inner {
+  box-shadow: inset 0 1px 2px rgba(15, 23, 42, 0.05) !important;
+}
+
+/* ---------- 9. SCAN-BEAM effects (dark leading tip visible on white) ---------- */
+html.light .scanning-card-active::before {
+  background: conic-gradient(
+    from var(--scan-angle, 0deg),
+    rgba(8, 145, 178, 0.04) 0deg,
+    rgba(8, 145, 178, 0.04) 220deg,
+    rgba(8, 145, 178, 0.22) 280deg,
+    rgba(8, 145, 178, 0.55) 320deg,
+    rgba(8, 145, 178, 0.9) 350deg,
+    var(--ink) 358deg,
+    rgba(8, 145, 178, 0.04) 360deg
+  );
+}
+html.light .auto-scan-beam-active::before {
+  background: conic-gradient(
+    from var(--scan-angle, 0deg),
+    rgba(8, 145, 178, 0.05) 0deg,
+    rgba(8, 145, 178, 0.05) 220deg,
+    rgba(8, 145, 178, 0.28) 280deg,
+    rgba(8, 145, 178, 0.62) 320deg,
+    rgba(8, 145, 178, 0.95) 355deg,
+    var(--ink) 358deg,
+    rgba(8, 145, 178, 0.05) 360deg
+  );
+}
+html.light .super-scan-beam-active::before {
+  background: conic-gradient(
+    from var(--scan-angle, 0deg),
+    rgba(217, 119, 6, 0.05) 0deg,
+    rgba(217, 119, 6, 0.05) 200deg,
+    rgba(124, 58, 237, 0.3) 260deg,
+    rgba(217, 119, 6, 0.7) 310deg,
+    rgba(180, 83, 9, 1) 355deg,
+    var(--ink) 358deg,
+    rgba(217, 119, 6, 0.05) 360deg
+  );
+}
+
+/* ---------- Chrome: scrollbars & autofill ---------- */
+html.light ::-webkit-scrollbar-thumb {
+  background: rgba(15, 23, 42, 0.15) !important;
+}
+html.light ::-webkit-scrollbar-thumb:hover {
+  background: rgba(15, 23, 42, 0.3) !important;
+}
+html.light input:-webkit-autofill,
+html.light input:-webkit-autofill:hover,
+html.light input:-webkit-autofill:focus,
+html.light input:-webkit-autofill:active,
+html.light textarea:-webkit-autofill,
+html.light select:-webkit-autofill {
+  -webkit-box-shadow: 0 0 0 1000px var(--surface) inset !important;
+  -webkit-text-fill-color: var(--ink) !important;
+  caret-color: var(--ink) !important;
+  border-color: var(--line-strong) !important;
 }

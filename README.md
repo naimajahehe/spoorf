@@ -1,9 +1,9 @@
-﻿# Spoorf Sentinel (NetCut Sentinel)
+# Spoorf Sentinel (NetCut Sentinel)
 
 <div align="center">
 
 ![NetCut Sentinel Banner](https://img.shields.io/badge/NetCut%20Sentinel-v2.21.0-6366f1?style=for-the-badge&logo=shield&logoColor=white)
-![Build & Tests](https://img.shields.io/badge/Tests-172%2F172%20Passed%20(100%25)-10b981?style=for-the-badge&logo=checkmarx)
+![Build & Tests](https://img.shields.io/badge/Tests-196%2F196%20Passed%20(100%25)-10b981?style=for-the-badge&logo=checkmarx)
 ![License](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge)
 ![Platform](https://img.shields.io/badge/Platform-Windows%2010%2F11%20x64-0078d4?style=for-the-badge&logo=windows)
 
@@ -34,12 +34,12 @@ Whether performing network inventory discovery, analyzing bandwidth consumption 
 - **Bidirectional ARP Poisoning**: Target $\leftrightarrow$ Gateway routing interception with sub-second cut precision.
 - **PWM (Pulse-Width Modulation) Throttling**: Regulates target download/upload bandwidth between 0% and 100% via rapid duty-cycle ARP injection.
 - **Safe & Instant Restoration**: Restores authentic gateway MAC tables cleanly without disconnecting legitimate network devices.
-- **Auto-Reblock Persistence**: Uses embedded SQLite (WAL mode) to remember blocked/throttled devices and automatically re-apply policies as soon as they reconnect.
+- **Auto-Reblock & Stale Retention**: Uses embedded SQLite (WAL mode) to automatically re-block targets on reconnect, while cleanly archiving stale guest devices (>14 days offline) to prevent ghost clutter.
 
-### 📈 3. Sub-Second Real-Time Telemetry
+### 📈 3. Sub-Second Real-Time Telemetry & Gaming Mode 2.0
 - **Live Throughput Visualizer**: 1-second interval download/upload telemetry powered by native `psutil` sampling and smooth SVG live charts.
-- **Gateway Ping & Jitter Telemetry**: Continuous round-trip time (RTT) monitoring to verify link health.
-- **Gaming Mode QoS**: Ultra-low latency optimization with anti-jitter priority enforcement.
+- **True ICMP RTT & Jitter Parser**: Real-time ping telemetry parsed directly from physical ICMP responses rather than CPU-skewed process timers.
+- **Gaming Mode QoS 2.0**: Dual-mode engine (`auto_airtime` 20% limit & `blackhole_priority` 0% cut) with dynamic late-joiner throttling and hardcoded anti-self-cut protection.
 
 ### 🛡️ 4. Non-Negotiable Safety & Defense Invariants
 - **Default Gateway Immunity (`is_gateway: true`)**: Hardcoded immunity preventing operators from accidentally cutting the router gateway.
@@ -125,7 +125,7 @@ flowchart TB
 │   │   ├── services/           # DeviceManager, DatabaseService, PythonBridge
 │   │   ├── websocket/          # Socket.IO streaming handlers
 │   │   └── security.ts         # Host/Origin/Token guard validators
-│   └── tests/                  # Automated integration and unit tests (27 suites)
+│   └── tests/                  # Automated integration and unit tests (34 tests)
 │
 ├── python-service/             # Low-level network microservice (:8001)
 │   ├── src/
@@ -136,7 +136,7 @@ flowchart TB
 │   │   │   └── interceptor/    # TLS Dynamic CA & Leaf generator
 │   │   ├── server.py           # FastAPI REST & WebSocket event endpoints
 │   │   └── utils/              # Configuration and structured logging
-│   └── tests/                  # PyUnit comprehensive test suite (145 tests)
+│   └── tests/                  # PyUnit comprehensive test suite (162 tests)
 │
 ├── frontend-react/             # React 18 + Tailwind CSS + Framer Motion UI (:5173)
 │   ├── src/
@@ -247,19 +247,19 @@ The output installer will be generated in `desktop-electron/dist-installer/Spoor
 The repository includes a 100% automated test suite verifying every component from Scapy packet construction to SQLite state rollback:
 
 ```powershell
-# Run Python Unit & Integration Tests (145 tests)
+# Run Python Unit & Integration Tests (162 tests)
 cd python-service
 .\venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py" -v
 
-# Run Node.js Orchestrator & Security Tests (27 suites)
+# Run Node.js Orchestrator & Security Tests (34 tests)
 cd ../backend-node
 npm test
 ```
 
 **Test Coverage Summary**:
-- `145 / 145` Python Tests Passed (L2/L3 Spoofing, IPv6 NDP, SYN Scanner, TLS Interceptor, Shield, AP Isolation)
-- `27 / 27` Node.js Suites Passed (Auto-Reblock, Mutex Serialization, License Gating, Security Headers)
-- **Total: 172 Automated Test Assertions**
+- `162 / 162` Python Tests Passed (L2/L3 Spoofing, IPv6 NDP, SYN Scanner, TLS Interceptor, Shield, AP Isolation, True ICMP RTT)
+- `34 / 34` Node.js Tests Passed (Auto-Reblock, Mutex Serialization, License Gating, Security Headers, Gaming Mode QoS, Stale Retention)
+- **Total: 196 Automated Test Assertions**
 
 ---
 

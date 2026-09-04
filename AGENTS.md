@@ -46,14 +46,14 @@ When modifying or refactoring code in this repository, you **MUST NEVER VIOLATE*
 
 ## 3. Automated Test Verification
 
-Always run the automated test suites before finishing any task (semua hijau saat audit 2026-08-31: **145 Python + 27 Node**):
+Always run the automated test suites before finishing any task (semua hijau: **162 Python + 34 Node = 196 tests**):
 
 ```powershell
-# 1. Run Python Service Unit & API Tests (~145 tests)
+# 1. Run Python Service Unit & API Tests (162 tests)
 cd d:/spoorf/python-service
 .\venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py" -v
 
-# 2. Run Node.js Backend Tests (27 tests, termasuk unit_security)
+# 2. Run Node.js Backend Tests (34 tests, termasuk unit_security & unit_gamingMode)
 cd d:/spoorf/backend-node
 npm test
 ```
