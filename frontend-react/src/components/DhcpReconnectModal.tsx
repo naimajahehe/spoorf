@@ -18,6 +18,10 @@ import {
 } from 'lucide-react';
 import { Device } from '../types';
 import { apiFetch } from '../api/client';
+import {
+    calculateDhcpCoverage,
+    hasDhcpEvidence
+} from '../lib/dhcpProfiling';
 import { cn } from '../lib/utils';
 
 interface Props {
@@ -26,6 +30,20 @@ interface Props {
     onClose: () => void;
     onTriggerReScan: () => void;
     onQuickReauth?: () => Promise<any>;
+}
+
+interface DhcpOptimizationResult {
+    delivery?: {
+        attempted?: number;
+        succeeded?: number;
+        failed?: number;
+    };
+    dhcpDelta?: {
+        new_count?: number;
+        updated_count?: number;
+    };
+    cached?: boolean;
+    duration_ms?: number;
 }
 
 export const DhcpReconnectModal: FC<Props> = ({
@@ -38,19 +56,26 @@ export const DhcpReconnectModal: FC<Props> = ({
     const [isOptimizing, setIsOptimizing] = useState(false);
     const [isReauthing, setIsReauthing] = useState(false);
     const [statusMessage, setStatusMessage] = useState<string | null>(null);
+    const [lastOptimization, setLastOptimization] = useState<DhcpOptimizationResult | null>(null);
 
-    // Hitung rasio profiling Teknik 3B
-    const profilingStats = useMemo(() => {
-        const nonGatewayDevices = devices.filter(d => !d.is_gateway && d.is_online);
-        const total = nonGatewayDevices.length;
-        const profiled = nonGatewayDevices.filter(d => 
-            Boolean(d.dhcp_fingerprint || d.dhcp_vendor_class || (d.hostname && !d.hostname.startsWith('Unknown') && d.hostname !== d.ip))
-        ).length;
-        const percentage = total > 0 ? Math.round((profiled / total) * 100) : 100;
-        return { total, profiled, percentage };
+    const profilingStats = useMemo(
+        () => calculateDhcpCoverage(devices),
+        [devices]
+    );
+    const eligibleDevices = useMemo(() => {
+        const unique = new Map<string, Device>();
+        for (const device of devices) {
+            if (!device.is_online || device.is_gateway || device.is_self) continue;
+            const key = device.mac?.toLowerCase();
+            if (key && !unique.has(key)) unique.set(key, device);
+        }
+        return Array.from(unique.values());
     }, [devices]);
 
-    const unknownCount = Math.max(0, profilingStats.total - profilingStats.profiled);
+    const unknownCount = Math.max(
+        0,
+        profilingStats.eligible - profilingStats.dhcpProfiled
+    );
 
     if (!isOpen) return null;
 
@@ -74,22 +99,32 @@ export const DhcpReconnectModal: FC<Props> = ({
 
     const handleTriggerWakeup = async () => {
         setIsOptimizing(true);
-        setStatusMessage('Menyiarkan DHCP & Multicast Wake-up Burst...');
+        setLastOptimization(null);
+        setStatusMessage('Menjalankan discovery refresh dan mengamati DHCP selama 4 detik...');
         try {
             const res = await apiFetch('/api/network/optimize-dhcp', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' }
             });
-            if (res.ok) {
-                setStatusMessage('✅ Sinyal wake-up terkirim! Memindai ulang profil jaringan...');
-                onTriggerReScan();
-            } else {
-                setStatusMessage('⚠️ Gagal mengirim sinyal wake-up, menjalankan scan fallback...');
-                onTriggerReScan();
+            const payload = await res.json().catch(() => ({}));
+            if (!res.ok) {
+                throw new Error(payload.error || `Discovery Refresh gagal (${res.status})`);
             }
+            const result = (payload.data || {}) as DhcpOptimizationResult;
+            setLastOptimization(result);
+            const newCount = result.dhcpDelta?.new_count || 0;
+            const updatedCount = result.dhcpDelta?.updated_count || 0;
+            setStatusMessage(
+                newCount + updatedCount > 0
+                    ? `Discovery selesai: ${newCount} profil DHCP baru, ${updatedCount} diperbarui.`
+                    : 'Discovery selesai, tetapi tidak ada DHCP handshake baru yang teramati.'
+            );
         } catch (e) {
-            setStatusMessage('⚠️ Menjalankan scan lokal...');
-            onTriggerReScan();
+            setStatusMessage(
+                e instanceof Error
+                    ? `Discovery Refresh gagal: ${e.message}`
+                    : 'Discovery Refresh gagal.'
+            );
         } finally {
             setTimeout(() => {
                 setIsOptimizing(false);
@@ -134,11 +169,11 @@ export const DhcpReconnectModal: FC<Props> = ({
                                         Optimasi Teknik 3B (DHCP Profiling)
                                     </h2>
                                     <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-medium bg-amber-500/15 text-amber-300 border border-amber-500/30">
-                                        Zero-Second Passive Fingerprint
+                                        Measured Passive Evidence
                                     </span>
                                 </div>
                                 <p className="text-xs text-zinc-400">
-                                    Tangkap nama host asli, OS, dan signature perangkat secara deterministik saat handshake Wi-Fi.
+                                    Gabungkan discovery aktif yang aman dengan evidence DHCP yang benar-benar terlihat oleh controller.
                                 </p>
                             </div>
                         </div>
@@ -158,11 +193,18 @@ export const DhcpReconnectModal: FC<Props> = ({
                         {/* Hero Stats Meter */}
                         <div className="p-4 rounded-xl bg-gradient-to-r from-white/[0.04] to-white/[0.01] border border-white/[0.08] flex flex-col sm:flex-row items-center justify-between gap-4">
                             <div className="flex flex-col gap-1 text-center sm:text-left">
-                                <span className="text-xs text-zinc-400 font-medium">Status Profiling Teknik 3B di Subnet Ini</span>
+                                <span className="text-xs text-zinc-400 font-medium">DHCP Evidence Coverage di Subnet Ini</span>
                                 <div className="flex items-baseline gap-2 justify-center sm:justify-start">
-                                    <span className="text-2xl font-bold text-white font-mono">{profilingStats.profiled} / {profilingStats.total}</span>
-                                    <span className="text-xs text-emerald-400 font-medium font-mono">({profilingStats.percentage}% Perangkat Ter-profiling)</span>
+                                    <span className="text-2xl font-bold text-white font-mono">
+                                        {profilingStats.dhcpProfiled} / {profilingStats.eligible}
+                                    </span>
+                                    <span className="text-xs text-emerald-400 font-medium font-mono">
+                                        ({profilingStats.dhcpPercentage === null ? 'N/A' : `${profilingStats.dhcpPercentage}%`} Evidence DHCP)
+                                    </span>
                                 </div>
+                                <span className="text-[10px] text-zinc-500 font-mono">
+                                    Discovery profile: {profilingStats.discoveryPercentage === null ? 'N/A' : `${profilingStats.discoveryPercentage}%`}
+                                </span>
                             </div>
 
                             {/* Progress bar visual */}
@@ -170,17 +212,17 @@ export const DhcpReconnectModal: FC<Props> = ({
                                 <div className="h-2 w-full bg-white/[0.06] rounded-full overflow-hidden border border-white/[0.04]">
                                     <motion.div
                                         initial={{ width: 0 }}
-                                        animate={{ width: `${profilingStats.percentage}%` }}
+                                        animate={{ width: `${profilingStats.dhcpPercentage || 0}%` }}
                                         transition={{ duration: 0.8, ease: "easeOut" }}
                                         className={cn(
                                             "h-full rounded-full transition-all",
-                                            profilingStats.percentage >= 80 ? "bg-gradient-to-r from-emerald-500 to-teal-400" : "bg-gradient-to-r from-amber-500 to-orange-400"
+                                            (profilingStats.dhcpPercentage || 0) >= 80 ? "bg-gradient-to-r from-emerald-500 to-teal-400" : "bg-gradient-to-r from-amber-500 to-orange-400"
                                         )}
                                     />
                                 </div>
                                 <div className="flex justify-between text-[10px] text-zinc-400 font-mono">
-                                    <span>Handshake Terekam</span>
-                                    <span>{profilingStats.percentage}%</span>
+                                    <span>Evidence DHCP unik per MAC</span>
+                                    <span>{profilingStats.dhcpPercentage === null ? 'N/A' : `${profilingStats.dhcpPercentage}%`}</span>
                                 </div>
                             </div>
                         </div>
@@ -194,10 +236,10 @@ export const DhcpReconnectModal: FC<Props> = ({
                                         <div className="size-6 rounded-lg bg-amber-500/10 flex items-center justify-center text-amber-400">
                                             <Sparkles size={13} />
                                         </div>
-                                        <h3 className="text-xs font-semibold text-white">Metode 1: Pemicu Otomatis (Controller)</h3>
+                                        <h3 className="text-xs font-semibold text-white">Metode 1: Discovery Refresh & DHCP Observation</h3>
                                     </div>
                                     <p className="text-[11px] text-zinc-400 leading-relaxed">
-                                        Kirim siaran <strong>Multicast & ARP Wake-Up Burst</strong> ke seluruh subnet untuk membangunkan radio Wi-Fi perangkat yang tertidur dan memancing perbaruan sewa IP DHCP.
+                                        Kirim satu burst mDNS/SSDP/LLMNR, amati DHCP alami selama 4 detik, lalu jalankan satu scan. Metode ini <strong>tidak memaksa renewal DHCP</strong>.
                                     </p>
                                 </div>
 
@@ -213,7 +255,7 @@ export const DhcpReconnectModal: FC<Props> = ({
                                     )}
                                 >
                                     <RefreshCw size={13} className={cn(isOptimizing && "animate-spin")} />
-                                    <span>{isOptimizing ? 'Mengoptimasi & Memindai...' : '🚀 Trigger Wake-Up & Re-Scan'}</span>
+                                    <span>{isOptimizing ? 'Mengamati & Memindai...' : 'Jalankan Discovery Refresh'}</span>
                                 </button>
                             </div>
 
@@ -227,7 +269,7 @@ export const DhcpReconnectModal: FC<Props> = ({
                                         <h3 className="text-xs font-semibold text-white">Metode 2: Reconnect Perangkat Target</h3>
                                     </div>
                                     <p className="text-[11px] text-zinc-400 leading-relaxed">
-                                        Untuk akurasi 100%, mintalah pengguna target melakukan reconnect Wi-Fi singkat:
+                                        Untuk peluang capture DHCP yang lebih tinggi, mintalah pengguna target melakukan reconnect Wi-Fi singkat:
                                     </p>
                                     <div className="space-y-1.5 text-[11px] text-zinc-300">
                                         <div className="flex items-center gap-2">
@@ -240,7 +282,7 @@ export const DhcpReconnectModal: FC<Props> = ({
                                         </div>
                                         <div className="flex items-center gap-2">
                                             <span className="size-4 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center text-[10px] font-mono">3</span>
-                                            <span>Teknik 3B menangkap handshake dalam <strong>0 detik!</strong></span>
+                                            <span>Event diproses segera setelah paket DHCP terlihat oleh controller.</span>
                                         </div>
                                     </div>
                                 </div>
@@ -298,6 +340,35 @@ export const DhcpReconnectModal: FC<Props> = ({
                             </motion.div>
                         )}
 
+                        {lastOptimization && (
+                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                                <div className="p-2.5 rounded-lg bg-white/[0.025] border border-white/[0.06]">
+                                    <div className="text-[9px] text-zinc-500 uppercase">Datagram terkirim</div>
+                                    <div className="mt-1 text-sm font-mono text-emerald-400">
+                                        {lastOptimization.delivery?.succeeded || 0}
+                                    </div>
+                                </div>
+                                <div className="p-2.5 rounded-lg bg-white/[0.025] border border-white/[0.06]">
+                                    <div className="text-[9px] text-zinc-500 uppercase">Datagram gagal</div>
+                                    <div className="mt-1 text-sm font-mono text-amber-400">
+                                        {lastOptimization.delivery?.failed || 0}
+                                    </div>
+                                </div>
+                                <div className="p-2.5 rounded-lg bg-white/[0.025] border border-white/[0.06]">
+                                    <div className="text-[9px] text-zinc-500 uppercase">DHCP baru</div>
+                                    <div className="mt-1 text-sm font-mono text-cyan-400">
+                                        {lastOptimization.dhcpDelta?.new_count || 0}
+                                    </div>
+                                </div>
+                                <div className="p-2.5 rounded-lg bg-white/[0.025] border border-white/[0.06]">
+                                    <div className="text-[9px] text-zinc-500 uppercase">DHCP diperbarui</div>
+                                    <div className="mt-1 text-sm font-mono text-blue-400">
+                                        {lastOptimization.dhcpDelta?.updated_count || 0}
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
                         {/* Device List Status Breakdown */}
                         <div className="space-y-2.5 pt-2">
                             <div className="flex items-center justify-between">
@@ -305,13 +376,13 @@ export const DhcpReconnectModal: FC<Props> = ({
                                     Daftar Status Perangkat di Subnet
                                 </h4>
                                 <span className="text-[11px] text-zinc-500 font-mono">
-                                    {devices.filter(d => !d.is_gateway && d.is_online).length} Perangkat Online
+                                    {eligibleDevices.length} Perangkat Online
                                 </span>
                             </div>
 
                             <div className="rounded-xl border border-white/[0.06] overflow-hidden divide-y divide-white/[0.04] bg-white/[0.01]">
-                                {devices.filter(d => !d.is_gateway && d.is_online).map((dev) => {
-                                    const hasDhcp = Boolean(dev.dhcp_fingerprint || dev.dhcp_vendor_class);
+                                {eligibleDevices.map((dev) => {
+                                    const hasDhcp = hasDhcpEvidence(dev);
                                     const devName = dev.alias && dev.alias.trim() !== ''
                                         ? dev.alias.trim()
                                         : (dev.hostname && dev.hostname.trim() !== '' ? dev.hostname : dev.ip);

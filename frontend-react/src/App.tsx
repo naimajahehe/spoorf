@@ -69,6 +69,7 @@ import { apiClient } from './api/client';
 import { sortDevices } from './lib/deviceSort';
 import { playChimeSound, requestNotificationPermission, sendDesktopNotification, isNotificationMuted, setNotificationMuted } from './lib/notifications';
 import { ThemeMode, getInitialTheme, applyTheme, toggleTheme } from './lib/theme';
+import { hasDhcpEvidence } from './lib/dhcpProfiling';
 import { cn } from './lib/utils';
 import './App.css';
 
@@ -896,7 +897,9 @@ function App() {
     }, [dedupedDevices]);
 
     const dhcpUnprofiledCount = useMemo(() => {
-        return dedupedDevices.filter(d => !d.is_gateway && d.is_online && !d.dhcp_fingerprint && !d.dhcp_vendor_class).length;
+        return dedupedDevices.filter(
+            d => !d.is_gateway && !d.is_self && d.is_online && !hasDhcpEvidence(d)
+        ).length;
     }, [dedupedDevices]);
 
     // Checkbox selection handlers (Gateway tidak dapat dipilih)
