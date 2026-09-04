@@ -1086,7 +1086,10 @@ export async function runDeviceManagerTests() {
         assert.strictEqual(callsBeforeRelease, 1, 'concurrent optimization must share one observation');
         assert.strictEqual(observationCalls, 1);
         assert.strictEqual(scanOptions.length, 1, 'one optimization must perform one scan');
-        assert.deepStrictEqual(scanOptions[0], { skipMulticastWakeup: true });
+        assert.deepStrictEqual(scanOptions[0], {
+            skipMulticastWakeup: true,
+            requireFresh: true
+        });
         assert.deepStrictEqual(firstResult, secondResult);
         assert.strictEqual(firstResult.cached, false);
 
@@ -1107,7 +1110,10 @@ export async function runDeviceManagerTests() {
             'a network generation change must invalidate the previous cooldown result'
         );
         assert.strictEqual(refreshed.cached, false);
-        assert.deepStrictEqual(scanOptions, [{ skipMulticastWakeup: true }]);
+        assert.deepStrictEqual(scanOptions, [{
+            skipMulticastWakeup: true,
+            requireFresh: true
+        }]);
         console.log('  ✓ DHCP optimization: one observation, one scan, single-flight, and cooldown reuse');
     }
 
@@ -1208,6 +1214,83 @@ export async function runDeviceManagerTests() {
         assert.strictEqual(target.dhcp_client_id, scanned.dhcp_client_id);
         assert.strictEqual(target.dhcp_fqdn, scanned.dhcp_fqdn);
         console.log('  ✓ Scan merge: existing memory receives every DHCP evidence field');
+    }
+
+    // Test 25: a new DHCP device during Method 1 must not queue a second scan.
+    {
+        const python: any = new EventEmitter();
+        const manager = new DeviceManager(python, {} as any);
+        const scheduled: number[] = [];
+        (manager as any).debouncedScan = (delay: number) => {
+            scheduled.push(delay);
+        };
+        (manager as any).inFlightDhcpOptimization = Promise.resolve({});
+
+        await (manager as any)._handleDhcpEvent({
+            mac: 'aa:bb:cc:dd:ee:99',
+            ip: '192.168.1.99',
+            hostname: 'New-DHCP-Device',
+            vendor_class: 'android-dhcp-14',
+            message_type: 'REQUEST'
+        });
+
+        assert.deepStrictEqual(
+            scheduled,
+            [],
+            'the Method 1 workflow owns enrichment for newly observed devices'
+        );
+        console.log('  ✓ DHCP optimization: new-device events do not queue a second scan');
+    }
+
+    // Test 26: Method 1 waits for an older scan, then runs its own post-observation scan.
+    {
+        const python: any = new EventEmitter();
+        let releaseOldScan!: () => void;
+        const oldScanGate = new Promise<void>(resolve => {
+            releaseOldScan = resolve;
+        });
+        const scanCalls: any[] = [];
+        python.scan = async (options?: any) => {
+            scanCalls.push(options);
+            if (scanCalls.length === 1) {
+                await oldScanGate;
+            }
+            return [];
+        };
+        python.optimizeDhcpProfiling = async () => ({
+            success: true,
+            data: {
+                delivery: { attempted: 6, succeeded: 6, failed: 0 },
+                dhcp_delta: { new_count: 0, updated_count: 0 }
+            }
+        });
+        const db: any = {
+            syncScanResults: async () => ({
+                allDevices: [],
+                autoReblockTargets: [],
+                autoThrottleTargets: [],
+                zombieSessionsToStop: []
+            })
+        };
+        const manager = new DeviceManager(python, db);
+
+        const oldScan = manager.scanNetwork();
+        await new Promise(resolve => setImmediate(resolve));
+        const optimization = manager.optimizeDhcpProfiling();
+        await new Promise(resolve => setImmediate(resolve));
+        assert.strictEqual(
+            scanCalls.length,
+            1,
+            'post-observation scan must wait instead of reusing an older scan result'
+        );
+
+        releaseOldScan();
+        await oldScan;
+        await optimization;
+
+        assert.strictEqual(scanCalls.length, 2);
+        assert.deepStrictEqual(scanCalls[1], { skipMulticastWakeup: true });
+        console.log('  ✓ DHCP optimization: post-observation scan is fresh and wakeup-suppressed');
     }
 
 }

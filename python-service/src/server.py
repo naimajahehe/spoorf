@@ -39,6 +39,7 @@ from .core.network import (
     clear_wifi_cache,
     get_current_gateway,
     get_network_info,
+    get_self_mac,
     is_valid_private_ip,
     is_valid_private_network,
 )
@@ -65,6 +66,23 @@ app = FastAPI(
     description="Modular High-Performance Layer 2 Network Discovery, ARP Spoofing, L7 Interception & Bettercap Security Suite Engine",
     version="2.3.0"
 )
+
+
+def _filter_dhcp_observation_snapshot(
+    snapshot: Dict[str, Dict[str, Any]],
+    controller_ip: str,
+    gateway_ip: str,
+    controller_mac: str,
+) -> Dict[str, Dict[str, Any]]:
+    """Exclude controller and gateway infrastructure from target profile metrics."""
+    normalized_self_mac = controller_mac.lower().replace('-', ':')
+    excluded_ips = {controller_ip, gateway_ip}
+    return {
+        mac: entry
+        for mac, entry in snapshot.items()
+        if mac.lower().replace('-', ':') != normalized_self_mac
+        and str(entry.get('ip') or '').strip() not in excluded_ips
+    }
 
 # CORS terkunci: engine hanya dipanggil Node (server-to-server, tidak terikat CORS).
 # Browser TIDAK boleh memanggil engine langsung -> menutup drive-by ARP spoofing dari website.
@@ -589,7 +607,13 @@ async def trigger_dhcp_wakeup():
 
     running_loop = asyncio.get_running_loop()
     try:
-        before = dhcp_cache.get_unique_snapshot()
+        controller_mac = get_self_mac() or ''
+        before = _filter_dhcp_observation_snapshot(
+            dhcp_cache.get_unique_snapshot(),
+            controller_ip,
+            gateway_ip,
+            controller_mac,
+        )
         delivery = await running_loop.run_in_executor(
             executor,
             send_multicast_wakeup,
@@ -601,7 +625,12 @@ async def trigger_dhcp_wakeup():
             )
 
         await asyncio.sleep(4.0)
-        after = dhcp_cache.get_unique_snapshot()
+        after = _filter_dhcp_observation_snapshot(
+            dhcp_cache.get_unique_snapshot(),
+            controller_ip,
+            gateway_ip,
+            controller_mac,
+        )
         dhcp_delta = diff_dhcp_profiles(before, after)
         return {
             "success": True,

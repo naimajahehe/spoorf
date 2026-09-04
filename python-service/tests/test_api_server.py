@@ -246,6 +246,11 @@ class TestServerAPI(unittest.TestCase):
     def test_dhcp_wakeup_reports_observed_profile_delta(self):
         """The observation response must compare unique DHCP profiles after the wait."""
         before = {
+            '00:11:22:33:44:55': {
+                'mac': '00:11:22:33:44:55',
+                'ip': '192.168.1.100',
+                'hostname': 'Controller-Old',
+            },
             'aa:bb:cc:dd:ee:01': {
                 'mac': 'aa:bb:cc:dd:ee:01',
                 'ip': '192.168.1.20',
@@ -253,6 +258,16 @@ class TestServerAPI(unittest.TestCase):
             }
         }
         after = {
+            '00:11:22:33:44:55': {
+                'mac': '00:11:22:33:44:55',
+                'ip': '192.168.1.100',
+                'hostname': 'Controller-New',
+            },
+            '00:aa:bb:cc:dd:ee': {
+                'mac': '00:aa:bb:cc:dd:ee',
+                'ip': '192.168.1.1',
+                'hostname': 'Gateway',
+            },
             'aa:bb:cc:dd:ee:01': {
                 'mac': 'aa:bb:cc:dd:ee:01',
                 'ip': '192.168.1.20',
@@ -285,6 +300,10 @@ class TestServerAPI(unittest.TestCase):
             return_value='192.168.1.1',
             create=True,
         ), patch(
+            'src.server.get_self_mac',
+            return_value='00:11:22:33:44:55',
+            create=True,
+        ), patch(
             'src.server.dhcp_cache.get_unique_snapshot',
             side_effect=[before, after],
         ), patch(
@@ -297,6 +316,7 @@ class TestServerAPI(unittest.TestCase):
         self.assertEqual(response['data']['delivery'], delivery)
         self.assertEqual(response['data']['dhcp_delta']['new_count'], 1)
         self.assertEqual(response['data']['dhcp_delta']['updated_count'], 1)
+        self.assertEqual(response['data']['dhcp_profiled_count'], 2)
         mock_sleep.assert_awaited_once()
 
     def test_scan_endpoint_can_suppress_multicast_wakeup(self):

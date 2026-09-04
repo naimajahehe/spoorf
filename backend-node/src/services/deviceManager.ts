@@ -25,6 +25,10 @@ interface DhcpOptimizationResult {
     duration_ms: number;
 }
 
+interface DeviceScanOptions extends ScanOptions {
+    requireFresh?: boolean;
+}
+
 export function isIpInSameSubnet(ip: string, gatewayIp: string): boolean {
     if (!ip || !gatewayIp) return true;
     try {
@@ -328,7 +332,7 @@ export class DeviceManager extends EventEmitter {
                 });
 
                 // Debounce network scan: Hanya jadwalkan scan bila ada perangkat baru yang belum terdaftar di database/memory
-                if (isNewDevice) {
+                if (isNewDevice && !this.inFlightDhcpOptimization) {
                     this.debouncedScan();
                 }
             }
@@ -563,9 +567,24 @@ export class DeviceManager extends EventEmitter {
         };
     }
 
-    async scanNetwork(options: ScanOptions = {}): Promise<Device[]> {
+    async scanNetwork(options: DeviceScanOptions = {}): Promise<Device[]> {
         // Single-Flight Coalescing: bila scan sedang berjalan, bagikan promise yang sama tanpa antre ulang.
         if (this.inFlightScan) {
+            if (options.requireFresh) {
+                const priorScan = this.inFlightScan;
+                try {
+                    await priorScan;
+                } catch {
+                    // A fresh scan still gets one attempt after an older scan fails.
+                }
+                if (this.inFlightScan && this.inFlightScan !== priorScan) {
+                    return this.scanNetwork(options);
+                }
+                return this.scanNetwork({
+                    ...options,
+                    requireFresh: false
+                });
+            }
             console.log('⏳ [DeviceManager] Scan is already in progress, returning shared in-flight scan promise.');
             return this.inFlightScan;
         }
@@ -575,11 +594,15 @@ export class DeviceManager extends EventEmitter {
         return this.inFlightScan;
     }
 
-    private async _scanNetworkImpl(options: ScanOptions): Promise<Device[]> {
+    private async _scanNetworkImpl(options: DeviceScanOptions): Promise<Device[]> {
         this.scanning = true;
         this.emit('scanStarted');
         try {
-            let rawScanned = await this.python.scan(options);
+            let rawScanned = await this.python.scan(
+                options.skipMulticastWakeup
+                    ? { skipMulticastWakeup: true }
+                    : {}
+            );
 
             // Pastikan Komputer Operator (Perangkat Ini / Controller) selalu ada & Online!
             try {
@@ -1391,7 +1414,10 @@ export class DeviceManager extends EventEmitter {
             const startedAt = Date.now();
             console.log('⚡ [DeviceManager] Triggering measured Discovery Refresh & DHCP Observation...');
             const observation = await this.python.optimizeDhcpProfiling();
-            const devices = await this.scanNetwork({ skipMulticastWakeup: true });
+            const devices = await this.scanNetwork({
+                skipMulticastWakeup: true,
+                requireFresh: true
+            });
             if (generation !== this.dhcpOptimizationGeneration) {
                 throw new Error(
                     'Network changed before Discovery Refresh completed.'
