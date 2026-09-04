@@ -102,6 +102,8 @@ export class DeviceManager extends EventEmitter {
     private scanning: boolean = false;
     private inFlightScan: Promise<Device[]> | null = null;
     private inFlightDhcpOptimization: Promise<DhcpOptimizationResult> | null = null;
+    private inFlightDhcpOptimizationGeneration: number | null = null;
+    private dhcpOptimizationGeneration: number = 0;
     private lastDhcpOptimization: {
         completedAt: number;
         result: DhcpOptimizationResult;
@@ -140,6 +142,8 @@ export class DeviceManager extends EventEmitter {
         });
 
         this.python.on('networkChanged', (data) => {
+            this.dhcpOptimizationGeneration++;
+            this.lastDhcpOptimization = null;
             this.emit('networkChanged', data);
             this.scanNetwork().catch(console.error);
         });
@@ -1358,6 +1362,13 @@ export class DeviceManager extends EventEmitter {
 
     async optimizeDhcpProfiling(): Promise<DhcpOptimizationResult> {
         if (this.inFlightDhcpOptimization) {
+            if (
+                this.inFlightDhcpOptimizationGeneration !== this.dhcpOptimizationGeneration
+            ) {
+                throw new Error(
+                    'Network changed during Discovery Refresh. Wait for cleanup, then retry.'
+                );
+            }
             return this.inFlightDhcpOptimization;
         }
 
@@ -1374,11 +1385,18 @@ export class DeviceManager extends EventEmitter {
             };
         }
 
+        const generation = this.dhcpOptimizationGeneration;
+        this.inFlightDhcpOptimizationGeneration = generation;
         this.inFlightDhcpOptimization = (async () => {
             const startedAt = Date.now();
             console.log('⚡ [DeviceManager] Triggering measured Discovery Refresh & DHCP Observation...');
             const observation = await this.python.optimizeDhcpProfiling();
             const devices = await this.scanNetwork({ skipMulticastWakeup: true });
+            if (generation !== this.dhcpOptimizationGeneration) {
+                throw new Error(
+                    'Network changed before Discovery Refresh completed.'
+                );
+            }
             const completedAt = Date.now();
             const result: DhcpOptimizationResult = {
                 success: true,
@@ -1394,6 +1412,7 @@ export class DeviceManager extends EventEmitter {
             return result;
         })().finally(() => {
             this.inFlightDhcpOptimization = null;
+            this.inFlightDhcpOptimizationGeneration = null;
         });
 
         return this.inFlightDhcpOptimization;

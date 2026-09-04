@@ -1095,6 +1095,19 @@ export async function runDeviceManagerTests() {
         assert.strictEqual(scanOptions.length, 1, 'cooldown result must not repeat scan');
         assert.strictEqual(cached.cached, true);
         assert.ok(cached.cooldown_remaining_ms > 0);
+
+        scanOptions.length = 0;
+        python.emit('networkChanged', { new_gateway: '192.168.2.1' });
+        await new Promise(resolve => setImmediate(resolve));
+        scanOptions.length = 0;
+        const refreshed = await manager.optimizeDhcpProfiling();
+        assert.strictEqual(
+            observationCalls,
+            2,
+            'a network generation change must invalidate the previous cooldown result'
+        );
+        assert.strictEqual(refreshed.cached, false);
+        assert.deepStrictEqual(scanOptions, [{ skipMulticastWakeup: true }]);
         console.log('  ✓ DHCP optimization: one observation, one scan, single-flight, and cooldown reuse');
     }
 
