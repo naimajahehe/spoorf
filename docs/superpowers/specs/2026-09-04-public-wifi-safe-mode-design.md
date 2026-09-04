@@ -43,6 +43,149 @@ The feature is not intended to determine who owns another device, prove that an
 anomaly is an attack, bypass client isolation, or make public-network device
 control acceptable.
 
+## End-to-End User Flow
+
+### 1. Start the application
+
+The user opens Spoorf. Until the Python engine, active adapter, and current
+network identity have been checked, the global state is:
+
+```text
+UNKNOWN NETWORK - SAFE MODE ACTIVE
+```
+
+The dashboard remains usable for local status and diagnostics, but controls that
+could affect another device are disabled. If Administrator privileges are not
+available, the UI explains which self-protection actions are unavailable rather
+than treating the entire application as broken.
+
+### 2. Connect to a public Wi-Fi network
+
+Spoorf observes the new network generation and:
+
+1. stops and restores sessions associated with the previous network;
+2. clears ephemeral public-session observations;
+3. reads SSID, BSSID, gateway IP/MAC, subnet, interface, DNS, and local Windows
+   security posture;
+4. builds the network fingerprint;
+5. checks whether that exact fingerprint is already trusted;
+6. calculates the risk score and allowed capabilities.
+
+For a new or incomplete fingerprint, the result is `unknown`, with Safe Mode
+active.
+
+### 3. Review the Safety Center
+
+The user sees:
+
+- `PUBLIC NETWORK - SAFE MODE ACTIVE` or
+  `UNKNOWN NETWORK - SAFE MODE ACTIVE`;
+- risk score and evidence for every contribution;
+- current SSID, BSSID, gateway, subnet, DNS, and interface;
+- local exposure checks such as firewall, discovery, SMB, RDP, sharing, and
+  listening services;
+- incident timeline;
+- actions: `Mark Public`, `Trust This Network`, `Re-check`, and
+  `Disconnect Now`.
+
+Existing device-control features remain visible but disabled. Hovering or
+opening the control shows which capability is denied and why.
+
+### 4. Choose how to classify the network
+
+#### Mark Public
+
+The network profile is stored as `public`. Safe Mode remains active every time
+that fingerprint is seen. Spoorf continues self-only monitoring and does not
+persist public-session device, DNS, credential, or L7 content.
+
+#### Trust This Network
+
+The action is available only when all required fingerprint fields are present.
+The confirmation dialog displays:
+
+- SSID and BSSID;
+- gateway IP and MAC;
+- subnet;
+- interface type;
+- capabilities that will become available.
+
+After explicit confirmation, the exact fingerprint becomes `trusted`. Existing
+LAN-management features become available. Trusting one fingerprint never trusts
+another access point merely because it uses the same SSID.
+
+#### Re-check
+
+Spoorf discards the current posture snapshot, collects it again, and recomputes
+the fingerprint, score, and capability set. Re-check does not grant trust.
+
+#### Disconnect Now
+
+Spoorf attempts truthful cleanup, clears ephemeral data, and disconnects only
+the operator's Wi-Fi adapter. If cleanup or disconnect fails, the UI lists the
+unfinished stages and remains in a restricted recovery state.
+
+### 5. Operate while Safe Mode is active
+
+The user can:
+
+- watch connection health;
+- inspect their own exposure;
+- receive gateway, DHCP, DNS, and ARP anomaly alerts;
+- view incident history;
+- re-check posture;
+- manage trust profiles;
+- disconnect their own Wi-Fi.
+
+The user cannot:
+
+- actively scan other clients;
+- block or throttle another device;
+- start Gaming isolation;
+- redirect traffic;
+- start Transparent Gateway, DNS spoofing, or L7 interception;
+- enable LAN healing or retaliation against other clients.
+
+Attempts through UI, REST, Socket.IO, or direct Python access all receive the
+same policy-denied result.
+
+### 6. Handle a network anomaly
+
+If the gateway MAC, BSSID, subnet, or another trust-critical field changes:
+
+1. Spoorf invalidates the current trusted authorization;
+2. existing network-affecting sessions are stopped through the recovery-safe
+   lifecycle;
+3. Safe Mode becomes active;
+4. an incident records the old and new non-sensitive identities;
+5. the user sees the reason and may re-check, forget the old profile, or
+   explicitly trust the new complete fingerprint.
+
+Spoorf never labels another user as an attacker solely from the identity change.
+
+### 7. Leave or switch networks
+
+On disconnect, sleep/resume, adapter switch, or Wi-Fi roaming:
+
+1. the prior generation is invalidated;
+2. in-flight status refreshes are cancelled;
+3. public-session data is cleared;
+4. the new network begins as `unknown`;
+5. a matching complete trusted fingerprint may restore trusted capabilities
+   only after fresh posture verification.
+
+### 8. Return to a trusted home or office network
+
+When the complete observed fingerprint matches the stored trusted profile, the
+global badge changes to:
+
+```text
+TRUSTED NETWORK
+```
+
+Normal Spoorf capabilities become available. A mismatch in gateway, BSSID, or
+subnet returns the network to Safe Mode instead of silently inheriting trust.
+
 ## Product Principles
 
 1. Unknown networks fail closed.
