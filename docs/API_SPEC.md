@@ -71,6 +71,7 @@ Pada mode dev (`npm run dev` tanpa Electron), `SENTINEL_API_TOKEN` tidak diset â
 ### Endpoint Pemindaian & Kontrol Akses
 - **`POST /api/scan`**
   - **Deskripsi**: Menjalankan pemindaian jaringan multi-sensor di latar belakang (non-blocking thread pool).
+  - **Body opsional internal**: `{ "skip_multicast_wakeup": true }`. Default `false`; dipakai Method 1 setelah wake-up burst sudah dikirim agar satu workflow tidak mengirim burst kedua.
   - **Response `200 OK`**:
     ```json
     {
@@ -95,6 +96,48 @@ Pada mode dev (`npm run dev` tanpa Electron), `SENTINEL_API_TOKEN` tidak diset â
       ]
     }
     ```
+
+- **`POST /api/dhcp/wakeup`**
+  - **Deskripsi**: Menjalankan satu Discovery Refresh burst dan observation window DHCP alami selama empat detik. Endpoint tidak memaksa DHCP renewal.
+  - **Validasi**: controller IP, gateway, dan CIDR wajib berada pada topologi RFC 1918 yang sama. Gagal â†’ `400`.
+  - **Zero delivery**: bila tidak ada satu pun datagram discovery berhasil dikirim â†’ `503`.
+  - **Response `200 OK`**:
+    ```json
+    {
+      "success": true,
+      "data": {
+        "delivery": {
+          "attempted": 6,
+          "succeeded": 5,
+          "failed": 1,
+          "protocols": {
+            "ssdp_ipv4": true,
+            "mdns_ipv4": true,
+            "llmnr_ipv4": true,
+            "ssdp_ipv6": false,
+            "mdns_ipv6": true,
+            "llmnr_ipv6": true
+          },
+          "errors": [
+            { "protocol": "ssdp_ipv6", "error": "unavailable" }
+          ]
+        },
+        "dhcp_delta": {
+          "before_count": 4,
+          "after_count": 5,
+          "new_count": 1,
+          "updated_count": 2,
+          "unchanged_count": 2
+        },
+        "observation_seconds": 4.0
+      }
+    }
+    ```
+
+- **`POST /api/network/optimize-dhcp`** (Node `:5000`)
+  - **Deskripsi**: Mengorkestrasi `/api/dhcp/wakeup` lalu tepat satu `/api/scan` dengan `skip_multicast_wakeup=true`.
+  - Panggilan bersamaan menggunakan satu in-flight operation. Hasil terakhir digunakan kembali selama cooldown 20 detik dan ditandai `cached: true`.
+  - Response menambahkan `devices`, `duration_ms`, dan `cooldown_remaining_ms` ke delivery/delta yang diterima dari Python.
 
 - **`POST /api/spoof/start`**
   - **Body** (nama field aktual = `victim_*`, sesuai Pydantic `SpoofStartRequest`):

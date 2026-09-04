@@ -1,4 +1,4 @@
-# SPEC-002: Passive DHCP Sniffer Daemon & Option 53 Zero-Second Profiling
+# SPEC-002: Passive DHCP Sniffer Daemon & Measured Discovery Refresh
 
 | Metadata | Details |
 | :--- | :--- |
@@ -15,7 +15,7 @@
 
 Metode pemindaian aktif polling memerlukan interval waktu tertentu (misal tiap 5-10 detik) sehingga menimbulkan *blind spot* ketika ada perangkat baru yang baru saja terhubung ke Wi-Fi.
 
-SPEC-002 mengimplementasikan **Passive DHCP Sniffer Daemon** yang mendengarkan paket siaran DHCP pada port UDP 67/68 secara *real-time*. Begitu perangkat meminta IP dari router, sistem mengekstrak parameter identitas perangkat dari opsi DHCP sebelum perangkat tersebut sempat menyelesaikan handshake internetnya.
+SPEC-002 mengimplementasikan **Passive DHCP Sniffer Daemon** yang mendengarkan paket DHCPv4/DHCPv6 yang terlihat oleh interface controller secara *real-time*. Setelah paket terlihat, metadata diproses segera; waktu dan peluang capture tetap bergantung pada perilaku DHCP client, topologi access point, dan client isolation.
 
 ---
 
@@ -62,7 +62,7 @@ Daemon mem-parsing opsi-opsi kritis berikut sesuai RFC 2132:
 | **Option 55** | `Parameter Request List` | Array Byte | *Fingerprint unik* susunan permintaan parameter IP OS (PRL Signature). |
 | **Option 51** | `IP Lease Time` | 32-bit UInt / Bytes | Waktu sewa IP (dengan overflow guard `0xFFFFFFFF` $\le 30$ hari). |
 | **Option 3** | `Router / Gateway` | IPv4 / Tuple | IP default gateway dari router untuk verifikasi telemetri pasif. |
-| **Option 61** | `Client Identifier` | Hex String | DUID / Hardware ID klien unik. |
+| **Option 61** | `Client Identifier` | Hex String | Identifier DHCP client; dapat berupa DUID, tipe+MAC, atau ID software dan tidak selalu hardware-persistent. |
 | **Option 81** | `Client FQDN` | String | Nama domain lokal lengkap perangkat (misal: `laptop.local`). |
 
 ### 3.1 Deterministic Parameter Request List (PRL) Matrix
@@ -133,3 +133,67 @@ State hasil sniffing disimpan dalam kelas `DHCPDiscoveredCache` yang ditingkatka
   }
 }
 ```
+
+---
+
+## 6. Method 1: Discovery Refresh & DHCP Observation
+
+Method 1 tidak memaksa DHCP renewal. Workflow ini:
+
+1. memvalidasi controller, gateway, dan subnet RFC 1918;
+2. mengambil baseline DHCP unik berdasarkan MAC;
+3. mengirim satu burst SSDP, mDNS, dan LLMNR dengan hasil delivery terukur;
+4. mengamati DHCP alami selama empat detik;
+5. menjalankan satu full scan tanpa mengirim wake-up burst kedua;
+6. membandingkan profile DHCP sebelum dan sesudah observasi.
+
+Response membedakan delivery discovery dan evidence DHCP:
+
+```json
+{
+  "success": true,
+  "data": {
+    "delivery": {
+      "attempted": 6,
+      "succeeded": 5,
+      "failed": 1,
+      "protocols": {
+        "ssdp_ipv4": true,
+        "mdns_ipv4": true,
+        "llmnr_ipv4": true,
+        "ssdp_ipv6": false,
+        "mdns_ipv6": true,
+        "llmnr_ipv6": true
+      },
+      "errors": [
+        { "protocol": "ssdp_ipv6", "error": "unavailable" }
+      ]
+    },
+    "dhcp_delta": {
+      "before_count": 4,
+      "after_count": 5,
+      "new_count": 1,
+      "updated_count": 2,
+      "unchanged_count": 2,
+      "new_macs": ["aa:bb:cc:dd:ee:01"],
+      "updated_macs": ["aa:bb:cc:dd:ee:02", "aa:bb:cc:dd:ee:03"]
+    },
+    "observation_seconds": 4.0
+  }
+}
+```
+
+`new_count = 0` bukan kegagalan workflow. Artinya discovery selesai tetapi tidak ada DHCP handshake baru yang terlihat selama observation window. UI kemudian merekomendasikan reconnect manual target untuk peluang capture lebih tinggi.
+
+Statistik coverage:
+
+- menghitung unique normalized MAC;
+- mengecualikan gateway, controller, dan perangkat offline;
+- memisahkan discovery profile dari DHCP evidence;
+- menampilkan `N/A` bila tidak ada perangkat eligible.
+
+Tidak ada klaim akurasi 100%. Estimasi awal sebelum benchmark lapangan:
+
+- rediscovery LAN privat tanpa isolation: 60-90%;
+- enrichment mDNS/SSDP/ARP: 35-70%;
+- DHCP evidence baru tanpa reconnect: 0-10%.
