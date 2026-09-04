@@ -16,9 +16,10 @@ unsupported guesses.
 
 Method 3 becomes **Automatic Passive Identity Profiling**.
 
-The background listeners continuously collect normal advertisements. When a
-new device first becomes visible, Node schedules one debounced enrichment for
-that device. The button remains available to refresh all visible devices.
+The existing passive DHCP/DHCPv6 listener and normal discovery scans collect
+fresh advertisements. When a new device first becomes visible, Node schedules
+one debounced bounded enrichment for that device. The button remains available
+to refresh all visible devices.
 
 One manual invocation:
 
