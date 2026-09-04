@@ -555,6 +555,144 @@ class TestCoreDiscovery(unittest.TestCase):
         with patch('src.core.discovery.multicast.socket.socket'):
             send_multicast_wakeup()
 
+    def test_multicast_wakeup_reports_partial_delivery(self):
+        """Method 1 must report each successful and failed discovery datagram."""
+        from src.core.discovery.multicast import send_multicast_wakeup
+        from unittest.mock import patch
+
+        class FakeSocket:
+            def __init__(self, family):
+                self.family = family
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def setsockopt(self, *_args):
+                return None
+
+            def settimeout(self, *_args):
+                return None
+
+            def sendto(self, _payload, destination):
+                if destination[0] == 'ff02::c':
+                    raise OSError('IPv6 SSDP unavailable')
+                return 1
+
+        def socket_factory(family, *_args):
+            return FakeSocket(family)
+
+        with patch('src.core.discovery.multicast.socket.socket', side_effect=socket_factory):
+            result = send_multicast_wakeup()
+
+        self.assertEqual(result['attempted'], 6)
+        self.assertEqual(result['succeeded'], 5)
+        self.assertEqual(result['failed'], 1)
+        self.assertFalse(result['protocols']['ssdp_ipv6'])
+        self.assertTrue(result['protocols']['mdns_ipv4'])
+        self.assertEqual(result['errors'][0]['protocol'], 'ssdp_ipv6')
+
+    def test_dhcp_unique_snapshot_and_delta_are_mac_centric(self):
+        """One device must count once and profile changes must be measurable."""
+        from src.core.discovery.dhcp import DHCPDiscoveredCache, diff_dhcp_profiles
+
+        cache = DHCPDiscoveredCache()
+        cache.update(
+            'aa:bb:cc:dd:ee:01',
+            '192.168.1.20',
+            {'hostname': 'Phone', 'vendor_class': ''},
+        )
+        before = cache.get_unique_snapshot()
+
+        self.assertEqual(list(before), ['aa:bb:cc:dd:ee:01'])
+
+        cache.update(
+            'aa:bb:cc:dd:ee:01',
+            '192.168.1.20',
+            {'hostname': 'Phone', 'vendor_class': 'android-dhcp-14'},
+        )
+        cache.update(
+            'aa:bb:cc:dd:ee:02',
+            '192.168.1.21',
+            {'hostname': 'Laptop', 'dhcp_fingerprint': 'Microsoft Windows Signature'},
+        )
+        after = cache.get_unique_snapshot()
+        delta = diff_dhcp_profiles(before, after)
+
+        self.assertEqual(len(after), 2)
+        self.assertEqual(delta['new_count'], 1)
+        self.assertEqual(delta['updated_count'], 1)
+        self.assertEqual(delta['new_macs'], ['aa:bb:cc:dd:ee:02'])
+        self.assertEqual(delta['updated_macs'], ['aa:bb:cc:dd:ee:01'])
+
+    def test_dhcp_prl_matching_uses_integer_options_not_substrings(self):
+        """Options 128/151/158 must not masquerade as Android 28/51/58."""
+        from src.core.discovery.dhcp import _handle_dhcp_packet
+        from scapy.all import Ether, IP, UDP, BOOTP, DHCP
+
+        false_positive_mac = '02:11:22:33:44:55'
+        false_positive = (
+            Ether(src=false_positive_mac)
+            / IP(src='0.0.0.0', dst='255.255.255.255')
+            / UDP(sport=68, dport=67)
+            / BOOTP(chaddr=bytes.fromhex('021122334455') + bytes(10), xid=1)
+            / DHCP(options=[
+                ('message-type', 3),
+                ('requested_addr', '192.168.1.77'),
+                ('param_req_list', [128, 151, 158]),
+                'end',
+            ])
+        )
+        _handle_dhcp_packet(false_positive)
+        false_entry = dhcp_cache.get(false_positive_mac)
+        self.assertNotEqual(false_entry['dhcp_fingerprint'], 'Android OS Signature')
+
+        android_mac = '02:11:22:33:44:66'
+        android = (
+            Ether(src=android_mac)
+            / IP(src='0.0.0.0', dst='255.255.255.255')
+            / UDP(sport=68, dport=67)
+            / BOOTP(chaddr=bytes.fromhex('021122334466') + bytes(10), xid=2)
+            / DHCP(options=[
+                ('message-type', 3),
+                ('requested_addr', '192.168.1.78'),
+                ('param_req_list', [1, 3, 6, 26, 28, 51, 58, 59]),
+                'end',
+            ])
+        )
+        _handle_dhcp_packet(android)
+        self.assertEqual(
+            dhcp_cache.get(android_mac)['dhcp_fingerprint'],
+            'Android OS Signature',
+        )
+
+    def test_dhcp_renewal_falls_through_zero_yiaddr_to_ciaddr(self):
+        """A renewal REQUEST with ciaddr must retain its current private IP."""
+        from src.core.discovery.dhcp import _handle_dhcp_packet
+        from scapy.all import Ether, IP, UDP, BOOTP, DHCP
+
+        mac = '02:aa:bb:cc:dd:ee'
+        packet = (
+            Ether(src=mac)
+            / IP(src='192.168.1.88', dst='192.168.1.1')
+            / UDP(sport=68, dport=67)
+            / BOOTP(
+                chaddr=bytes.fromhex('02aabbccddee') + bytes(10),
+                ciaddr='192.168.1.88',
+                yiaddr='0.0.0.0',
+                xid=3,
+            )
+            / DHCP(options=[('message-type', 3), ('hostname', b'Renewing-Host'), 'end'])
+        )
+
+        _handle_dhcp_packet(packet)
+
+        entry = dhcp_cache.get(mac)
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry['ip'], '192.168.1.88')
+
     # ===== 4. SSDP Descriptor Fetch — M1 unbounded-read hardening =====
     def test_ssdp_descriptor_read_is_capped(self):
         """Security (M1): descriptor fetch must cap res.read() to a bounded size, never unbounded."""

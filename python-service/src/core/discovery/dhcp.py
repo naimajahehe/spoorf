@@ -25,6 +25,45 @@ from scapy.all import (
 from ..network import get_network_info, get_self_mac, is_valid_mac, is_valid_private_ip
 from ...utils.logger import logger
 
+_DHCP_PROFILE_FIELDS = (
+    'ip',
+    'hostname',
+    'vendor_class',
+    'dhcp_fingerprint',
+    'client_id',
+    'fqdn',
+)
+
+
+def diff_dhcp_profiles(
+    before: Dict[str, Dict[str, Any]],
+    after: Dict[str, Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Bandingkan snapshot DHCP unik berbasis MAC dan laporkan delta profil."""
+    before_macs = set(before)
+    after_macs = set(after)
+    new_macs = sorted(after_macs - before_macs)
+    updated_macs = sorted(
+        mac
+        for mac in before_macs & after_macs
+        if any(
+            before[mac].get(field) != after[mac].get(field)
+            for field in _DHCP_PROFILE_FIELDS
+        )
+    )
+    unchanged_macs = sorted((before_macs & after_macs) - set(updated_macs))
+    return {
+        'before_count': len(before),
+        'after_count': len(after),
+        'new_count': len(new_macs),
+        'updated_count': len(updated_macs),
+        'unchanged_count': len(unchanged_macs),
+        'new_macs': new_macs,
+        'updated_macs': updated_macs,
+        'unchanged_macs': unchanged_macs,
+    }
+
+
 class DHCPDiscoveredCache:
     """
     Thread-safe & Anti-Contamination Cache untuk temuan passive DHCP sniffer.
@@ -118,6 +157,14 @@ class DHCPDiscoveredCache:
                 if mac in self._cache_by_mac:
                     snapshot[ip] = dict(self._cache_by_mac[mac])
             return snapshot
+
+    def get_unique_snapshot(self) -> Dict[str, Dict[str, Any]]:
+        """Snapshot satu-entri-per-MAC untuk statistik dan perbandingan profil."""
+        with self._lock:
+            return {
+                mac: dict(entry)
+                for mac, entry in self._cache_by_mac.items()
+            }
 
     def clear(self):
         with self._lock:
@@ -349,14 +396,26 @@ def _handle_dhcp_packet(pkt) -> None:
         # Option 55: Parameter Request List (OS Fingerprint Matrix)
         raw_prl = options.get('param_req_list')
         dhcp_fingerprint = ""
+        prl_values = []
         prl_str = ""
         if raw_prl:
-            if isinstance(raw_prl, (list, tuple)):
-                prl_str = ','.join(str(x) for x in raw_prl)
-            elif isinstance(raw_prl, bytes):
-                prl_str = ','.join(str(b) for b in raw_prl)
-            else:
-                prl_str = str(raw_prl)
+            try:
+                if isinstance(raw_prl, (list, tuple, bytes, bytearray)):
+                    prl_values = [int(value) for value in raw_prl]
+                else:
+                    prl_values = [
+                        int(value.strip())
+                        for value in str(raw_prl).split(',')
+                        if value.strip()
+                    ]
+                prl_values = [
+                    value for value in prl_values
+                    if 0 <= value <= 255
+                ]
+            except (TypeError, ValueError):
+                prl_values = []
+            prl_str = ','.join(str(value) for value in prl_values)
+        prl_set = set(prl_values)
 
         # Deterministic PRL + Vendor Class + Hostname Signature Matching
         vclass_lower = vendor_class.lower()
@@ -366,22 +425,34 @@ def _handle_dhcp_packet(pkt) -> None:
             dhcp_fingerprint = "Sony PlayStation"
         elif 'nintendo' in vclass_lower or 'nintendo' in host_lower:
             dhcp_fingerprint = "Nintendo Gaming Console"
-        elif prl_str.startswith('1,121,3,6,15') or ('iphone' in host_lower or 'ipad' in host_lower):
+        elif prl_values[:5] == [1, 121, 3, 6, 15] or ('iphone' in host_lower or 'ipad' in host_lower):
             dhcp_fingerprint = "Apple iOS Signature"
-        elif prl_str.startswith('1,3,6,15,119,252') or ('macbook' in host_lower or 'mac-mini' in host_lower or 'imac' in host_lower):
+        elif prl_values[:6] == [1, 3, 6, 15, 119, 252] or ('macbook' in host_lower or 'mac-mini' in host_lower or 'imac' in host_lower):
             dhcp_fingerprint = "Apple macOS Signature"
-        elif '26,28,51,58,59' in prl_str or vclass_lower.startswith('android-dhcp-') or ('28' in prl_str and '51' in prl_str and '58' in prl_str):
+        elif (
+            {26, 28, 51, 58, 59}.issubset(prl_set)
+            or vclass_lower.startswith('android-dhcp-')
+            or {28, 51, 58}.issubset(prl_set)
+        ):
             if vclass_lower.startswith('android-dhcp-'):
                 dhcp_fingerprint = f"Android OS Signature ({vendor_class})"
             else:
                 dhcp_fingerprint = "Android OS Signature"
-        elif '31,33,43,44,46,47' in prl_str or ('44,46,47' in prl_str and '252' in prl_str) or vclass_lower == 'msft 5.0':
+        elif (
+            {31, 33, 43, 44, 46, 47}.issubset(prl_set)
+            or {44, 46, 47, 252}.issubset(prl_set)
+            or vclass_lower == 'msft 5.0'
+        ):
             dhcp_fingerprint = "Microsoft Windows Signature"
-        elif '1,3,6,12,15,28' in prl_str or '1,28,2,3,15,6,119,12' in prl_str or 'udhcp' in vclass_lower or 'dhcpcd' in vclass_lower:
+        elif (
+            prl_values[:6] == [1, 3, 6, 12, 15, 28]
+            or prl_values[:8] == [1, 28, 2, 3, 15, 6, 119, 12]
+            or 'udhcp' in vclass_lower
+            or 'dhcpcd' in vclass_lower
+        ):
             dhcp_fingerprint = "Linux/Embedded IoT Signature"
-        elif len(prl_str) > 0:
-            opt_count = len(raw_prl) if hasattr(raw_prl, '__len__') else (1 if raw_prl else 0)
-            dhcp_fingerprint = f"Generic PRL ({opt_count} opts)"
+        elif prl_values:
+            dhcp_fingerprint = f"Generic PRL ({len(prl_values)} opts)"
 
         # Option 61: Client Identifier
         raw_cid = options.get('client_id')
@@ -434,9 +505,16 @@ def _handle_dhcp_packet(pkt) -> None:
                 router_ip = ""
 
         # Alamat IP: Option 50 (requested_addr) atau yiaddr/ciaddr
-        ip = options.get('requested_addr') or bootp.yiaddr or bootp.ciaddr or ""
-        if ip == '0.0.0.0':
-            ip = ""
+        ip = ""
+        for candidate in (
+            options.get('requested_addr'),
+            bootp.yiaddr,
+            bootp.ciaddr,
+        ):
+            clean_candidate = str(candidate).strip() if candidate else ""
+            if is_valid_private_ip(clean_candidate):
+                ip = clean_candidate
+                break
 
         # Deteksi Rogue DHCP Server (Opsi 54 != Gateway Resmi pada respon OFFER/ACK)
         is_rogue_dhcp = False

@@ -141,19 +141,59 @@ def send_multicast_wakeup():
     Kirim paket multicast ringan Dual-Stack (IPv4 + IPv6) untuk membangunkan
     smartphone dan IoT dari mode hemat daya / sleep doze state.
     """
+    protocol_order = (
+        'ssdp_ipv4',
+        'mdns_ipv4',
+        'llmnr_ipv4',
+        'ssdp_ipv6',
+        'mdns_ipv6',
+        'llmnr_ipv6',
+    )
+    protocols = {name: False for name in protocol_order}
+    errors = []
+
+    def record_failure(names, exc):
+        message = str(exc).strip() or type(exc).__name__
+        for name in names:
+            if protocols[name]:
+                continue
+            errors.append({'protocol': name, 'error': message})
+
+    def send_named(sock, name, payload, destination):
+        try:
+            sock.sendto(payload, destination)
+            protocols[name] = True
+        except Exception as exc:
+            record_failure((name,), exc)
+
     # 1. IPv4 Multicast Wake-up Burst (SSDP, mDNS, LLMNR)
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP) as s4:
             s4.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
             s4.settimeout(0.05)
             # SSDP M-SEARCH (UPnP)
-            s4.sendto(b'M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: "ssdp:discover"\r\nST: ssdp:all\r\n\r\n', ('239.255.255.250', 1900))
+            send_named(
+                s4,
+                'ssdp_ipv4',
+                b'M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: "ssdp:discover"\r\nST: ssdp:all\r\n\r\n',
+                ('239.255.255.250', 1900),
+            )
             # mDNS Services PTR Query
-            s4.sendto(b'\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x09_services\x07_dns-sd\x04_udp\x05local\x00\x00\x0c\x00\x01', ('224.0.0.251', 5353))
+            send_named(
+                s4,
+                'mdns_ipv4',
+                b'\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x09_services\x07_dns-sd\x04_udp\x05local\x00\x00\x0c\x00\x01',
+                ('224.0.0.251', 5353),
+            )
             # LLMNR Query
-            s4.sendto(b'\x00\x01\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x01*\x00\x00\x01\x00\x01', ('224.0.0.252', 5355))
-    except Exception:
-        pass
+            send_named(
+                s4,
+                'llmnr_ipv4',
+                b'\x00\x01\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x01*\x00\x00\x01\x00\x01',
+                ('224.0.0.252', 5355),
+            )
+    except Exception as exc:
+        record_failure(protocol_order[:3], exc)
 
     # 2. IPv6 Multicast Wake-up Burst (mDNS IPv6, SSDP IPv6, LLMNR IPv6)
     try:
@@ -161,26 +201,40 @@ def send_multicast_wakeup():
             s6.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_HOPS, 2)
             s6.settimeout(0.05)
             # SSDP IPv6 Link-Local (ff02::c)
-            try:
-                s6.sendto(b'M-SEARCH * HTTP/1.1\r\nHOST: [ff02::c]:1900\r\nMAN: "ssdp:discover"\r\nST: ssdp:all\r\n\r\n', ('ff02::c', 1900))
-            except Exception:
-                pass
+            send_named(
+                s6,
+                'ssdp_ipv6',
+                b'M-SEARCH * HTTP/1.1\r\nHOST: [ff02::c]:1900\r\nMAN: "ssdp:discover"\r\nST: ssdp:all\r\n\r\n',
+                ('ff02::c', 1900),
+            )
             # mDNS IPv6 (ff02::fb)
-            try:
-                s6.sendto(b'\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x09_services\x07_dns-sd\x04_udp\x05local\x00\x00\x0c\x00\x01', ('ff02::fb', 5353))
-            except Exception:
-                pass
+            send_named(
+                s6,
+                'mdns_ipv6',
+                b'\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x09_services\x07_dns-sd\x04_udp\x05local\x00\x00\x0c\x00\x01',
+                ('ff02::fb', 5353),
+            )
             # LLMNR IPv6 (ff02::1:3)
-            try:
-                s6.sendto(b'\x00\x01\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x01*\x00\x00\x01\x00\x01', ('ff02::1:3', 5355))
-            except Exception:
-                pass
-    except Exception:
-        pass
+            send_named(
+                s6,
+                'llmnr_ipv6',
+                b'\x00\x01\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x01*\x00\x00\x01\x00\x01',
+                ('ff02::1:3', 5355),
+            )
+    except Exception as exc:
+        record_failure(protocol_order[3:], exc)
+
+    succeeded = sum(1 for delivered in protocols.values() if delivered)
+    return {
+        'attempted': len(protocol_order),
+        'succeeded': succeeded,
+        'failed': len(protocol_order) - succeeded,
+        'protocols': protocols,
+        'errors': errors,
+    }
 
 def get_ssdp_cache() -> Dict[str, Dict[str, str]]:
     return dict(_SSDP_DISCOVERED)
 
 def get_mdns_cache() -> Dict[str, Dict[str, str]]:
     return dict(_MDNS_DISCOVERED)
-
