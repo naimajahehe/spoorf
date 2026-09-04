@@ -52,6 +52,10 @@ export function isBridgeOperationError(err: unknown): err is BridgeOperationErro
     return err instanceof BridgeOperationError;
 }
 
+export interface ScanOptions {
+    skipMulticastWakeup?: boolean;
+}
+
 export class PythonBridge extends EventEmitter {
     private process: ChildProcess | null = null;
     private baseUrl: string;
@@ -379,11 +383,15 @@ export class PythonBridge extends EventEmitter {
         }
     }
 
-    async scan(): Promise<Device[]> {
+    async scan(options: ScanOptions = {}): Promise<Device[]> {
         console.log('📡 [HTTP Call -> Python] POST /api/scan (Non-Blocking)...');
+        const skipMulticastWakeup = options.skipMulticastWakeup === true;
         const res = await this.fetchWithTimeout(`${this.baseUrl}/api/scan`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' }
+            headers: { 'Content-Type': 'application/json' },
+            body: skipMulticastWakeup
+                ? JSON.stringify({ skip_multicast_wakeup: true })
+                : undefined
         }, 30000);
 
         const data = await this.readMutationResponse(res, 'Network scan');

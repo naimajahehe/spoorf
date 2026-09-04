@@ -647,6 +647,52 @@ export class DatabaseService {
         updateTransaction();
     }
 
+    async updateDeviceDhcpProfile(profile: {
+        mac: string;
+        ip: string;
+        hostname?: string;
+        vendorClass?: string;
+        fingerprint?: string;
+        clientId?: string;
+        fqdn?: string;
+    }): Promise<void> {
+        await this.init();
+        const normMac = profile.mac.toLowerCase();
+        const cleanIp = profile.ip.trim();
+        const updateTransaction = this.db.transaction(() => {
+            this.db.prepare(`
+                UPDATE devices
+                SET is_online = 0,
+                    last_ip = CASE WHEN ip != '' AND ip IS NOT NULL THEN ip ELSE last_ip END,
+                    ip = ''
+                WHERE ip = ? AND LOWER(mac) != LOWER(?)
+            `).run(cleanIp, normMac);
+            this.db.prepare(`
+                UPDATE devices SET
+                    ip = ?,
+                    last_ip = ?,
+                    is_online = 1,
+                    hostname = CASE WHEN ? != '' THEN ? ELSE hostname END,
+                    dhcp_vendor_class = CASE WHEN ? != '' THEN ? ELSE dhcp_vendor_class END,
+                    dhcp_fingerprint = CASE WHEN ? != '' THEN ? ELSE dhcp_fingerprint END,
+                    dhcp_client_id = CASE WHEN ? != '' THEN ? ELSE dhcp_client_id END,
+                    dhcp_fqdn = CASE WHEN ? != '' THEN ? ELSE dhcp_fqdn END,
+                    last_seen = datetime('now', 'localtime')
+                WHERE LOWER(mac) = LOWER(?)
+            `).run(
+                cleanIp,
+                cleanIp,
+                profile.hostname || '', profile.hostname || '',
+                profile.vendorClass || '', profile.vendorClass || '',
+                profile.fingerprint || '', profile.fingerprint || '',
+                profile.clientId || '', profile.clientId || '',
+                profile.fqdn || '', profile.fqdn || '',
+                normMac
+            );
+        });
+        updateTransaction();
+    }
+
     /**
      * Sinkronisasi perangkat hasil scan dengan database SQLite:
      * - Mengenali perangkat lama berdasarkan MAC address
@@ -1080,4 +1126,3 @@ export class DatabaseService {
         }
     }
 }
-

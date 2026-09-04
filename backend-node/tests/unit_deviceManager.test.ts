@@ -1048,4 +1048,153 @@ export async function runDeviceManagerTests() {
         console.log('  ✓ Retention: DeviceManager.init() runs startup archive sweep (stale archived, fresh kept)');
     }
 
+    // Test 22: measured DHCP optimization is single-flight, one-scan, and cooldown-safe.
+    {
+        const python: any = new EventEmitter();
+        let observationCalls = 0;
+        let releaseObservation!: () => void;
+        const observationGate = new Promise<void>(resolve => {
+            releaseObservation = resolve;
+        });
+        const observation = {
+            success: true,
+            data: {
+                delivery: { attempted: 6, succeeded: 5, failed: 1 },
+                dhcp_delta: { new_count: 1, updated_count: 0 },
+                observation_seconds: 4
+            }
+        };
+        python.optimizeDhcpProfiling = async () => {
+            observationCalls++;
+            await observationGate;
+            return observation;
+        };
+        const manager = new DeviceManager(python, {} as any);
+        const scanOptions: any[] = [];
+        (manager as any).scanNetwork = async (options?: any) => {
+            scanOptions.push(options);
+            return [];
+        };
+
+        const first = manager.optimizeDhcpProfiling();
+        const second = manager.optimizeDhcpProfiling();
+        await new Promise(resolve => setImmediate(resolve));
+        const callsBeforeRelease = observationCalls;
+        releaseObservation();
+        const [firstResult, secondResult] = await Promise.all([first, second]);
+
+        assert.strictEqual(callsBeforeRelease, 1, 'concurrent optimization must share one observation');
+        assert.strictEqual(observationCalls, 1);
+        assert.strictEqual(scanOptions.length, 1, 'one optimization must perform one scan');
+        assert.deepStrictEqual(scanOptions[0], { skipMulticastWakeup: true });
+        assert.deepStrictEqual(firstResult, secondResult);
+        assert.strictEqual(firstResult.cached, false);
+
+        const cached = await manager.optimizeDhcpProfiling();
+        assert.strictEqual(observationCalls, 1, 'cooldown result must not repeat observation');
+        assert.strictEqual(scanOptions.length, 1, 'cooldown result must not repeat scan');
+        assert.strictEqual(cached.cached, true);
+        assert.ok(cached.cooldown_remaining_ms > 0);
+        console.log('  ✓ DHCP optimization: one observation, one scan, single-flight, and cooldown reuse');
+    }
+
+    // Test 23: existing-device DHCP events merge and persist all evidence once.
+    {
+        const python: any = new EventEmitter();
+        const persisted: any[] = [];
+        const db: any = {
+            updateDeviceIp: async () => {
+                throw new Error('legacy IP-only persistence must not be used');
+            },
+            updateDeviceDhcpProfile: async (profile: any) => {
+                persisted.push(profile);
+            }
+        };
+        const manager = new DeviceManager(python, db);
+        const target = makeStateRetentionDevice({
+            hostname: 'Unknown Device',
+            dhcp_vendor_class: undefined,
+            dhcp_fingerprint: undefined,
+            dhcp_client_id: undefined,
+            dhcp_fqdn: undefined
+        });
+        (manager as any).devices.set(target.ip, target);
+        const scheduled: number[] = [];
+        (manager as any).debouncedScan = (delay: number) => {
+            scheduled.push(delay);
+        };
+        const event = {
+            mac: target.mac,
+            ip: target.ip,
+            hostname: 'Galaxy-Naim',
+            vendor_class: 'android-dhcp-14',
+            dhcp_fingerprint: 'Android OS Signature (android-dhcp-14)',
+            client_id: '01:a8:3b:76:0c:dc:55',
+            fqdn: 'galaxy-naim.local',
+            message_type: 'REQUEST'
+        };
+
+        await (manager as any)._handleDhcpEvent(event);
+        await (manager as any)._handleDhcpEvent(event);
+
+        assert.strictEqual(target.hostname, 'Galaxy-Naim');
+        assert.strictEqual(target.dhcp_vendor_class, event.vendor_class);
+        assert.strictEqual(target.dhcp_fingerprint, event.dhcp_fingerprint);
+        assert.strictEqual(target.dhcp_client_id, event.client_id);
+        assert.strictEqual(target.dhcp_fqdn, event.fqdn);
+        assert.strictEqual(persisted.length, 2, 'each DHCP event persists one atomic snapshot');
+        assert.deepStrictEqual(scheduled, [1500], 'only a meaningful profile delta schedules enrichment');
+
+        scheduled.length = 0;
+        (manager as any).inFlightDhcpOptimization = Promise.resolve({});
+        await (manager as any)._handleDhcpEvent({
+            ...event,
+            fqdn: 'galaxy-naim-updated.local'
+        });
+        assert.deepStrictEqual(
+            scheduled,
+            [],
+            'an active Method 1 workflow owns the one enrichment scan'
+        );
+        console.log('  ✓ DHCP live event: complete evidence persists and enrichment coalesces');
+    }
+
+    // Test 24: production scan merge copies every DHCP evidence field into existing memory.
+    {
+        const python: any = new EventEmitter();
+        const target = makeStateRetentionDevice({
+            hostname: 'Known Device',
+            dhcp_vendor_class: undefined,
+            dhcp_fingerprint: undefined,
+            dhcp_client_id: undefined,
+            dhcp_fqdn: undefined
+        });
+        const scanned = {
+            ...target,
+            dhcp_vendor_class: 'MSFT 5.0',
+            dhcp_fingerprint: 'Microsoft Windows Signature',
+            dhcp_client_id: '01:a8:3b:76:0c:dc:55',
+            dhcp_fqdn: 'known-device.local'
+        };
+        python.scan = async () => [scanned];
+        const db: any = {
+            syncScanResults: async () => ({
+                allDevices: [scanned],
+                autoReblockTargets: [],
+                autoThrottleTargets: [],
+                zombieSessionsToStop: []
+            })
+        };
+        const manager = new DeviceManager(python, db);
+        (manager as any).devices.set(target.ip, target);
+
+        await manager.scanNetwork();
+
+        assert.strictEqual(target.dhcp_vendor_class, scanned.dhcp_vendor_class);
+        assert.strictEqual(target.dhcp_fingerprint, scanned.dhcp_fingerprint);
+        assert.strictEqual(target.dhcp_client_id, scanned.dhcp_client_id);
+        assert.strictEqual(target.dhcp_fqdn, scanned.dhcp_fqdn);
+        console.log('  ✓ Scan merge: existing memory receives every DHCP evidence field');
+    }
+
 }

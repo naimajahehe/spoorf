@@ -5,12 +5,25 @@ import { PythonBridge } from './pythonBridge';
 import { DatabaseService } from './database';
 import { LicenseManager, FeatureLimitError, FeatureLockedError } from './licenseManager';
 import { Device } from '../types';
+import type { ScanOptions } from './pythonBridge';
 
 // Retensi: perangkat tamu yang offline lebih lama dari ini diarsipkan (bukan dihapus)
 // agar daftar mencerminkan jaringan nyata, bukan riwayat semua tamu. Lihat
 // DatabaseService.archiveStaleDevices() untuk pagar pengamannya (blokir/alias/sesi/profil).
 export const STALE_DEVICE_RETENTION_DAYS = 14;
 const RETENTION_SWEEP_INTERVAL_MS = 24 * 60 * 60 * 1000; // sekali per hari
+const DHCP_OPTIMIZATION_COOLDOWN_MS = 20_000;
+
+interface DhcpOptimizationResult {
+    success: true;
+    delivery: any;
+    dhcpDelta: any;
+    dhcpStats: any;
+    devices: Device[];
+    cached: boolean;
+    cooldown_remaining_ms: number;
+    duration_ms: number;
+}
 
 export function isIpInSameSubnet(ip: string, gatewayIp: string): boolean {
     if (!ip || !gatewayIp) return true;
@@ -88,6 +101,11 @@ export class DeviceManager extends EventEmitter {
     private devices: Map<string, Device> = new Map();
     private scanning: boolean = false;
     private inFlightScan: Promise<Device[]> | null = null;
+    private inFlightDhcpOptimization: Promise<DhcpOptimizationResult> | null = null;
+    private lastDhcpOptimization: {
+        completedAt: number;
+        result: DhcpOptimizationResult;
+    } | null = null;
     private dhcpScanDebounceTimer: NodeJS.Timeout | null = null;
     private offlineCooldownTimers: Map<string, NodeJS.Timeout> = new Map();
     // Perangkat yang dikelola Gaming Mode, DIKUNCI per-MAC (lowercase) agar tahan ganti-IP.
@@ -254,17 +272,45 @@ export class DeviceManager extends EventEmitter {
                         console.log(`⚡ [DHCP IP Migration] Device ${dev.hostname || dev.mac} moved from ${oldIpOfThisMac} to ${data.ip}`);
                         this.devices.delete(oldIpOfThisMac);
                     }
+                    const hostnameShouldChange = Boolean(
+                        data.hostname && (
+                            !dev.hostname
+                            || dev.hostname === dev.ip
+                            || dev.hostname.toLowerCase().startsWith('unknown')
+                        )
+                    );
+                    const profileChanged = Boolean(
+                        (hostnameShouldChange && dev.hostname !== data.hostname)
+                        || (data.vendor_class && dev.dhcp_vendor_class !== data.vendor_class)
+                        || (data.dhcp_fingerprint && dev.dhcp_fingerprint !== data.dhcp_fingerprint)
+                        || (data.client_id && dev.dhcp_client_id !== data.client_id)
+                        || (data.fqdn && dev.dhcp_fqdn !== data.fqdn)
+                    );
+
                     dev.is_online = true;
                     dev.ip = data.ip;
-                    if (data.hostname && !dev.hostname) dev.hostname = data.hostname;
+                    if (hostnameShouldChange) dev.hostname = data.hostname;
                     if (data.vendor_class) dev.dhcp_vendor_class = data.vendor_class;
                     if (data.dhcp_fingerprint) dev.dhcp_fingerprint = data.dhcp_fingerprint;
+                    if (data.client_id) dev.dhcp_client_id = data.client_id;
+                    if (data.fqdn) dev.dhcp_fqdn = data.fqdn;
                     this.devices.set(dev.ip, dev);
-                    this.db.updateDeviceIp(dev.mac, data.ip).catch(console.warn);
+                    await this.db.updateDeviceDhcpProfile({
+                        mac: dev.mac,
+                        ip: data.ip,
+                        hostname: hostnameShouldChange ? data.hostname : undefined,
+                        vendorClass: data.vendor_class,
+                        fingerprint: data.dhcp_fingerprint,
+                        clientId: data.client_id,
+                        fqdn: data.fqdn
+                    });
                     this.emit('deviceUpdated', dev);
                     this.emit('devicesUpdated', Array.from(this.devices.values()));
                     // Perangkat aktif kembali via DHCP selagi Gaming Mode aktif -> ikut di-throttle.
                     await this._maybeApplyGamingToNewDevice(dev);
+                    if (profileChanged && !this.inFlightDhcpOptimization) {
+                        this.debouncedScan(1500);
+                    }
                 } else {
                     isNewDevice = true;
                 }
@@ -513,23 +559,23 @@ export class DeviceManager extends EventEmitter {
         };
     }
 
-    async scanNetwork(): Promise<Device[]> {
+    async scanNetwork(options: ScanOptions = {}): Promise<Device[]> {
         // Single-Flight Coalescing: bila scan sedang berjalan, bagikan promise yang sama tanpa antre ulang.
         if (this.inFlightScan) {
             console.log('⏳ [DeviceManager] Scan is already in progress, returning shared in-flight scan promise.');
             return this.inFlightScan;
         }
-        this.inFlightScan = this._scanNetworkImpl().finally(() => {
+        this.inFlightScan = this._scanNetworkImpl(options).finally(() => {
             this.inFlightScan = null;
         });
         return this.inFlightScan;
     }
 
-    private async _scanNetworkImpl(): Promise<Device[]> {
+    private async _scanNetworkImpl(options: ScanOptions): Promise<Device[]> {
         this.scanning = true;
         this.emit('scanStarted');
         try {
-            let rawScanned = await this.python.scan();
+            let rawScanned = await this.python.scan(options);
 
             // Pastikan Komputer Operator (Perangkat Ini / Controller) selalu ada & Online!
             try {
@@ -690,6 +736,10 @@ export class DeviceManager extends EventEmitter {
                         existing.ipv6_addresses = dev.ipv6_addresses || existing.ipv6_addresses;
                         existing.is_dual_stack = dev.is_dual_stack ?? existing.is_dual_stack;
                         existing.profile_id = dev.profile_id || existing.profile_id;
+                        existing.dhcp_vendor_class = dev.dhcp_vendor_class || existing.dhcp_vendor_class;
+                        existing.dhcp_fingerprint = dev.dhcp_fingerprint || existing.dhcp_fingerprint;
+                        existing.dhcp_client_id = dev.dhcp_client_id || existing.dhcp_client_id;
+                        existing.dhcp_fqdn = dev.dhcp_fqdn || existing.dhcp_fqdn;
                         if (dev.alias) existing.alias = dev.alias;
                         if (dev.is_gateway !== undefined) existing.is_gateway = dev.is_gateway;
                         if (dev.is_self !== undefined) existing.is_self = dev.is_self;
@@ -1306,15 +1356,47 @@ export class DeviceManager extends EventEmitter {
         return device;
     }
 
-    async optimizeDhcpProfiling(): Promise<{ success: boolean; dhcpStats: any; devices: Device[] }> {
-        console.log('⚡ [DeviceManager] Triggering DHCP Wakeup and Network Re-Scan for Teknik 3B...');
-        const wakeupRes = await this.python.optimizeDhcpProfiling();
-        const devices = await this.scanNetwork();
-        return {
-            success: true,
-            dhcpStats: wakeupRes.data || {},
-            devices
-        };
+    async optimizeDhcpProfiling(): Promise<DhcpOptimizationResult> {
+        if (this.inFlightDhcpOptimization) {
+            return this.inFlightDhcpOptimization;
+        }
+
+        const now = Date.now();
+        if (
+            this.lastDhcpOptimization
+            && now - this.lastDhcpOptimization.completedAt < DHCP_OPTIMIZATION_COOLDOWN_MS
+        ) {
+            const elapsed = now - this.lastDhcpOptimization.completedAt;
+            return {
+                ...this.lastDhcpOptimization.result,
+                cached: true,
+                cooldown_remaining_ms: Math.max(0, DHCP_OPTIMIZATION_COOLDOWN_MS - elapsed)
+            };
+        }
+
+        this.inFlightDhcpOptimization = (async () => {
+            const startedAt = Date.now();
+            console.log('⚡ [DeviceManager] Triggering measured Discovery Refresh & DHCP Observation...');
+            const observation = await this.python.optimizeDhcpProfiling();
+            const devices = await this.scanNetwork({ skipMulticastWakeup: true });
+            const completedAt = Date.now();
+            const result: DhcpOptimizationResult = {
+                success: true,
+                delivery: observation?.data?.delivery || {},
+                dhcpDelta: observation?.data?.dhcp_delta || {},
+                dhcpStats: observation?.data || {},
+                devices,
+                cached: false,
+                cooldown_remaining_ms: DHCP_OPTIMIZATION_COOLDOWN_MS,
+                duration_ms: completedAt - startedAt
+            };
+            this.lastDhcpOptimization = { completedAt, result };
+            return result;
+        })().finally(() => {
+            this.inFlightDhcpOptimization = null;
+        });
+
+        return this.inFlightDhcpOptimization;
     }
 
     async getDhcpStats(): Promise<any> {

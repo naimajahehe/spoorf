@@ -563,6 +563,46 @@ export async function runDatabaseTests() {
         await db.close();
         console.log('  ✓ Retention: archiveStaleDevices archives only anonymous long-offline devices; blocked/aliased/online/recent protected');
     }
-}
 
+    // Test 14: live DHCP evidence is persisted atomically for an existing device.
+    {
+        const { DatabaseService } = await import('../src/services/database');
+        const db = new DatabaseService(':memory:');
+        await db.init();
+        const device: Device = {
+            ip: '192.168.1.70',
+            mac: 'aa:bb:cc:dd:ee:70',
+            hostname: 'Unknown Device',
+            vendor: 'Generic Device',
+            device_type: 'Generic Client Device',
+            os: 'Unknown OS',
+            rtt_ms: 10,
+            open_ports: [],
+            services: [],
+            is_blocked: false,
+            is_online: true,
+            is_gateway: false
+        };
+        await db.syncScanResults([device]);
+
+        await db.updateDeviceDhcpProfile({
+            mac: device.mac,
+            ip: device.ip,
+            hostname: 'Galaxy-Naim',
+            vendorClass: 'android-dhcp-14',
+            fingerprint: 'Android OS Signature (android-dhcp-14)',
+            clientId: '01:aa:bb:cc:dd:ee:70',
+            fqdn: 'galaxy-naim.local'
+        });
+
+        const updated = await db.getDeviceByMac(device.mac);
+        assert.strictEqual(updated?.hostname, 'Galaxy-Naim');
+        assert.strictEqual(updated?.dhcp_vendor_class, 'android-dhcp-14');
+        assert.strictEqual(updated?.dhcp_fingerprint, 'Android OS Signature (android-dhcp-14)');
+        assert.strictEqual(updated?.dhcp_client_id, '01:aa:bb:cc:dd:ee:70');
+        assert.strictEqual(updated?.dhcp_fqdn, 'galaxy-naim.local');
+        await db.close();
+        console.log('  ✓ DHCP persistence: live profile evidence is stored atomically');
+    }
+}
 

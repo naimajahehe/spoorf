@@ -70,6 +70,51 @@ export async function runPythonBridgeTests() {
         console.log('  ✓ Contract: Bettercap DNS rules and configuration fields are preserved');
     }
 
+    // Contract: Technique 3B can suppress a duplicate multicast wake-up in its one scan.
+    {
+        const originalFetch = globalThis.fetch;
+        const requests: Array<{ url: string; body?: string }> = [];
+        const wakeupPayload = {
+            success: true,
+            data: {
+                delivery: { attempted: 6, succeeded: 5, failed: 1 },
+                dhcp_delta: { new_count: 1, updated_count: 2 },
+                observation_seconds: 4
+            }
+        };
+        try {
+            (bridge as any).ready = true;
+            globalThis.fetch = (async (input: any, init?: RequestInit) => {
+                const url = String(input);
+                requests.push({
+                    url,
+                    body: typeof init?.body === 'string' ? init.body : undefined
+                });
+                const payload = url.endsWith('/api/scan')
+                    ? { success: true, data: { devices: [] } }
+                    : wakeupPayload;
+                return new Response(JSON.stringify(payload), {
+                    status: 200,
+                    headers: { 'Content-Type': 'application/json' }
+                });
+            }) as typeof fetch;
+
+            await bridge.scan({ skipMulticastWakeup: true });
+            await bridge.scan();
+            const observed = await bridge.optimizeDhcpProfiling();
+
+            assert.deepStrictEqual(
+                JSON.parse(requests[0].body || '{}'),
+                { skip_multicast_wakeup: true }
+            );
+            assert.strictEqual(requests[1].body, undefined);
+            assert.deepStrictEqual(observed, wakeupPayload);
+        } finally {
+            globalThis.fetch = originalFetch;
+        }
+        console.log('  ✓ Contract: Technique 3B scan options and measured observation survive the bridge');
+    }
+
     // Contract: HTTP 200 is not success when Python explicitly returns success:false.
     {
         const originalFetch = globalThis.fetch;
