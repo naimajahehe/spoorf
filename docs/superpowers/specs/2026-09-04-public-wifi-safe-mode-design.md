@@ -13,6 +13,36 @@ other clients unless the active network has been explicitly trusted.
 Safe Mode is a cross-layer policy boundary. It is enforced by Python and Node,
 not merely represented by disabled React controls.
 
+## Clear Product Purpose
+
+The feature has three concrete purposes:
+
+1. **Protect the operator on networks they do not own.** Spoorf audits the local
+   Windows device, observes gateway and DNS consistency, reports exposure, and
+   offers a self-only emergency disconnect.
+2. **Prevent Spoorf itself from becoming a risk.** On a public or unidentified
+   network, the application cannot actively discover, control, redirect,
+   throttle, intercept, or retain information about other clients.
+3. **Separate trusted administration from public self-protection.** Existing LAN
+   management remains available only when the complete active-network
+   fingerprint matches a profile the operator explicitly trusted.
+
+Expected user journey:
+
+```text
+Connect to a new Wi-Fi network
+  -> network identity is unknown
+  -> Safe Mode activates automatically
+  -> cross-device actions are blocked in React, Node, and Python
+  -> Spoorf audits only the operator device and displays risk reasons
+  -> operator can re-check, mark the network public, trust the full fingerprint,
+     or disconnect their own Wi-Fi
+```
+
+The feature is not intended to determine who owns another device, prove that an
+anomaly is an attack, bypass client isolation, or make public-network device
+control acceptable.
+
 ## Product Principles
 
 1. Unknown networks fail closed.
@@ -386,3 +416,56 @@ Trust actions require explicit confirmation showing the full fingerprint.
 - Public-session device, DNS, L7, and credential data is absent after disconnect.
 - Risk scoring is deterministic and includes explainable reason codes.
 - Panic disconnect never targets another device and never hides cleanup failure.
+
+## Accuracy and Success Targets
+
+There is no honest single "accuracy percentage" for this feature. It contains
+deterministic policy enforcement, network-identity matching, local posture
+inspection, anomaly detection, and OS operations. Each must be measured
+separately.
+
+The following values are release targets, not current measured results:
+
+| Capability | Release target | Meaning |
+|---|---:|---|
+| Policy enforcement coverage | **100% of known mutation surfaces** | Every React, REST, Socket.IO, and direct Python path in the capability matrix has an automated allow/deny test. |
+| Safe failure rate | **>= 99%** | Missing, stale, contradictory, or unavailable identity/policy data results in Safe Mode rather than an unsafe authorization. |
+| Complete-fingerprint network matching | **>= 95%** | Reconnecting to the same tested network produces the same profile, while materially different networks do not inherit trust. |
+| Gateway-change detection | **>= 95% when gateway MAC is observable** | A changed pinned gateway identity produces an anomaly and trust invalidation. It does not claim to prove an attack. |
+| Supported Windows exposure-audit coverage | **>= 90%** | The collector accurately reports the supported firewall, sharing, SMB, RDP, discovery, and listener checks in the test matrix. |
+| Risk-score determinism | **100%** | Identical normalized inputs produce exactly the same score, reason codes, and recommendations. |
+| Ephemeral-data cleanup | **100% in automated failure/reconnect tests** | Forbidden public-session device, DNS, L7, and credential data is absent after generation change, disconnect, and exit. |
+| Panic-disconnect completion | **>= 95% on supported Windows test machines** | Cleanup and self-disconnect complete; permission or adapter failures are explicitly reported rather than hidden. |
+
+### Expected MVP outcome
+
+For Windows 10/11 with Npcap, an observable gateway, and complete Wi-Fi identity,
+the expected end-to-end MVP success range is **90-95%** across the supported test
+matrix. The safety objective is higher than the classification objective:
+uncertain cases deliberately become `unknown` and remain restricted.
+
+This creates an intentional bias:
+
+- false `unknown/public` classification is inconvenient but safe;
+- false `trusted` classification is unacceptable;
+- anomaly detection may warn about legitimate router replacement or AP roaming,
+  so warnings always include evidence and never automatically accuse another
+  user.
+
+### Required validation matrix
+
+Before release, the targets must be measured across:
+
+- WPA2 and WPA3 private networks;
+- open and captive-portal Wi-Fi;
+- multiple access points sharing one SSID;
+- gateway replacement and legitimate BSSID roaming;
+- incomplete SSID/BSSID/gateway data;
+- Python engine and SQLite unavailable;
+- Administrator and non-Administrator Windows sessions;
+- reconnect, sleep/resume, adapter switch, and application restart.
+
+If measured complete-fingerprint matching is below 95%, trust remains disabled
+for the failing topology until the fingerprint model is revised. If any policy
+bypass is found, the feature does not meet its release gate regardless of the
+average score.
