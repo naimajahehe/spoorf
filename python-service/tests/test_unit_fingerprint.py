@@ -4,6 +4,7 @@ Covers: Happy Path, Negative Tests, and Edge Cases
 """
 
 import unittest
+from unittest.mock import patch
 from src.core.fingerprint import (
     is_randomized_mac,
     get_vendor,
@@ -11,6 +12,7 @@ from src.core.fingerprint import (
     detect_device_type,
     synthesize_ensemble_profile
 )
+from src.core.fingerprint.oui_registry import OUIRegistry, OUIRecord
 
 class TestCoreFingerprint(unittest.TestCase):
 
@@ -55,6 +57,47 @@ class TestCoreFingerprint(unittest.TestCase):
         self.assertEqual(get_vendor(""), "Unknown")
         self.assertEqual(get_vendor("c2:4e:ca:88:04:2d"), "Private Device (Randomized MAC)")
         self.assertEqual(get_vendor("99:88:77:66:55:44"), "Generic Device")
+
+    @patch("src.core.fingerprint.vendors.get_oui_record")
+    def test_get_vendor_uses_registry_hit(self, mock_get_oui_record):
+        """Registry hits should return the organization name before generic fallback."""
+        mock_get_oui_record.return_value = OUIRecord(
+            organization="Example Networks",
+            assignment="001122",
+            prefix_bits=24
+        )
+        self.assertEqual(get_vendor("00:11:22:33:44:55"), "Example Networks")
+
+    def test_oui_registry_prefers_longest_registered_prefix(self):
+        """Registry lookup should prefer MA-S over MA-M over MA-L."""
+        registry = OUIRegistry.from_mapping({
+            "24": {"001122": "Example Networks"},
+            "28": {"0011223": "Example Mobile"},
+            "36": {"001122334": "Example Camera"},
+        })
+
+        self.assertEqual(
+            registry.lookup("00:11:22:33:4a:bc").organization,
+            "Example Camera",
+        )
+        self.assertEqual(
+            registry.lookup("00:11:22:3f:aa:bb").organization,
+            "Example Mobile",
+        )
+        self.assertEqual(
+            registry.lookup("00:11:22:ff:aa:bb").organization,
+            "Example Networks",
+        )
+
+    def test_oui_registry_never_resolves_randomized_mac(self):
+        """Locally administered MACs must never resolve through the OUI registry."""
+        registry = OUIRegistry.from_mapping({
+            "24": {"021122": "Must Not Match"},
+            "28": {},
+            "36": {},
+        })
+        self.assertIsNone(registry.lookup("02:11:22:33:44:55"))
+        self.assertIsNone(registry.lookup("not-a-mac"))
 
     # ===== 3. detect_os =====
     def test_detect_os_happy_path(self):

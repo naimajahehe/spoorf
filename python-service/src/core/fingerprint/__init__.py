@@ -1,16 +1,55 @@
 """
 Fingerprint Subsystem Exports
 """
-from .vendors import is_randomized_mac, get_vendor
-from .netbios import query_netbios, query_mdns, get_hostname_info
-from .probe import ping_fast, scan_ports, get_http_info
+
+from .vendors import OUIRecord, OUIRegistry, get_oui_record, is_randomized_mac, get_vendor
 from .os_detect import detect_os, detect_device_type
 from .ensemble import synthesize_ensemble_profile
 
+
+def query_netbios(*args, **kwargs):
+    from .netbios import query_netbios as _query_netbios
+    return _query_netbios(*args, **kwargs)
+
+
+def query_mdns(*args, **kwargs):
+    from .netbios import query_mdns as _query_mdns
+    return _query_mdns(*args, **kwargs)
+
+
+def get_hostname_info(*args, **kwargs):
+    from .netbios import get_hostname_info as _get_hostname_info
+    return _get_hostname_info(*args, **kwargs)
+
+
+def ping_fast(*args, **kwargs):
+    from .probe import ping_fast as _ping_fast
+    return _ping_fast(*args, **kwargs)
+
+
+def scan_ports(*args, **kwargs):
+    from .probe import scan_ports as _scan_ports
+    return _scan_ports(*args, **kwargs)
+
+
+def get_http_info(*args, **kwargs):
+    from .probe import get_http_info as _get_http_info
+    return _get_http_info(*args, **kwargs)
+
+
 __all__ = [
-    'is_randomized_mac', 'get_vendor',
-    'query_netbios', 'query_mdns', 'get_hostname_info',
-    'ping_fast', 'scan_ports', 'get_http_info',
-    'detect_os', 'detect_device_type',
-    'synthesize_ensemble_profile'
+    "OUIRecord",
+    "OUIRegistry",
+    "get_oui_record",
+    "is_randomized_mac",
+    "get_vendor",
+    "query_netbios",
+    "query_mdns",
+    "get_hostname_info",
+    "ping_fast",
+    "scan_ports",
+    "get_http_info",
+    "detect_os",
+    "detect_device_type",
+    "synthesize_ensemble_profile",
 ]
