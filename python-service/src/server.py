@@ -11,6 +11,7 @@ import time
 import socket
 import logging
 import asyncio
+import ipaddress
 import threading
 from typing import List, Dict, Any, Optional
 from concurrent.futures import ThreadPoolExecutor
@@ -26,8 +27,21 @@ from .core.spoofer import ARPSpoofer
 from .exceptions.custom import SessionNotFoundError
 from .core.telemetry import NetworkTelemetrySampler
 from .core.redirector import RedirectManager, TransparentGatewayManager
-from .core.discovery import dhcp_cache, send_multicast_wakeup, pulse_batch, pulse_host, LivenessWatchdogDaemon
-from .core.network import clear_wifi_cache
+from .core.discovery import (
+    dhcp_cache,
+    send_multicast_wakeup,
+    pulse_batch,
+    pulse_host,
+    LivenessWatchdogDaemon,
+)
+from .core.discovery.dhcp import diff_dhcp_profiles
+from .core.network import (
+    clear_wifi_cache,
+    get_current_gateway,
+    get_network_info,
+    is_valid_private_ip,
+    is_valid_private_network,
+)
 from .core.interceptor import SpoorfCertEngine, L7FlowManager, L7Flow
 from .core.bettercap import BettercapDNSEngine, BettercapPacketDissector, FastSYNScanner
 from .core.shield import shield_engine
@@ -342,6 +356,9 @@ class QuickReauthRequest(BaseModel):
     targets: List[QuickReauthTarget]
     hold_ms: int = 1500
 
+class ScanRequest(BaseModel):
+    skip_multicast_wakeup: bool = False
+
 class SpoofLimitRequest(BaseModel):
     session_id: str
     speed_limit: int
@@ -457,13 +474,19 @@ def get_status():
     }
 
 @app.post("/api/scan")
-async def scan_network():
+async def scan_network(req: Optional[ScanRequest] = None):
     """Eksekusi scan jaringan di ThreadPool terpisah non-blocking."""
     logger.info("📥 [HTTP API] Request scan_network diterima")
     running_loop = asyncio.get_running_loop()
     try:
         liveness_daemon.set_scanning_active(True)
-        devices = await running_loop.run_in_executor(executor, scanner.scan_full)
+        skip_multicast_wakeup = bool(req and req.skip_multicast_wakeup)
+        devices = await running_loop.run_in_executor(
+            executor,
+            lambda: scanner.scan_full(
+                include_multicast_wakeup=not skip_multicast_wakeup
+            ),
+        )
         try:
             liveness_daemon.update_tracked_devices(devices)
         except Exception:
@@ -531,25 +554,70 @@ async def deep_scan_device_ports(req: DeepPortScanRequest):
 
 @app.post("/api/dhcp/wakeup")
 async def trigger_dhcp_wakeup():
-    """Memicu siaran multicast wake-up & sweep untuk memancing respons DHCP/ARP (Optimasi Teknik 3B)."""
-    logger.info("📥 [HTTP API] Request DHCP Wake-Up & Handshake Burst diterima (Teknik 3B)")
+    """Refresh discovery dan observasi DHCP alami untuk Optimasi Teknik 3B."""
+    logger.info("📥 [HTTP API] Request Discovery Refresh & DHCP Observation diterima")
+    network_info = get_network_info()
+    controller_ip = str(network_info.get('ip') or '').strip()
+    network_cidr = str(network_info.get('network') or '').strip()
+    gateway_ip = str(get_current_gateway() or '').strip()
+
+    if (
+        not is_valid_private_ip(controller_ip)
+        or not is_valid_private_network(network_cidr)
+        or not is_valid_private_ip(gateway_ip)
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Discovery Refresh membutuhkan topologi IPv4 RFC1918 yang valid",
+        )
+
+    try:
+        active_network = ipaddress.IPv4Network(network_cidr, strict=False)
+        if (
+            ipaddress.IPv4Address(controller_ip) not in active_network
+            or ipaddress.IPv4Address(gateway_ip) not in active_network
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="Controller atau gateway berada di luar subnet aktif",
+            )
+    except ValueError as error:
+        raise HTTPException(
+            status_code=400,
+            detail="CIDR jaringan aktif tidak valid",
+        ) from error
+
     running_loop = asyncio.get_running_loop()
     try:
-        def _do_wakeup():
-            send_multicast_wakeup()
-            return dhcp_cache.get_snapshot()
+        before = dhcp_cache.get_unique_snapshot()
+        delivery = await running_loop.run_in_executor(
+            executor,
+            send_multicast_wakeup,
+        )
+        if delivery.get('succeeded', 0) <= 0:
+            raise HTTPException(
+                status_code=503,
+                detail="Tidak ada datagram discovery yang berhasil dikirim",
+            )
 
-        snapshot = await running_loop.run_in_executor(executor, _do_wakeup)
+        await asyncio.sleep(4.0)
+        after = dhcp_cache.get_unique_snapshot()
+        dhcp_delta = diff_dhcp_profiles(before, after)
         return {
             "success": True,
-            "message": "DHCP & Multicast Wake-up broadcast transmitted successfully",
+            "message": "Discovery refresh transmitted; DHCP observation window completed",
             "data": {
-                "dhcp_profiled_count": len(snapshot),
-                "snapshot": snapshot
+                "delivery": delivery,
+                "dhcp_delta": dhcp_delta,
+                "dhcp_profiled_count": len(after),
+                "snapshot": after,
+                "observation_seconds": 4.0,
             }
         }
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"DHCP wakeup failed: {e}")
+        logger.error(f"Discovery refresh failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/network/quick-reauth")

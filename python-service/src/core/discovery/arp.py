@@ -20,39 +20,33 @@ from ..network import (
 )
 from ...utils.logger import logger
 
-def probe_sleeping_host_via_gateway_arp(
+def probe_sleeping_host_via_unicast_arp(
     target_ip: str,
     target_mac: str,
-    gateway_ip: str,
     discovered: Dict[str, str],
     timeout: float = 0.25
 ) -> None:
-    """
-    Kirim Unicast ARP Request dengan psrc = gateway_ip (Gateway-Disguised Probe).
-    Membangunkan chipset Wi-Fi smartphone yang sedang Doze Sleep / Battery Saver
-    karena smartphone selalu membalas ARP dari router gateway agar IP sewaannya tidak dicabut.
-    """
+    """Kirim ARP unicast normal menggunakan identitas controller sendiri."""
     try:
-        if (
-            not is_valid_private_ip(target_ip)
-            or not is_valid_mac(target_mac)
-            or not is_valid_private_ip(gateway_ip)
-        ):
+        if not is_valid_private_ip(target_ip) or not is_valid_mac(target_mac):
             return
         if target_ip in discovered:
             return
 
+        network_info = get_network_info()
+        self_ip = str(network_info.get('ip') or '').strip()
         self_mac = (get_self_mac() or '').lower().replace('-', ':')
         if not self_mac or not is_valid_mac(self_mac):
             self_mac = getattr(conf.iface, 'mac', None)
         if self_mac:
             self_mac = self_mac.lower().replace('-', ':')
+        if not is_valid_private_ip(self_ip) or not is_valid_mac(self_mac):
+            return
 
-        # Paket Unicast ARP: Ethernet dst = target_mac, Ethernet src = self_mac, ARP psrc = gateway_ip, pdst = target_ip
         unicast_arp = Ether(dst=target_mac, src=self_mac) / ARP(
-            op=1, # who-has
+            op=1,
             hwsrc=self_mac,
-            psrc=gateway_ip,
+            psrc=self_ip,
             hwdst=target_mac,
             pdst=target_ip
         )
@@ -62,10 +56,29 @@ def probe_sleeping_host_via_gateway_arp(
                 rcv_mac = rcv[ARP].hwsrc.lower().replace('-', ':')
                 if is_valid_mac(rcv_mac):
                     discovered[target_ip] = rcv_mac
-                    logger.debug(f"📱 [Doze Wakeup] Sleeping host {target_ip} ({rcv_mac}) responded to gateway-disguised probe!")
+                    logger.debug(f"📱 [Doze Wakeup] Sleeping host {target_ip} ({rcv_mac}) responded to controller ARP probe")
                     break
     except Exception as e:
         logger.debug(f"Sleeping host probe notice for {target_ip}: {e}")
+
+
+def probe_sleeping_host_via_gateway_arp(
+    target_ip: str,
+    target_mac: str,
+    gateway_ip: str,
+    discovered: Dict[str, str],
+    timeout: float = 0.25
+) -> None:
+    """Compatibility wrapper for the former gateway-disguised probe."""
+    if not is_valid_private_ip(gateway_ip):
+        return
+    probe_sleeping_host_via_unicast_arp(
+        target_ip,
+        target_mac,
+        discovered,
+        timeout,
+    )
+
 
 def get_mac_from_arp(ip: str) -> str:
     """Ambil MAC address untuk IP tertentu dari ARP cache kernel OS."""

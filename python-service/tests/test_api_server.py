@@ -4,7 +4,9 @@ Covers: Happy Path, Negative Tests, and Edge Cases
 """
 
 import unittest
-from unittest.mock import patch
+import asyncio
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 from fastapi import HTTPException
 from src.exceptions.custom import SpoofError
 import src.core.spoofer_v6 as spoofer_v6
@@ -23,6 +25,8 @@ with patch.object(spoofer_v6.NDPSpoofer, 'refresh_interface'), \
         stop_spoof,
         stop_all_spoof,
         run_bettercap_syn_scan,
+        scan_network,
+        trigger_dhcp_wakeup,
         shutdown_event,
         SpoofStartRequest,
         SpoofLimitRequest,
@@ -188,6 +192,129 @@ class TestServerAPI(unittest.TestCase):
         req_limit = SpoofLimitRequest(session_id="invalid_session_id_999", speed_limit=50)
         res = update_spoof_limit(req_limit)
         self.assertFalse(res.get('success'))
+
+    def test_dhcp_wakeup_rejects_public_topology_before_sending(self):
+        """Method 1 must fail closed before opening multicast sockets."""
+        with patch(
+            'src.server.get_network_info',
+            return_value={
+                'ip': '203.0.113.10',
+                'network': '203.0.113.0/24',
+                'gateway': '203.0.113.1',
+            },
+            create=True,
+        ), patch(
+            'src.server.get_current_gateway',
+            return_value='203.0.113.1',
+            create=True,
+        ), patch('src.server.send_multicast_wakeup') as mock_wakeup:
+            with self.assertRaises(HTTPException) as ctx:
+                asyncio.run(trigger_dhcp_wakeup())
+
+        self.assertEqual(ctx.exception.status_code, 400)
+        mock_wakeup.assert_not_called()
+
+    def test_dhcp_wakeup_rejects_zero_successful_datagrams(self):
+        """An HTTP success must mean at least one discovery datagram was sent."""
+        with patch(
+            'src.server.get_network_info',
+            return_value={
+                'ip': '192.168.1.100',
+                'network': '192.168.1.0/24',
+                'gateway': '192.168.1.1',
+            },
+            create=True,
+        ), patch(
+            'src.server.get_current_gateway',
+            return_value='192.168.1.1',
+            create=True,
+        ), patch(
+            'src.server.send_multicast_wakeup',
+            return_value={
+                'attempted': 6,
+                'succeeded': 0,
+                'failed': 6,
+                'protocols': {},
+                'errors': [],
+            },
+        ):
+            with self.assertRaises(HTTPException) as ctx:
+                asyncio.run(trigger_dhcp_wakeup())
+
+        self.assertEqual(ctx.exception.status_code, 503)
+
+    def test_dhcp_wakeup_reports_observed_profile_delta(self):
+        """The observation response must compare unique DHCP profiles after the wait."""
+        before = {
+            'aa:bb:cc:dd:ee:01': {
+                'mac': 'aa:bb:cc:dd:ee:01',
+                'ip': '192.168.1.20',
+                'vendor_class': '',
+            }
+        }
+        after = {
+            'aa:bb:cc:dd:ee:01': {
+                'mac': 'aa:bb:cc:dd:ee:01',
+                'ip': '192.168.1.20',
+                'vendor_class': 'android-dhcp-14',
+            },
+            'aa:bb:cc:dd:ee:02': {
+                'mac': 'aa:bb:cc:dd:ee:02',
+                'ip': '192.168.1.21',
+                'dhcp_fingerprint': 'Microsoft Windows Signature',
+            },
+        }
+        delivery = {
+            'attempted': 6,
+            'succeeded': 5,
+            'failed': 1,
+            'protocols': {'ssdp_ipv4': True},
+            'errors': [{'protocol': 'ssdp_ipv6', 'error': 'unavailable'}],
+        }
+
+        with patch(
+            'src.server.get_network_info',
+            return_value={
+                'ip': '192.168.1.100',
+                'network': '192.168.1.0/24',
+                'gateway': '192.168.1.1',
+            },
+            create=True,
+        ), patch(
+            'src.server.get_current_gateway',
+            return_value='192.168.1.1',
+            create=True,
+        ), patch(
+            'src.server.dhcp_cache.get_unique_snapshot',
+            side_effect=[before, after],
+        ), patch(
+            'src.server.send_multicast_wakeup',
+            return_value=delivery,
+        ), patch('src.server.asyncio.sleep', new=AsyncMock()) as mock_sleep:
+            response = asyncio.run(trigger_dhcp_wakeup())
+
+        self.assertTrue(response['success'])
+        self.assertEqual(response['data']['delivery'], delivery)
+        self.assertEqual(response['data']['dhcp_delta']['new_count'], 1)
+        self.assertEqual(response['data']['dhcp_delta']['updated_count'], 1)
+        mock_sleep.assert_awaited_once()
+
+    def test_scan_endpoint_can_suppress_multicast_wakeup(self):
+        """The optional scan flag must be forwarded to NetworkScanner."""
+        request = SimpleNamespace(skip_multicast_wakeup=True)
+        with patch('src.server.scanner.scan_full', return_value=[]) as mock_scan:
+            response = asyncio.run(scan_network(request))
+
+        self.assertTrue(response['success'])
+        mock_scan.assert_called_once_with(include_multicast_wakeup=False)
+
+    def test_scan_endpoint_default_keeps_multicast_wakeup(self):
+        """Existing no-body scan callers retain the legacy default behavior."""
+        with patch('src.server.scanner.scan_full', return_value=[]) as mock_scan:
+            response = asyncio.run(scan_network())
+
+        self.assertTrue(response['success'])
+        mock_scan.assert_called_once_with(include_multicast_wakeup=True)
 
     # ===== 4. Edge Cases =====
     @patch('src.core.spoofer.sendp')

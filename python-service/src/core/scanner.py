@@ -36,7 +36,7 @@ from .discovery import (
     collect_from_arp_cache,
     collect_from_arp_broadcast,
     sweep_subnet_for_arp,
-    probe_sleeping_host_via_gateway_arp,
+    probe_sleeping_host_via_unicast_arp,
     collect_from_ndp_cache,
     send_ipv6_all_nodes_multicast,
     verify_ipv6_alive,
@@ -303,7 +303,7 @@ class NetworkScanner:
         }
 
     @classmethod
-    def scan_full(cls) -> List[Dict[str, Any]]:
+    def scan_full(cls, include_multicast_wakeup: bool = True) -> List[Dict[str, Any]]:
         """Eksekusi pemindaian jaringan menyeluruh (Multi-Vector Discovery)."""
         start_time = time.time()
         logger.info("🔍 Memulai SCAN jaringan cerdas & berkecepatan tinggi...")
@@ -338,7 +338,8 @@ class NetworkScanner:
         # dengan total durasi awal dipadatkan menjadi hanya ~1.20s (penghematan waktu ~45%).
         def _run_multicast_sensors():
             try:
-                send_multicast_wakeup()
+                if include_multicast_wakeup:
+                    send_multicast_wakeup()
                 collect_ssdp_sensors(timeout=0.80)
                 collect_mdns_sensors(timeout=0.80)
             except Exception as e:
@@ -408,8 +409,8 @@ class NetworkScanner:
             with concurrent.futures.ThreadPoolExecutor(max_workers=num_probe_workers) as probe_executor:
                 futures = [
                     probe_executor.submit(
-                        probe_sleeping_host_via_gateway_arp,
-                        target_ip, target_mac, gateway_ip, discovered, 0.25
+                        probe_sleeping_host_via_unicast_arp,
+                        target_ip, target_mac, discovered, 0.25
                     )
                     for target_ip, target_mac in unverified
                 ]
