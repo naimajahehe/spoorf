@@ -516,6 +516,10 @@ function App() {
 
     // Auto Scan hanya untuk tier berbayar; free = "Scan saja".
     const canAutoScan = authStatus?.license?.tier !== 'free';
+    // Saat Auto Scan aktif, scan latar dibuat SENYAP secara visual: UI proses scan & border
+    // loading tabel disembunyikan, hanya label "Auto Scan" yang tampil. Scan manual tetap terlihat.
+    const isAutoScanActive = canAutoScan && scanMode === 'auto';
+    const showScanningUI = isScanning && !isAutoScanActive;
 
     // Scan sekali saat buka aplikasi + minta izin notifikasi OS.
     useEffect(() => {
@@ -543,13 +547,14 @@ function App() {
         }
     }, [isScanning]);
 
-    // When network scan is running, auto-cancel select mode and clear selected IPs
+    // Batalkan mode-pilih & bersihkan pilihan saat scan MANUAL berjalan. Scan latar Auto Scan
+    // sengaja dibiarkan senyap — tak mengganggu pilihan pengguna.
     useEffect(() => {
-        if (isScanning) {
+        if (showScanningUI) {
             setIsSelectMode(false);
             setSelectedIps([]);
         }
-    }, [isScanning]);
+    }, [showScanningUI]);
 
     // Detect newly connected devices AND reconnected devices on Wi-Fi and trigger actionable Toast + Desktop Notification + History
     useEffect(() => {
@@ -1589,7 +1594,7 @@ function App() {
                             {/* Left: Connected Devices Card Table with White Border on Scan */}
                             <div className={cn(
                                 "flex-1 min-w-0 w-full bg-[#090a0c] rounded-2xl overflow-visible shadow-2xl relative transition-all duration-300 border",
-                                isScanning
+                                showScanningUI
                                     ? "border-white/40 ring-1 ring-white/15"
                                     : "border-white/[0.08]"
                             )}>
@@ -1610,7 +1615,7 @@ function App() {
 
                                     <div className="flex items-center gap-2.5 flex-wrap">
                                         <AnimatePresence>
-                                            {isScanning && (
+                                            {showScanningUI && (
                                                 <motion.div
                                                     key="scanning-progress"
                                                     initial={{ opacity: 0, scale: 0.95 }}
@@ -1638,10 +1643,10 @@ function App() {
                                                         <button
                                                             type="button"
                                                             onClick={handleBlockSelected}
-                                                            disabled={unblockedSelectedCount === 0 || isScanning}
+                                                            disabled={unblockedSelectedCount === 0 || showScanningUI}
                                                             className={cn(
                                                                 "px-3.5 py-1.5 rounded-lg text-xs font-medium transition-all border outline-none",
-                                                                unblockedSelectedCount > 0 && !isScanning
+                                                                unblockedSelectedCount > 0 && !showScanningUI
                                                                     ? "bg-rose-500/10 text-rose-400 border-rose-500/30 hover:bg-rose-500/20 hover:border-rose-500/40 shadow-sm shadow-rose-500/10"
                                                                     : "bg-white/[0.02] text-zinc-600 border-white/[0.05] cursor-not-allowed opacity-40"
                                                             )}
@@ -1653,10 +1658,10 @@ function App() {
                                                         <button
                                                             type="button"
                                                             onClick={handleRestoreSelected}
-                                                            disabled={blockedSelectedCount === 0 || isScanning}
+                                                            disabled={blockedSelectedCount === 0 || showScanningUI}
                                                             className={cn(
                                                                 "px-3.5 py-1.5 rounded-lg text-xs font-medium transition-all border outline-none",
-                                                                blockedSelectedCount > 0 && !isScanning
+                                                                blockedSelectedCount > 0 && !showScanningUI
                                                                     ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/30 hover:bg-emerald-500/20 hover:border-emerald-500/40 shadow-sm shadow-emerald-500/10"
                                                                     : "bg-white/[0.02] text-zinc-600 border-white/[0.05] cursor-not-allowed opacity-40"
                                                             )}
@@ -1670,7 +1675,7 @@ function App() {
 
                                             {/* Tombol Pilih Perangkat / Batal Pilih (Otomatis tersembunyi saat sedang scan) */}
                                             <AnimatePresence>
-                                                {!isScanning && (
+                                                {!showScanningUI && (
                                                     <motion.button
                                                         key="select-mode-button"
                                                         initial={{ opacity: 0, scale: 0.95 }}
@@ -1710,7 +1715,7 @@ function App() {
                                             </AnimatePresence>
 
                                             <AnimatePresence>
-                                                {!isScanning && canAutoScan && (
+                                                {!showScanningUI && canAutoScan && (
                                                     <motion.div
                                                         key="scan-select-dropdown"
                                                         initial={{ opacity: 0, scale: 0.95 }}
@@ -1814,7 +1819,7 @@ function App() {
                                                 )}
 
                                                 {/* Free tier: tombol Scan sederhana + ikon (tanpa mode otomatis) */}
-                                                {!isScanning && !canAutoScan && (
+                                                {!showScanningUI && !canAutoScan && (
                                                     <motion.button
                                                         key="scan-simple-button"
                                                         type="button"
@@ -1903,7 +1908,7 @@ function App() {
                                             onDeleteDevice={deleteDevice}
                                             onOpenRedirectModal={setRedirectModalDevice}
                                             onRefresh={scan}
-                                            isRefreshing={isScanning}
+                                            isRefreshing={showScanningUI}
                                             isLoading={loadingIps.has(inspectorDevice.ip)}
                                             authStatus={authStatus}
                                             telemetry={telemetry}
