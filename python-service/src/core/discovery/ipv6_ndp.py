@@ -13,7 +13,7 @@ import subprocess
 from typing import Dict, Any, List, Optional
 from scapy.all import (
     srp, conf, Ether, IPv6, ICMPv6EchoRequest,
-    ICMPv6ND_NS, ICMPv6ND_NA, ICMPv6NDOptSrcLLAddr
+    ICMPv6ND_NS, ICMPv6ND_NA, ICMPv6ND_RS, ICMPv6ND_RA, ICMPv6NDOptSrcLLAddr
 )
 from ...utils.logger import logger
 
@@ -246,3 +246,53 @@ def send_ipv6_all_nodes_multicast(discovered_ipv6: Dict[str, Dict[str, Any]], ti
                         discovered_ipv6[src_mac]['global'] = clean_ip
     except Exception as e:
         logger.debug(f"Notice sending IPv6 All-Nodes multicast: {e}")
+
+
+def send_ipv6_router_solicitation(
+    discovered_ipv6: Dict[str, Dict[str, Any]],
+    timeout: float = 0.8,
+    retries: int = 2,
+    self_mac: str = "",
+) -> None:
+    """
+    Kirim ICMPv6 Router Solicitation ke grup All-Routers Multicast (ff02::2, RFC 4861).
+    Router IPv6 WAJIB membalas dengan Router Advertisement dari alamat link-local-nya —
+    jauh lebih andal untuk menangkap alamat IPv6 gateway daripada ping All-Nodes (ff02::1)
+    yang sering ditekan router. `retries` menahan paket-hilang Wi-Fi.
+
+    Self-gating: di jaringan IPv4-only tak ada RA yang datang, sehingga `discovered_ipv6`
+    tidak bertambah dan pemblokiran tetap IPv4-saja (tanpa perubahan perilaku).
+    """
+    try:
+        conf.verb = 0
+        pkt = Ether(dst="33:33:00:00:00:02") / IPv6(dst="ff02::2") / ICMPv6ND_RS()
+        norm_self = (self_mac or "").lower().replace('-', ':')
+        if len(norm_self.split(':')) == 6:
+            pkt = pkt / ICMPv6NDOptSrcLLAddr(lladdr=norm_self)
+
+        ans, _ = srp(pkt, timeout=timeout, retry=max(0, retries), verbose=0)
+        for _snd, rcv in ans:
+            if rcv is None or not rcv.haslayer(ICMPv6ND_RA) or not rcv.haslayer(IPv6):
+                continue
+            router_ip = str(rcv[IPv6].src)
+            router_mac = str(rcv[Ether].src).lower().replace('-', ':') if rcv.haslayer(Ether) else ''
+            if not router_mac or not is_valid_ipv6(router_ip):
+                continue
+            clean_ip = router_ip.split('%')[0]
+            if router_mac not in discovered_ipv6:
+                discovered_ipv6[router_mac] = {
+                    'mac': router_mac,
+                    'link_local': None,
+                    'global': None,
+                    'addresses': []
+                }
+            if clean_ip not in discovered_ipv6[router_mac]['addresses']:
+                discovered_ipv6[router_mac]['addresses'].append(clean_ip)
+
+            cat = categorize_ipv6(clean_ip)
+            if cat == 'link_local' and not discovered_ipv6[router_mac]['link_local']:
+                discovered_ipv6[router_mac]['link_local'] = clean_ip
+            elif cat == 'global' and not discovered_ipv6[router_mac]['global']:
+                discovered_ipv6[router_mac]['global'] = clean_ip
+    except Exception as e:
+        logger.debug(f"Notice sending IPv6 Router Solicitation: {e}")

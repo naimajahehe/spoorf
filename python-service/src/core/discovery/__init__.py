@@ -22,6 +22,7 @@ from .arp import (
 from .ipv6_ndp import (
     collect_from_ndp_cache,
     send_ipv6_all_nodes_multicast,
+    send_ipv6_router_solicitation,
     verify_ipv6_alive,
     is_valid_ipv6,
     categorize_ipv6
@@ -45,7 +46,8 @@ __all__ = [
     'get_mac_from_arp', 'collect_from_arp_cache', 'collect_from_arp_broadcast',
     'sweep_subnet_for_arp', 'probe_sleeping_host_via_unicast_arp',
     'probe_sleeping_host_via_gateway_arp',
-    'collect_from_ndp_cache', 'send_ipv6_all_nodes_multicast', 'verify_ipv6_alive',
+    'collect_from_ndp_cache', 'send_ipv6_all_nodes_multicast',
+    'send_ipv6_router_solicitation', 'verify_ipv6_alive',
     'is_valid_ipv6', 'categorize_ipv6',
     'pulse_host', 'pulse_batch', 'LivenessWatchdogDaemon',
     'detect_ap_isolation', 'test_multicast_bssid_reflection', 'test_l3_hairpinning'

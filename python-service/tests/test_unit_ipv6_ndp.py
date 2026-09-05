@@ -12,6 +12,7 @@ from src.core.discovery.ipv6_ndp import (
     categorize_ipv6,
     collect_from_ndp_cache,
     send_ipv6_all_nodes_multicast,
+    send_ipv6_router_solicitation,
     verify_ipv6_alive
 )
 from src.core.scanner import NetworkScanner
@@ -166,6 +167,31 @@ fe80::4e14:adff:fe14:ad87%14                  4e-e1-14-14-ad-87  Reachable
         self.assertEqual(dev['ipv6_global'], "2404:8000:1024:3ab::45e1")
         self.assertTrue(dev['is_dual_stack'])
         self.assertEqual(len(dev['ipv6_addresses']), 2)
+
+    # ===== Router Solicitation: reliable gateway IPv6 capture (fix #1) =====
+    @patch('src.core.discovery.ipv6_ndp.srp')
+    def test_router_solicitation_captures_gateway_link_local(self, mock_srp):
+        """A Router Advertisement reply must populate the router's link-local IPv6."""
+        from scapy.all import Ether, ICMPv6ND_RA
+        ra = Ether(src="4e:e1:14:14:ad:87") / IPv6(src="fe80::1%14") / ICMPv6ND_RA()
+        mock_srp.return_value = ([(MagicMock(), ra)], None)
+
+        discovered: dict = {}
+        send_ipv6_router_solicitation(discovered)
+
+        self.assertTrue(mock_srp.called)
+        self.assertIn("4e:e1:14:14:ad:87", discovered)
+        entry = discovered["4e:e1:14:14:ad:87"]
+        self.assertEqual(entry["link_local"], "fe80::1")
+        self.assertIn("fe80::1", entry["addresses"])
+
+    @patch('src.core.discovery.ipv6_ndp.srp')
+    def test_router_solicitation_no_reply_leaves_dict_untouched(self, mock_srp):
+        """IPv4-only network (no RA) must leave the discovery dict unchanged."""
+        mock_srp.return_value = ([], None)
+        discovered: dict = {}
+        send_ipv6_router_solicitation(discovered)
+        self.assertEqual(discovered, {})
 
 if __name__ == '__main__':
     unittest.main()

@@ -39,6 +39,7 @@ from .discovery import (
     probe_sleeping_host_via_unicast_arp,
     collect_from_ndp_cache,
     send_ipv6_all_nodes_multicast,
+    send_ipv6_router_solicitation,
     verify_ipv6_alive,
     detect_ap_isolation
 )
@@ -372,6 +373,10 @@ class NetworkScanner:
             try:
                 collect_from_ndp_cache(discovered_ipv6)
                 send_ipv6_all_nodes_multicast(discovered_ipv6, timeout=0.80)
+                # Router Solicitation (ff02::2): tangkap alamat link-local gateway IPv6
+                # secara andal agar pemblokiran dual-stack tak bocor lewat IPv6. Self-gating:
+                # jaringan IPv4-only tak membalas RA → tak menambah kandidat (perilaku tetap).
+                send_ipv6_router_solicitation(discovered_ipv6, self_mac=get_self_mac() or "")
             except Exception as e:
                 logger.debug(f"IPv6 discovery exception: {e}")
 
