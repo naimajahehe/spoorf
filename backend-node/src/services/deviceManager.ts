@@ -530,7 +530,7 @@ export class DeviceManager extends EventEmitter {
         // Background Liveness Watchdog: verifikasi state jaringan tiap 25 detik — HANYA saat Auto Scan
         // aktif. Di mode "Scan saja" watchdog diam total (tak ada scan latar).
         const watchdogTimer = setInterval(() => {
-            if (this.autoScanEnabled && !this.scanning && this.devices.size > 0) {
+            if (this._shouldRunWatchdogScan()) {
                 this.scanNetwork().catch(err => console.warn('Notice background watchdog scan:', err.message));
             }
         }, 25000);
@@ -593,6 +593,11 @@ export class DeviceManager extends EventEmitter {
 
     isAutoScanEnabled(): boolean {
         return this.autoScanEnabled;
+    }
+
+    /** Watchdog latar hanya scan bila Auto Scan aktif, tak sedang scan, & ada perangkat. */
+    private _shouldRunWatchdogScan(): boolean {
+        return this.autoScanEnabled && !this.scanning && this.devices.size > 0;
     }
 
     isScanning(): boolean {

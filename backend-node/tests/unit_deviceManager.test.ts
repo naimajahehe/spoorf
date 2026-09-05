@@ -1928,4 +1928,25 @@ export async function runDeviceManagerTests() {
         console.log('  ✓ Auto Scan: new-device follow-up scan gated by the toggle');
     }
 
+    {
+        const python: any = new EventEmitter();
+        const db: any = { getDeviceByMac: async () => undefined };
+        const manager = new DeviceManager(python, db);
+        (manager as any).devices.set('192.168.1.5', makeStateRetentionDevice({ ip: '192.168.1.5' }));
+
+        // Watchdog must stay silent while Auto Scan is off, even with devices present & idle.
+        (manager as any).autoScanEnabled = false;
+        (manager as any).scanning = false;
+        assert.strictEqual((manager as any)._shouldRunWatchdogScan(), false, 'watchdog off when Auto Scan off');
+
+        // With Auto Scan on, idle, and devices present → watchdog is allowed to scan.
+        (manager as any).autoScanEnabled = true;
+        assert.strictEqual((manager as any)._shouldRunWatchdogScan(), true, 'watchdog runs when Auto Scan on');
+
+        // Never overlaps an in-flight scan.
+        (manager as any).scanning = true;
+        assert.strictEqual((manager as any)._shouldRunWatchdogScan(), false, 'watchdog defers while a scan runs');
+        console.log('  ✓ Auto Scan: background watchdog gated by the toggle');
+    }
+
 }
