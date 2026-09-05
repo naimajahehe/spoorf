@@ -390,14 +390,9 @@ export function useWebSocket() {
             refreshAbortControllerRef.current?.abort();
             const generation = refreshSequencerRef.current.startGeneration();
             void refreshAuthoritativeState(generation);
-            // Pulihkan preferensi Auto Scan tersimpan ke backend (yang default OFF setiap start).
-            // Enforcement per-tier (free dipaksa OFF) dilakukan di App setelah lisensi diketahui.
-            try {
-                const savedAuto = localStorage.getItem('sentinel_autoscan');
-                if (savedAuto !== null) {
-                    newSocket.emit('setAutoScan', { enabled: savedAuto === '1' });
-                }
-            } catch {}
+            // Catatan: Auto Scan TIDAK dikirim di sini. Backend default OFF saat start, dan App
+            // menetapkannya satu kali setelah lisensi diketahui (free dipaksa OFF), sehingga tak
+            // ada jendela di mana pref lama menyalakan scan latar sebelum tier ditegakkan.
         });
 
         newSocket.on('licenseStatus', (data: AuthStatusResponse) => {
