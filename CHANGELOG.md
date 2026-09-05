@@ -2,6 +2,16 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.34.0] - 2026-09-05
+
+### Passive Identity Profiling (menggantikan Quick Re-Auth Micro-Cut)
+- **Classifier fusi-bukti + registry OUI lokal — `python-service/src/core/fingerprint/*` & `discovery/profile_observation.py`**:
+  - Registry OUI IEEE lokal (MA-L/MA-M/MA-S, longest-prefix, MAC acak tak pernah resolve ke vendor) dan classifier explainable yang menetapkan vendor, kategori, hostname, `vendor_confidence`/`type_confidence`, `profile_status`, dan `profile_evidence`.
+  - Benchmark berlabel: precision high-confidence 100% pada dev & holdout (target ≥ 90%); coverage tetap metrik teramati, tidak dipaksa.
+- **Observasi identitas aman IPv4/IPv6 — pengumpulan bukti pasif**: mDNS/SSDP, DHCP Option 12/55/60/61 pasif, dan observasi NDP. **Tanpa** ARP/NDP poisoning, RA/NA palsu, DHCP spoof/NAK, deauth, atau pemutusan target.
+- **Orkestrasi single-flight di Node — `deviceManager.ts` / `pythonBridge.ts` / `routes.ts`**: endpoint kanonik `POST /api/network/profile-refresh` (alias usang `/api/network/quick-reauth` dipertahankan), event `profileRefreshStarted`/`profileRefreshDone` (cermin usang `quickReauth*` bertanda `deprecated`), cooldown + invalidasi saat perubahan jaringan, persistensi confidence/evidence atomik.
+- **Frontend Method 3 — `frontend-react/src/lib/profileCoverage.ts`, `hooks/useWebSocket.ts`, `components/DhcpReconnectModal.tsx`, `App.tsx`**: UI "Automatic Passive Identity Profiling" tanpa memutus koneksi; menampilkan visible/high/medium/unknown/hostname/coverage/durasi/sumber/isolasi-AP/partial-failures; menjelaskan bahwa "Unknown" adalah hasil yang disengaja. Menghapus seluruh diksi micro-cut/quick-reauth dan scan lanjutan. Test `test:profile-coverage` menjaga metrik + ketiadaan diksi disruptif.
+
 ## [v2.33.0] - 2026-09-04
 
 ### Gaming Mode QoS 2.0 & Automated Device Retention

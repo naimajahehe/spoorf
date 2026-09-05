@@ -139,6 +139,31 @@ Pada mode dev (`npm run dev` tanpa Electron), `SENTINEL_API_TOKEN` tidak diset â
   - Panggilan bersamaan menggunakan satu in-flight operation. Hasil terakhir digunakan kembali selama cooldown 20 detik dan ditandai `cached: true`.
   - Response menambahkan `devices`, `duration_ms`, dan `cooldown_remaining_ms` ke delivery/delta yang diterima dari Python.
 
+- **`POST /api/network/profile-refresh`** (Node `:5000` â€” kanonik) & **`POST /api/network/quick-reauth`** (alias usang/kompatibilitas)
+  - **Deskripsi**: Menjalankan **satu** operasi profiling identitas **pasif** atas perangkat yang terlihat. Mengumpulkan bukti segar (OUI, mDNS/SSDP, DHCP pasif, IPv6 NDP observasi) dan menjalankan classifier fusi-bukti. **Tidak** memutus, men-deauth, memaksa renewal/re-auth DHCP, maupun memicu scan lanjutan di frontend. Jendela observasi default **5 detik**.
+  - Panggilan bersamaan berbagi satu in-flight operation; permintaan berulang mematuhi cooldown; perubahan jaringan membatalkan hasil ter-cache (`Network changed before Profile Refresh completed`).
+  - **Response `200 OK`**: `{ "success": true, "data": ProfileRefreshResult }` dengan field:
+    ```json
+    {
+      "visible_count": 12,
+      "high_confidence_count": 9,
+      "medium_confidence_count": 1,
+      "unknown_count": 2,
+      "hostname_count": 7,
+      "coverage_percentage": 75,
+      "sources": { "oui": 12, "mdns": 4, "dhcp_vendor_class": 3 },
+      "ap_isolation": { "isolated": false },
+      "partial_failures": [{ "sensor": "mdns", "error": "timeout", "target": "..." }],
+      "duration_ms": 5031,
+      "devices": [ /* Device[] dengan profile_status/vendor_confidence/type_confidence/profile_evidence */ ],
+      "cached": false,
+      "cooldown_remaining_ms": 0
+    }
+    ```
+  - **Kegagalan sebagian vs total**: sensor yang gagal dicatat di `partial_failures` sementara hasil parsial tetap dikembalikan sebagai sukses. Kegagalan total (mis. topologi belum ter-resolve / jaringan publik) mengembalikan `success: false` dengan `error`.
+  - **Semantik akurasi**: `high_confidence_count` menghitung hanya perangkat dengan vendor **dan** kategori non-generik berstatus `high`; `coverage_percentage` = `high_confidence_count / visible_count`. Label generik/acak (`Generic Device`, `Private Device (Randomized MAC)`) **tidak** dihitung teridentifikasi. Perangkat `unknown` tetap ada di penyebut.
+  - **Alias usang**: `/api/network/quick-reauth` tetap ada demi kompatibilitas, memanggil `profileRefresh()` yang sama, dan **tidak** melakukan micro-cut/renewal apa pun.
+
 - **`POST /api/spoof/start`**
   - **Body** (nama field aktual = `victim_*`, sesuai Pydantic `SpoofStartRequest`):
     ```json

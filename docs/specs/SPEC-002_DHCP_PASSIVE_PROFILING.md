@@ -197,3 +197,35 @@ Tidak ada klaim akurasi 100%. Estimasi awal sebelum benchmark lapangan:
 - rediscovery LAN privat tanpa isolation: 60-90%;
 - enrichment mDNS/SSDP/ARP: 35-70%;
 - DHCP evidence baru tanpa reconnect: 0-10%.
+
+## 7. Method 3: Passive Identity Profiling (menggantikan Quick Re-Auth Micro-Cut)
+
+Method 3 kini adalah **Automatic Passive Identity Profiling** — bukan micro-cut.
+Endpoint kanonik `POST /api/network/profile-refresh` (alias usang
+`/api/network/quick-reauth`) menjalankan **satu** operasi pengumpulan bukti pasif
+atas perangkat yang terlihat, lalu classifier fusi-bukti menetapkan vendor,
+kategori, hostname, dan `profile_status`.
+
+**Batasan wajib (identik dengan Global Constraints plan):**
+- **Tidak** ada ARP/NDP poisoning, DHCP spoofing/NAK, deauth, blackhole, atau
+  pemutusan target dalam alur profiling.
+- **Tidak** ada Router Advertisement / Neighbor Advertisement palsu.
+- Hanya alamat RFC 1918 / link-local privat yang sudah teramati + tujuan multicast standar.
+- Satu aksi manual = satu operasi observasi terbatas (default 5 detik), tanpa scan lanjutan di frontend.
+
+### 7.1 Akurasi vs Coverage (definisi bersama backend & frontend)
+
+Akurasi dan coverage adalah metrik **terpisah**:
+
+- **Precision** = proporsi label high-confidence yang benar terhadap ground-truth
+  berlabel. Target ≥ 90% pada holdout berlabel; **bukan** klaim akurasi lapangan.
+- **Coverage** = proporsi perangkat terlihat-eligible yang menerima vendor
+  non-generik **dan** kategori non-generik berstatus `high`
+  (`high_confidence_count / visible_count`).
+- **Hostname coverage** dilaporkan terpisah karena banyak klien menyembunyikan hostname.
+- Label generik/acak (`Generic Device`, `Generic Client Device`,
+  `Private Device (Randomized MAC)`, `Unknown`) **tidak** dihitung teridentifikasi.
+- Perangkat `unknown` tetap ada di penyebut coverage; high-confidence mengutamakan
+  kebenaran di atas mengisi setiap baris. Gateway & controller dikecualikan.
+- High-confidence memerlukan minimal dua kelompok bukti independen. Hasil historis
+  boleh tampil sebagai info terakhir, tetapi **tidak** dihitung sebagai bukti segar setelah kedaluwarsa.

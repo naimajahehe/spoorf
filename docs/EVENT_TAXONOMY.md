@@ -162,3 +162,22 @@ Meneruskan peringatan ARP dari Shield.
 * **Payload:** objek threat dengan `attacker_mac`, `attacker_ip`, `target_ip`,
   `claimed_ip`, `type`, `action_taken`, dan metadata terkait. `attacker_ip`
   dapat bernilai `null` dan tidak boleh disimpulkan dari `claimed_ip`.
+
+### Event: `profileRefreshStarted`
+Dikirim saat satu pass **profiling identitas pasif** dimulai (endpoint kanonik
+`POST /api/network/profile-refresh`). Operasi ini murni mengumpulkan bukti —
+tidak ada perangkat yang diputus, tidak ada renewal/re-auth DHCP yang dipaksa.
+* **Payload:** `{ operation: "profile_refresh", scope, count }`.
+
+### Event: `profileRefreshDone`
+Dikirim saat pass profiling selesai, membawa ringkasan hasil.
+* **Payload:** `ProfileRefreshResult` + `{ operation: "profile_refresh", scope, count }`
+  (`visible_count`, `high_confidence_count`, `medium_confidence_count`,
+  `unknown_count`, `hostname_count`, `coverage_percentage`, `sources`,
+  `ap_isolation`, `partial_failures`, `duration_ms`).
+
+### Event kompatibilitas: `quickReauthStarted` / `quickReauthDone` (usang)
+Backend masih mencerminkan kedua event ini untuk kompatibilitas, tetapi menandainya
+`deprecated: true` dan `operation: "profile_refresh"`. Konsumen baru **harus**
+mendengarkan `profileRefresh*`; entri aktivitas duplikat dari event usang ini
+ditekan di frontend. Tidak ada perilaku micro-cut yang terkait dengannya.

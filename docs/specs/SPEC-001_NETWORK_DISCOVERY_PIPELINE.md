@@ -146,3 +146,17 @@ Untuk menjamin keandalan pemindaian dan skalabilitas pada jaringan Wi-Fi Publik 
 2. **Cache-First Hostname Resolution**: Jika nama host telah teridentifikasi melalui Passive DHCP Sniffer atau multicast mDNS/SSDP, query nama individual dilewati ($0.00\text{ detik}$).
 3. **Port Scanning Cerdas**: Smartphone dengan MAC acak tidak lagi dipindai port SMB/NetBIOS 137/445/3389, memotong waktu pemindaian 50+ perangkat hingga $50\%$.
 
+## 7. Passive Identity Evidence (IPv4 + IPv6) untuk Profiling
+
+Pipeline discovery menyediakan bukti pasif yang dipakai oleh **Passive Identity
+Profiling** (lihat SPEC-002 §7 & endpoint `POST /api/network/profile-refresh`):
+OUI (registry lokal), mDNS/SSDP, DHCP Option 12/55/60/61 pasif, dan **observasi
+IPv6 NDP** (Neighbor Solicitation/Advertisement yang teramati) untuk memperbaiki
+cakupan hostname dan kategori.
+
+**Larangan keras dalam alur profiling:** observasi IPv6 bersifat **pasif** —
+dilarang **memalsukan Router Advertisement (RA) atau Neighbor Advertisement (NA)**,
+dilarang NDP poisoning, dan dilarang memutus/men-deauth target. Hanya alamat
+link-local/privat yang sudah teramati serta tujuan multicast standar yang digunakan.
+Bukti historis tidak dihitung sebagai bukti segar setelah kedaluwarsa.
+
