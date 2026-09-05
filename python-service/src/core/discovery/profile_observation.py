@@ -5,7 +5,7 @@ from __future__ import annotations
 import ipaddress
 import socket
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import datetime, timezone
 from typing import Any, Dict, List
 
@@ -30,6 +30,20 @@ MIN_OBSERVATION_SECONDS = 3.0
 MAX_OBSERVATION_SECONDS = 10.0
 DEFAULT_OBSERVATION_SECONDS = 5.0
 EVIDENCE_MAX_AGE_SECONDS = 300
+# Batas per-panggilan reverse-DNS. socket.gethostbyaddr TIDAK punya timeout dan bisa
+# menahan ~5 detik/host di Wi-Fi publik yang tak menjawab PTR (lihat SPEC-001 §6.2),
+# jadi kita jalankan lewat executor terpisah dan tinggalkan bila lewat batas.
+REVERSE_DNS_TIMEOUT_SECONDS = 0.4
+# Anggaran waktu-dinding total untuk fase pengumpulan sensor per-perangkat. Menjaga
+# endpoint selalu selesai dalam ~observation + budget (< timeout bridge 20s) BERAPA PUN
+# jumlah perangkat; target yang lewat anggaran → hasil parsial + partial_failures.
+SENSOR_BUDGET_SECONDS = 8.0
+
+# Executor bersama untuk reverse-DNS berbatas waktu (mencegah blocking gethostbyaddr).
+_REVERSE_DNS_EXECUTOR = ThreadPoolExecutor(
+    max_workers=MAX_PROFILE_WORKERS,
+    thread_name_prefix="RevDNS",
+)
 
 
 class ProfileRefreshValidationError(ValueError):
@@ -103,9 +117,20 @@ def _extend_partial_failures(
         )
 
 
-def _reverse_dns(ip: str, *, strict: bool = False) -> str:
+def _reverse_dns(
+    ip: str,
+    *,
+    strict: bool = False,
+    timeout: float = REVERSE_DNS_TIMEOUT_SECONDS,
+) -> str:
+    # socket.gethostbyaddr tidak menghormati timeout socket, jadi dibatasi via executor.
+    future = _REVERSE_DNS_EXECUTOR.submit(socket.gethostbyaddr, ip)
     try:
-        return str(socket.gethostbyaddr(ip)[0] or "").strip()
+        return str(future.result(timeout=timeout)[0] or "").strip()
+    except FuturesTimeoutError:
+        # Resolver menggantung (khas Wi-Fi publik tanpa PTR) — tinggalkan; bukan error.
+        future.cancel()
+        return ""
     except (OSError, socket.herror, socket.gaierror):
         if strict:
             raise
@@ -538,7 +563,14 @@ def collect_profile_refresh(
     dhcp_by_mac.update(after_dhcp)
 
     submitted = []
-    with ThreadPoolExecutor(max_workers=MAX_PROFILE_WORKERS) as pool:
+    _empty_sensors = {
+        "netbios": {},
+        "reverse_dns": "",
+        "ipv6_alive": {},
+        "partial_failures": [],
+    }
+    pool = ThreadPoolExecutor(max_workers=MAX_PROFILE_WORKERS)
+    try:
         for target in normalized_targets:
             submitted.append(
                 (
@@ -547,23 +579,35 @@ def collect_profile_refresh(
                 )
             )
 
+        # Anggaran waktu-dinding total: begitu lewat, target sisa jadi hasil parsial.
+        # Menjamin endpoint selesai dalam ~observation + SENSOR_BUDGET_SECONDS berapa pun
+        # jumlah perangkat (mencegah timeout bridge 20s di Wi-Fi ramai).
+        deadline = time.monotonic() + SENSOR_BUDGET_SECONDS
         sensor_results: Dict[str, Dict[str, Any]] = {}
         for target, future in submitted:
+            remaining = max(0.0, deadline - time.monotonic())
             try:
-                sensor_results[target["mac"]] = future.result()
+                sensor_results[target["mac"]] = future.result(timeout=remaining)
+            except FuturesTimeoutError:
+                sensor_results[target["mac"]] = dict(_empty_sensors)
+                _append_partial_failure(
+                    partial_failures,
+                    "sensor_budget_exceeded",
+                    "Sensor observation exceeded the bounded time budget",
+                    target=target["ip"],
+                )
             except Exception as error:
-                sensor_results[target["mac"]] = {
-                    "netbios": {},
-                    "reverse_dns": "",
-                    "ipv6_alive": {},
-                    "partial_failures": [],
-                }
+                sensor_results[target["mac"]] = dict(_empty_sensors)
                 _append_partial_failure(
                     partial_failures,
                     "target_observation",
                     error,
                     target=target["ip"],
                 )
+    finally:
+        # Jangan menunggu straggler (mis. gethostbyaddr yang menggantung) — batalkan
+        # yang belum jalan & lepas yang sedang jalan agar total tetap terbatas.
+        pool.shutdown(wait=False, cancel_futures=True)
 
     observed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     devices = []

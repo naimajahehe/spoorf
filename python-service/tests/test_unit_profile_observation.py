@@ -823,8 +823,11 @@ class TestProfileObservation(unittest.TestCase):
             def __init__(self, value):
                 self._value = value
 
-            def result(self):
+            def result(self, timeout=None):
                 return self._value
+
+            def cancel(self):
+                return False
 
         class ImmediateExecutor:
             def __init__(self, max_workers):
@@ -838,6 +841,9 @@ class TestProfileObservation(unittest.TestCase):
 
             def submit(self, function, *args, **kwargs):
                 return ImmediateFuture(function(*args, **kwargs))
+
+            def shutdown(self, wait=True, cancel_futures=False):
+                return None
 
         stack, _ = self._collector_patches()
         stack.enter_context(
@@ -857,6 +863,70 @@ class TestProfileObservation(unittest.TestCase):
             )
 
         self.assertEqual(created_worker_counts, [MAX_PROFILE_WORKERS])
+
+    def test_reverse_dns_is_time_bounded(self):
+        """A hanging resolver must NOT block _reverse_dns for ~5s (public Wi-Fi PTR)."""
+        import time as real_time
+        from src.core.discovery.profile_observation import REVERSE_DNS_TIMEOUT_SECONDS
+
+        def slow_resolve(ip):
+            real_time.sleep(3.0)
+            return ("must-not-return", [], [ip])
+
+        start = real_time.monotonic()
+        with patch(
+            "src.core.discovery.profile_observation.socket.gethostbyaddr",
+            side_effect=slow_resolve,
+        ):
+            result = _reverse_dns("192.168.1.20")
+        elapsed = real_time.monotonic() - start
+
+        self.assertEqual(result, "")
+        self.assertLess(elapsed, REVERSE_DNS_TIMEOUT_SECONDS + 1.5)
+
+    def test_profile_refresh_bounds_slow_sensor_collection(self):
+        """Slow per-target sensors must not blow the total budget; they degrade to partial_failures."""
+        import time as real_time
+        import threading
+
+        targets = [
+            {"ip": f"192.168.1.{20 + i}", "mac": f"00:07:ab:11:22:{i:02x}", "ipv6_addresses": []}
+            for i in range(5)
+        ]
+        arp = {"192.168.1.1": "00:aa:bb:cc:dd:ee"}
+        for target in targets:
+            arp[target["ip"]] = target["mac"]
+
+        def slow_sensors(target, controller_mac):
+            # Event().wait blocks for real; time.sleep is globally patched by the helper.
+            threading.Event().wait(3.0)
+            return {"netbios": {}, "reverse_dns": "", "ipv6_alive": {}, "partial_failures": []}
+
+        assessment = {
+            "vendor": "Unknown", "device_type": "Unknown", "hostname": "", "os": "Unknown",
+            "vendor_confidence": 0, "type_confidence": 0, "hostname_confidence": 0,
+            "profile_status": "unknown", "profile_evidence": [],
+            "profiled_at": "2026-09-04T08:00:00Z", "profile_version": 1,
+        }
+        stack, _ = self._collector_patches(arp=arp, assess=lambda **_k: assessment)
+
+        start = real_time.monotonic()
+        with stack, patch(
+            "src.core.discovery.profile_observation.SENSOR_BUDGET_SECONDS", 0.5
+        ), patch(
+            "src.core.discovery.profile_observation._collect_target_sensors",
+            side_effect=slow_sensors,
+        ):
+            result = collect_profile_refresh(targets, observation_seconds=3)
+        elapsed = real_time.monotonic() - start
+
+        # Must return promptly (bounded) instead of waiting ~3s for every slow sensor.
+        self.assertLess(elapsed, 2.5)
+        budget_failures = [
+            failure for failure in result["partial_failures"]
+            if "budget" in str(failure.get("sensor", "")).lower()
+        ]
+        self.assertTrue(budget_failures, "slow targets must be recorded as budget partial_failures")
 
 
 if __name__ == "__main__":
