@@ -6,6 +6,8 @@ Covers: Happy Path, Negative Tests, and Edge Cases
 import unittest
 from unittest.mock import patch
 from src.core.fingerprint import (
+    assess_device_profile,
+    canonicalize_vendor,
     is_randomized_mac,
     get_vendor,
     detect_os,
@@ -227,7 +229,7 @@ class TestCoreFingerprint(unittest.TestCase):
         )
         self.assertEqual(host, "Infinix-HOT-10")
         self.assertEqual(os_name, "Android OS")
-        self.assertEqual(dev_type, "Android / iOS (Mobile)")
+        self.assertEqual(dev_type, "Smartphone / Tablet")
 
     def test_extract_mobile_brand_from_hostname_patterns(self):
         """Happy & Edge: Brand keyword extraction with negative lookahead guard."""
@@ -286,7 +288,182 @@ class TestCoreFingerprint(unittest.TestCase):
             mdns_discovered={}
         )
         self.assertEqual(dev_type, "Smart TV / Multimedia")
-        self.assertEqual(vendor, "Samsung (Smart TV / Audio)")
+        self.assertEqual(vendor, "Samsung")
+
+    # ===== 6. explainable profile assessment =====
+    def _assess(self, **overrides):
+        inputs = {
+            "ip": "192.168.1.200",
+            "mac": "c2:4e:ca:88:04:2d",
+            "is_gateway": False,
+            "dhcp_info": {},
+            "mdns_info": {},
+            "ssdp_info": {},
+            "netbios_info": {},
+            "reverse_dns": "",
+            "ttl": None,
+            "open_ports": [],
+            "services": [],
+            "ipv6_info": {},
+            "observed_at": "2026-09-04T08:00:00Z",
+        }
+        inputs.update(overrides)
+        return assess_device_profile(**inputs)
+
+    def test_profile_assessment_combines_independent_samsung_phone_evidence(self):
+        result = self._assess(
+            ip="192.168.1.20",
+            mac="00:07:ab:11:22:33",
+            dhcp_info={"hostname": "Galaxy-A07", "vendor_class": "android-dhcp-14"},
+            mdns_info={"hostname": "Galaxy-A07.local", "model": "SM-A055F"},
+            ttl=64,
+            ipv6_info={"addresses": ["fe80::20"]},
+        )
+
+        self.assertEqual(result["vendor"], "Samsung")
+        self.assertEqual(result["device_type"], "Smartphone / Tablet")
+        self.assertEqual(result["profile_status"], "high")
+        self.assertGreaterEqual(result["vendor_confidence"], 80)
+        self.assertGreaterEqual(result["type_confidence"], 80)
+
+    def test_vendor_canonicalization_preserves_unmapped_explicit_manufacturer(self):
+        self.assertEqual(
+            canonicalize_vendor("Example Networks Incorporated"),
+            "Example Networks Incorporated",
+        )
+
+    def test_profile_assessment_keeps_randomized_silent_device_unknown(self):
+        result = self._assess(ip="192.168.1.21")
+
+        self.assertEqual(result["vendor"], "Unknown")
+        self.assertEqual(result["device_type"], "Unknown")
+        self.assertEqual(result["profile_status"], "unknown")
+
+    def test_profile_assessment_does_not_promote_single_mdns_hostname_to_high(self):
+        result = self._assess(
+            mdns_info={"hostname": "Galaxy-Solo.local"},
+            ttl=64,
+        )
+
+        self.assertEqual(result["vendor"], "Samsung")
+        self.assertEqual(result["device_type"], "Smartphone / Tablet")
+        self.assertNotEqual(result["profile_status"], "high")
+
+    def test_profile_assessment_does_not_treat_intel_oui_as_laptop_brand(self):
+        result = self._assess(
+            ip="192.168.1.22",
+            mac="00:02:b3:11:22:33",
+            netbios_info={"hostname": "DESKTOP-58NKETL"},
+            reverse_dns="DESKTOP-58NKETL",
+            ttl=128,
+            open_ports=[445],
+            services=["SMB"],
+        )
+
+        self.assertEqual(result["device_type"], "PC / Laptop")
+        self.assertNotEqual(result["vendor"], "Intel")
+        self.assertNotEqual(result["profile_status"], "high")
+
+    def test_profile_assessment_withholds_high_confidence_on_conflicting_explicit_identities(self):
+        result = self._assess(
+            ssdp_info={
+                "manufacturer": "Apple Inc.",
+                "model_name": "Apple TV 4K",
+                "friendly_name": "Living Room TV",
+            },
+            mdns_info={
+                "manufacturer": "Samsung Electronics",
+                "model": "SM-S928B",
+                "hostname": "Galaxy-S24.local",
+            },
+            ttl=64,
+        )
+
+        self.assertEqual(result["vendor"], "Unknown")
+        self.assertEqual(result["device_type"], "Unknown")
+        self.assertNotEqual(result["profile_status"], "high")
+
+    def test_profile_assessment_keeps_broad_oui_only_identity_unknown(self):
+        result = self._assess(mac="00:07:ab:44:55:66")
+
+        self.assertEqual(result["vendor"], "Unknown")
+        self.assertEqual(result["device_type"], "Unknown")
+        self.assertEqual(result["vendor_confidence"], 55)
+        self.assertEqual(result["profile_status"], "unknown")
+
+    def test_profile_assessment_accepts_explicit_ssdp_printer_identity(self):
+        result = self._assess(
+            ssdp_info={
+                "manufacturer": "Canon Inc.",
+                "model_name": "PIXMA TS5350",
+                "friendly_name": "Office Printer",
+            },
+            services=["IPP"],
+        )
+
+        self.assertEqual(result["vendor"], "Canon")
+        self.assertEqual(result["device_type"], "Printer")
+        self.assertEqual(result["hostname"], "Office Printer")
+        self.assertEqual(result["profile_status"], "high")
+        self.assertTrue(any(
+            item["source"] == "SSDP"
+            and item["value"] == "Canon Inc. / PIXMA TS5350"
+            for item in result["profile_evidence"]
+        ))
+
+    def test_profile_assessment_correlates_dhcpv6_duid_without_guessing(self):
+        result = self._assess(
+            dhcp_info={
+                "hostname": "iPhone-15",
+                "vendor_class": "Apple iOS DHCPv6",
+                "client_id": "00:01:00:01:aa:bb:cc:dd",
+            },
+            ipv6_info={
+                "duid": "00:01:00:01:aa:bb:cc:dd",
+                "hostname": "iPhone-15",
+                "vendor_class": "Apple iOS",
+                "addresses": ["fe80::15"],
+            },
+            ttl=64,
+        )
+
+        self.assertEqual(result["vendor"], "Apple")
+        self.assertEqual(result["device_type"], "Smartphone / Tablet")
+        self.assertEqual(result["profile_status"], "high")
+        self.assertTrue(any(
+            item["group"] == "dhcpv6_correlation"
+            for item in result["profile_evidence"]
+        ))
+
+    def test_profile_assessment_preserves_exact_hostname(self):
+        result = self._assess(
+            dhcp_info={
+                "hostname": "MiXeD-Case.Device.local",
+                "vendor_class": "MSFT 5.0",
+            },
+            ttl=128,
+            open_ports=[445],
+            services=["microsoft-ds"],
+        )
+
+        self.assertEqual(result["hostname"], "MiXeD-Case.Device.local")
+
+    def test_profile_assessment_marks_gateway_unknown_for_coverage(self):
+        result = self._assess(
+            mac="14:cc:20:00:11:22",
+            is_gateway=True,
+            ssdp_info={
+                "manufacturer": "TP-Link Corporation Limited",
+                "model_name": "Archer AX55",
+                "friendly_name": "Home Router",
+            },
+            services=["DNS", "DHCP"],
+        )
+
+        self.assertEqual(result["device_type"], "Router / Gateway")
+        self.assertEqual(result["profile_status"], "unknown")
+        self.assertEqual(result["profile_version"], 1)
+        self.assertEqual(result["profiled_at"], "2026-09-04T08:00:00Z")
 
 if __name__ == '__main__':
     unittest.main()

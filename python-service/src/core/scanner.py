@@ -53,7 +53,8 @@ from .fingerprint import (
     get_http_info,
     detect_os,
     detect_device_type,
-    synthesize_ensemble_profile
+    synthesize_ensemble_profile,
+    synthesize_profile_assessment
 )
 from .proximity import measure_target_proximity
 from ..utils.logger import logger
@@ -116,6 +117,7 @@ class NetworkScanner:
 
         if is_self:
             host_name = socket.gethostname()
+            profiled_at = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
             # Identitas host operator dideteksi DINAMIS dari OS yang berjalan —
             # bukan di-hardcode ke satu laptop tertentu — agar benar di komputer
             # pengguna mana pun (penting untuk distribusi).
@@ -170,7 +172,14 @@ class NetworkScanner:
                 'ipv6_link_local': ipv6_ll,
                 'ipv6_global': ipv6_glob,
                 'ipv6_addresses': ipv6_addrs,
-                'is_dual_stack': is_dual
+                'is_dual_stack': is_dual,
+                'vendor_confidence': 0,
+                'type_confidence': 0,
+                'hostname_confidence': 0,
+                'profile_status': 'unknown',
+                'profile_evidence': [],
+                'profiled_at': profiled_at,
+                'profile_version': 1,
             }
 
         is_gateway = (ip == gateway_ip)
@@ -221,7 +230,8 @@ class NetworkScanner:
 
         http_info = get_http_info(ip, list(open_ports.keys()))
 
-        syn_hostname, syn_vendor, os_name, device_type = synthesize_ensemble_profile(
+        profiled_at = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+        profile = synthesize_profile_assessment(
             ip=ip,
             norm_mac=norm_mac,
             is_gateway=is_gateway,
@@ -233,8 +243,14 @@ class NetworkScanner:
             http_info=http_info,
             dhcp_discovered=dhcp_map,
             ssdp_discovered=ssdp_map,
-            mdns_discovered=mdns_map
+            mdns_discovered=mdns_map,
+            observed_at=profiled_at,
+            ipv6_info=ipv6_info,
         )
+        syn_hostname = profile['hostname']
+        syn_vendor = profile['vendor']
+        os_name = profile['os']
+        device_type = profile['device_type']
 
         now_str = time.strftime('%Y-%m-%d %H:%M:%S')
         now_ts = time.time()
@@ -300,6 +316,13 @@ class NetworkScanner:
             'ipv6_global': ipv6_glob,
             'ipv6_addresses': ipv6_addrs,
             'is_dual_stack': is_dual,
+            'vendor_confidence': profile['vendor_confidence'],
+            'type_confidence': profile['type_confidence'],
+            'hostname_confidence': profile['hostname_confidence'],
+            'profile_status': profile['profile_status'],
+            'profile_evidence': profile['profile_evidence'],
+            'profiled_at': profile['profiled_at'],
+            'profile_version': profile['profile_version'],
         }
 
     @classmethod

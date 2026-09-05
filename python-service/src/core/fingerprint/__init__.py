@@ -4,7 +4,13 @@ Fingerprint Subsystem Exports
 
 from .vendors import OUIRecord, OUIRegistry, get_oui_record, is_randomized_mac, get_vendor
 from .os_detect import detect_os, detect_device_type
-from .ensemble import synthesize_ensemble_profile
+from .evidence import EvidenceStrength, ProfileEvidence, ProfileStatus
+from .profile_rules import canonicalize_vendor, device_type_candidates, vendor_candidates
+from .ensemble import (
+    assess_device_profile,
+    synthesize_ensemble_profile,
+    synthesize_profile_assessment,
+)
 
 
 def query_netbios(*args, **kwargs):
@@ -51,5 +57,13 @@ __all__ = [
     "get_http_info",
     "detect_os",
     "detect_device_type",
+    "EvidenceStrength",
+    "ProfileEvidence",
+    "ProfileStatus",
+    "canonicalize_vendor",
+    "device_type_candidates",
+    "vendor_candidates",
+    "assess_device_profile",
     "synthesize_ensemble_profile",
+    "synthesize_profile_assessment",
 ]
