@@ -2,7 +2,15 @@
 Discovery Subsystem Exports
 """
 from .dhcp import dhcp_cache, start_dhcp_sniffer, stop_dhcp_sniffer
-from .multicast import collect_ssdp_sensors, collect_mdns_sensors, send_multicast_wakeup, get_ssdp_cache, get_mdns_cache
+from .multicast import (
+    collect_identity_multicast,
+    collect_ssdp_sensors,
+    collect_mdns_sensors,
+    send_multicast_wakeup,
+    get_ssdp_cache,
+    get_mdns_cache,
+)
+from .profile_observation import collect_profile_refresh
 from .arp import (
     get_mac_from_arp,
     collect_from_arp_cache,
@@ -31,6 +39,7 @@ from .ap_isolation import (
 
 __all__ = [
     'dhcp_cache', 'start_dhcp_sniffer', 'stop_dhcp_sniffer',
+    'collect_identity_multicast', 'collect_profile_refresh',
     'collect_ssdp_sensors', 'collect_mdns_sensors', 'send_multicast_wakeup',
     'get_ssdp_cache', 'get_mdns_cache',
     'get_mac_from_arp', 'collect_from_arp_cache', 'collect_from_arp_broadcast',

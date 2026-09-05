@@ -8,7 +8,12 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from fastapi import HTTPException
+from pydantic import ValidationError
 from src.exceptions.custom import SpoofError
+from src.core.discovery.profile_observation import (
+    ProfileCollectorUnavailableError,
+    ProfileRefreshValidationError,
+)
 import src.core.spoofer_v6 as spoofer_v6
 
 # The server owns singleton spoofers, whose normal constructors inspect adapters.
@@ -27,11 +32,18 @@ with patch.object(spoofer_v6.NDPSpoofer, 'refresh_interface'), \
         run_bettercap_syn_scan,
         scan_network,
         trigger_dhcp_wakeup,
+        profile_refresh,
+        quick_reauth_profiling,
         shutdown_event,
         SpoofStartRequest,
         SpoofLimitRequest,
         SpoofStopRequest,
-        SynScanRequest
+        SynScanRequest,
+        ProfileRefreshRequest,
+        ProfileRefreshTarget,
+        QuickReauthRequest,
+        QuickReauthTarget,
+        spoofer,
     )
 
 class TestServerAPI(unittest.TestCase):
@@ -318,6 +330,118 @@ class TestServerAPI(unittest.TestCase):
         self.assertEqual(response['data']['dhcp_delta']['updated_count'], 1)
         self.assertEqual(response['data']['dhcp_profiled_count'], 2)
         mock_sleep.assert_awaited_once()
+
+    def test_profile_refresh_rejects_public_target_before_collection(self):
+        request = ProfileRefreshRequest(targets=[
+            ProfileRefreshTarget(
+                ip="203.0.113.20",
+                mac="00:11:22:33:44:55",
+            )
+        ])
+        with patch("src.server.collect_profile_refresh") as collect:
+            with self.assertRaises(HTTPException) as ctx:
+                asyncio.run(profile_refresh(request))
+
+        self.assertEqual(ctx.exception.status_code, 400)
+        collect.assert_not_called()
+
+    def test_profile_refresh_runs_safe_collector_in_executor(self):
+        request = ProfileRefreshRequest(
+            targets=[
+                ProfileRefreshTarget(
+                    ip="192.168.1.20",
+                    mac="00:11:22:33:44:55",
+                    ipv6_addresses=["fe80::20"],
+                )
+            ],
+            observation_seconds=3,
+        )
+        safe_result = {
+            "visible_count": 1,
+            "high_confidence_count": 0,
+            "partial_failures": [],
+        }
+        with patch(
+            "src.server.collect_profile_refresh",
+            return_value=safe_result,
+        ) as collect:
+            response = asyncio.run(profile_refresh(request))
+
+        self.assertTrue(response["success"])
+        self.assertEqual(response["data"], safe_result)
+        collect.assert_called_once_with(
+            [{
+                "ip": "192.168.1.20",
+                "mac": "00:11:22:33:44:55",
+                "ipv6_addresses": ["fe80::20"],
+            }],
+            3.0,
+        )
+
+    def test_profile_refresh_maps_collector_failures_to_http_statuses(self):
+        request = ProfileRefreshRequest(targets=[
+            ProfileRefreshTarget(
+                ip="192.168.1.20",
+                mac="00:11:22:33:44:55",
+            )
+        ])
+        cases = [
+            (ProfileRefreshValidationError("outside active CIDR"), 400),
+            (ProfileCollectorUnavailableError("no collector"), 503),
+        ]
+        for error, expected_status in cases:
+            with self.subTest(expected_status=expected_status), patch(
+                "src.server.collect_profile_refresh",
+                side_effect=error,
+            ):
+                with self.assertRaises(HTTPException) as ctx:
+                    asyncio.run(profile_refresh(request))
+            self.assertEqual(ctx.exception.status_code, expected_status)
+
+    def test_legacy_quick_reauth_is_safe_alias(self):
+        request = QuickReauthRequest(targets=[
+            QuickReauthTarget(
+                victim_ip="192.168.1.20",
+                victim_mac="00:11:22:33:44:55",
+                gateway_ip="203.0.113.1",
+                gateway_mac="not-used",
+            )
+        ])
+        safe_result = {"visible_count": 1, "high_confidence_count": 0}
+        with patch(
+            "src.server.collect_profile_refresh",
+            return_value=safe_result,
+        ) as collect, patch.object(spoofer, "start") as start_spoof:
+            response = asyncio.run(quick_reauth_profiling(request))
+
+        self.assertTrue(response["success"])
+        self.assertTrue(response["deprecated"])
+        self.assertEqual(response["data"], safe_result)
+        collect.assert_called_once_with(
+            [{
+                "ip": "192.168.1.20",
+                "mac": "00:11:22:33:44:55",
+                "ipv6_addresses": [],
+            }],
+            3.0,
+        )
+        start_spoof.assert_not_called()
+
+    def test_profile_refresh_models_bound_targets_observation_and_ipv6(self):
+        target = ProfileRefreshTarget(
+            ip="192.168.1.20",
+            mac="00:11:22:33:44:55",
+        )
+        with self.assertRaises(ValidationError):
+            ProfileRefreshRequest(targets=[target] * 301)
+        with self.assertRaises(ValidationError):
+            ProfileRefreshRequest(targets=[target], observation_seconds=2.9)
+        with self.assertRaises(ValidationError):
+            ProfileRefreshTarget(
+                ip="192.168.1.20",
+                mac="00:11:22:33:44:55",
+                ipv6_addresses=[f"fe80::{index}" for index in range(9)],
+            )
 
     def test_scan_endpoint_can_suppress_multicast_wakeup(self):
         """The optional scan flag must be forwarded to NetworkScanner."""

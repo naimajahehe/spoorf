@@ -5,11 +5,39 @@ Covers: Happy Path, Negative Tests, and Thread-Safe Concurrency Edge Cases
 
 import unittest
 import concurrent.futures
+import socket
+from unittest.mock import patch
 from src.core.discovery import (
     dhcp_cache,
     get_ssdp_cache,
     get_mdns_cache
 )
+from src.core.discovery.multicast import collect_identity_multicast
+
+
+def _dns_answer(transaction_id, hostname, ip):
+    encoded_name = b"".join(
+        bytes([len(part)]) + part.encode("ascii")
+        for part in hostname.split(".")
+    ) + b"\x00"
+    return (
+        transaction_id.to_bytes(2, "big")
+        + b"\x84\x00\x00\x00\x00\x01\x00\x00\x00\x00"
+        + encoded_name
+        + b"\x00\x01\x00\x01\x00\x00\x00\x78\x00\x04"
+        + socket.inet_aton(ip)
+    )
+
+
+SSDP_RESPONSE_FIXTURE = (
+    b"HTTP/1.1 200 OK\r\n"
+    b"LOCATION: http://192.168.1.20/device.xml\r\n"
+    b"SERVER: Samsung SmartTV\r\n"
+    b"ST: upnp:rootdevice\r\n"
+    b"USN: uuid:living-room-tv\r\n\r\n"
+)
+MDNS_RESPONSE_FIXTURE = _dns_answer(0, "Galaxy-A07.local", "192.168.1.20")
+LLMNR_RESPONSE_FIXTURE = _dns_answer(1, "DESKTOP-TEST", "192.168.1.30")
 
 class TestCoreDiscovery(unittest.TestCase):
 
@@ -652,6 +680,103 @@ class TestCoreDiscovery(unittest.TestCase):
         self.assertFalse(result['protocols']['ssdp_ipv6'])
         self.assertTrue(result['protocols']['mdns_ipv4'])
         self.assertEqual(result['errors'][0]['protocol'], 'ssdp_ipv6')
+
+    def test_identity_multicast_receives_on_the_query_sockets(self):
+        class FakeDiscoverySocket:
+            def __init__(self):
+                self.sent = []
+                self.received_after_send = False
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def setsockopt(self, *_args):
+                return None
+
+            def settimeout(self, _timeout):
+                return None
+
+            def sendto(self, payload, destination):
+                self.sent.append((payload, destination))
+                return len(payload)
+
+            def recvfrom(self, _size):
+                self.received_after_send = bool(self.sent)
+                raise socket.timeout()
+
+        sockets = [FakeDiscoverySocket(), FakeDiscoverySocket()]
+        with patch(
+            "src.core.discovery.multicast.socket.socket",
+            side_effect=sockets,
+        ):
+            result = collect_identity_multicast(timeout=0.01)
+
+        self.assertTrue(all(sock.received_after_send for sock in sockets))
+        self.assertEqual(result["delivery"]["attempted"], 6)
+
+    def test_identity_multicast_normalizes_current_call_packet_fixtures(self):
+        from src.core.discovery import multicast
+
+        class FixtureSocket:
+            def __init__(self, responses):
+                self.responses = list(responses)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def setsockopt(self, *_args):
+                return None
+
+            def settimeout(self, _timeout):
+                return None
+
+            def sendto(self, payload, _destination):
+                return len(payload)
+
+            def recvfrom(self, _size):
+                if not self.responses:
+                    raise socket.timeout()
+                return self.responses.pop(0)
+
+        ipv4_socket = FixtureSocket([
+            (SSDP_RESPONSE_FIXTURE, ("192.168.1.20", 1900)),
+            (MDNS_RESPONSE_FIXTURE, ("192.168.1.20", 5353)),
+            (LLMNR_RESPONSE_FIXTURE, ("192.168.1.30", 5355)),
+        ])
+        ipv6_socket = FixtureSocket([])
+        multicast._SSDP_DISCOVERED.clear()
+        multicast._MDNS_DISCOVERED.clear()
+        multicast._SSDP_DISCOVERED["192.168.1.99"] = {"server": "stale"}
+        multicast._MDNS_DISCOVERED["192.168.1.99"] = {"hostname": "stale"}
+
+        with patch(
+            "src.core.discovery.multicast.socket.socket",
+            side_effect=[ipv4_socket, ipv6_socket],
+        ):
+            result = collect_identity_multicast(timeout=0.01)
+
+        self.assertEqual(
+            result["ssdp"]["192.168.1.20"]["server"],
+            "Samsung SmartTV",
+        )
+        self.assertEqual(
+            result["mdns"]["192.168.1.20"]["hostname"],
+            "Galaxy-A07",
+        )
+        self.assertEqual(
+            result["llmnr"]["192.168.1.30"]["hostname"],
+            "DESKTOP-TEST",
+        )
+        self.assertNotIn("192.168.1.99", result["ssdp"])
+        self.assertNotIn("192.168.1.99", result["mdns"])
+        self.assertIn("192.168.1.99", get_ssdp_cache())
+        self.assertIn("192.168.1.99", get_mdns_cache())
 
     def test_dhcp_unique_snapshot_and_delta_are_mac_centric(self):
         """One device must count once and profile changes must be measurable."""

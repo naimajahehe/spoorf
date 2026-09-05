@@ -20,7 +20,7 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Resp
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .core.scanner import NetworkScanner
 from .core.spoofer import ARPSpoofer
@@ -28,11 +28,16 @@ from .exceptions.custom import SessionNotFoundError
 from .core.telemetry import NetworkTelemetrySampler
 from .core.redirector import RedirectManager, TransparentGatewayManager
 from .core.discovery import (
+    collect_profile_refresh,
     dhcp_cache,
     send_multicast_wakeup,
     pulse_batch,
     pulse_host,
     LivenessWatchdogDaemon,
+)
+from .core.discovery.profile_observation import (
+    ProfileCollectorUnavailableError,
+    ProfileRefreshValidationError,
 )
 from .core.discovery.dhcp import diff_dhcp_profiles
 from .core.network import (
@@ -40,6 +45,7 @@ from .core.network import (
     get_current_gateway,
     get_network_info,
     get_self_mac,
+    is_valid_mac,
     is_valid_private_ip,
     is_valid_private_network,
 )
@@ -374,6 +380,15 @@ class QuickReauthRequest(BaseModel):
     targets: List[QuickReauthTarget]
     hold_ms: int = 1500
 
+class ProfileRefreshTarget(BaseModel):
+    ip: str
+    mac: str
+    ipv6_addresses: List[str] = Field(default_factory=list, max_length=8)
+
+class ProfileRefreshRequest(BaseModel):
+    targets: List[ProfileRefreshTarget] = Field(max_length=300)
+    observation_seconds: float = Field(default=5.0, ge=3.0, le=10.0)
+
 class ScanRequest(BaseModel):
     skip_multicast_wakeup: bool = False
 
@@ -649,32 +664,91 @@ async def trigger_dhcp_wakeup():
         logger.error(f"Discovery refresh failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/api/network/quick-reauth")
-async def quick_reauth_profiling(req: QuickReauthRequest):
-    """
-    Quick Re-Auth Profiling: micro-cut SERENTAK ke target Unknown lalu restore, diperkuat
-    multicast wake-up, untuk memancing DHCP REQUEST baru (ditangkap sniffer pasif).
-    """
-    logger.info(f"📥 [HTTP API] Request quick-reauth untuk {len(req.targets)} target (hold {req.hold_ms}ms)")
+def _profile_target_payloads(
+    targets: List[ProfileRefreshTarget],
+) -> List[Dict[str, Any]]:
+    payloads = [target.model_dump() for target in targets]
+    for target in payloads:
+        if not is_valid_private_ip(target["ip"]):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Target IPv4 '{target['ip']}' bukan alamat RFC1918 yang valid",
+            )
+        if not is_valid_mac(target["mac"]):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Target MAC '{target['mac']}' tidak valid",
+            )
+        for address in target["ipv6_addresses"]:
+            try:
+                ipv6 = ipaddress.IPv6Address(address.split("%", 1)[0].strip())
+            except ValueError as error:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Alamat IPv6 '{address}' tidak valid",
+                ) from error
+            if not (
+                ipv6.is_link_local
+                or ipv6 in ipaddress.IPv6Network("fc00::/7")
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Profile refresh hanya menerima IPv6 link-local atau ULA",
+                )
+    return payloads
+
+
+async def _run_profile_refresh(
+    targets: List[ProfileRefreshTarget],
+    observation_seconds: float,
+) -> Dict[str, Any]:
+    payloads = _profile_target_payloads(targets)
     running_loop = asyncio.get_running_loop()
     try:
-        def _run():
-            result = spoofer.micro_cut_batch(
-                [t.dict() for t in req.targets],
-                hold_seconds=req.hold_ms / 1000.0
-            )
-            # Perkuat: siaran multicast untuk memancing renew DHCP setelah koneksi pulih
-            try:
-                send_multicast_wakeup()
-            except Exception as e:
-                logger.debug(f"Notice multicast wakeup after reauth: {e}")
-            return result
-
-        data = await running_loop.run_in_executor(executor, _run)
-        return {"success": True, "data": data}
+        return await running_loop.run_in_executor(
+            executor,
+            collect_profile_refresh,
+            payloads,
+            float(observation_seconds),
+        )
+    except ProfileRefreshValidationError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except ProfileCollectorUnavailableError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Quick re-auth failed: {e}")
+        logger.error(f"Profile refresh failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/network/profile-refresh")
+async def profile_refresh(req: ProfileRefreshRequest):
+    logger.info(
+        f"📥 [HTTP API] Request profile-refresh untuk {len(req.targets)} target "
+        f"({req.observation_seconds:.1f}s)"
+    )
+    data = await _run_profile_refresh(req.targets, req.observation_seconds)
+    return {"success": True, "data": data}
+
+
+@app.post("/api/network/quick-reauth")
+async def quick_reauth_profiling(req: QuickReauthRequest):
+    """Deprecated compatibility alias for safe passive profile observation."""
+    logger.info(
+        f"📥 [HTTP API] Deprecated quick-reauth alias untuk {len(req.targets)} target"
+    )
+    targets = [
+        ProfileRefreshTarget(
+            ip=target.victim_ip,
+            mac=target.victim_mac,
+            ipv6_addresses=[target.victim_ipv6] if target.victim_ipv6 else [],
+        )
+        for target in req.targets
+    ]
+    observation_seconds = max(3.0, min(10.0, req.hold_ms / 1000.0))
+    data = await _run_profile_refresh(targets, observation_seconds)
+    return {"success": True, "deprecated": True, "data": data}
 
 @app.get("/api/dhcp/stats")
 def get_dhcp_profiling_stats():

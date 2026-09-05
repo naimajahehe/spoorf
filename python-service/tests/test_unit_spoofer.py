@@ -554,30 +554,6 @@ class TestCoreSpoofer(unittest.TestCase):
         self.assertFalse(retained['active'])
         self.assertTrue(retained['restore_failed'])
 
-    @patch('src.core.spoofer.sendp')
-    def test_micro_cut_batch_happy_path(self, mock_sendp):
-        """Quick Re-Auth: micro_cut_batch memutus+restore target valid, tak menyisakan sesi aktif."""
-        targets = [
-            {'victim_ip': '192.168.1.55', 'victim_mac': '00:11:22:33:44:55', 'gateway_ip': '192.168.1.1', 'gateway_mac': '00:aa:bb:cc:dd:ee'},
-            {'victim_ip': '192.168.1.66', 'victim_mac': '11:22:33:44:55:66', 'gateway_ip': '192.168.1.1', 'gateway_mac': '00:aa:bb:cc:dd:ee'},
-        ]
-        res = self.spoofer.micro_cut_batch(targets, hold_seconds=0.5)
-        self.assertEqual(res['cut_count'], 2)
-        self.assertEqual(len(res['errors']), 0)
-        # Semua sesi micro-cut sudah di-restore (stop) -> tidak ada sesi tersisa
-        self.assertEqual(len(self.spoofer.get_all_sessions()), 0)
-
-    @patch('src.core.spoofer.sendp')
-    def test_micro_cut_batch_skips_gateway(self, mock_sendp):
-        """Target yang melanggar invariant (== gateway aktual) dilewati & tercatat error."""
-        targets = [
-            {'victim_ip': '192.168.1.1', 'victim_mac': '00:aa:bb:cc:dd:ee', 'gateway_ip': '192.168.1.1', 'gateway_mac': '00:aa:bb:cc:dd:ee'},
-        ]
-        res = self.spoofer.micro_cut_batch(targets, hold_seconds=0.5)
-        self.assertEqual(res['cut_count'], 0)
-        self.assertEqual(len(res['errors']), 1)
-        self.assertEqual(len(self.spoofer.get_all_sessions()), 0)
-
     def test_compute_forward_target(self):
         """
         IP forwarding ON hanya untuk sesi redirect/transparent-gateway.

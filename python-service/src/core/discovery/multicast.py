@@ -7,7 +7,7 @@ import re
 import xml.etree.ElementTree as ET
 from urllib.request import urlopen, Request
 import urllib.parse
-from typing import Dict, Any
+from typing import Dict, Any, Tuple
 
 _SSDP_DISCOVERED: Dict[str, Dict[str, str]] = {}
 _MDNS_DISCOVERED: Dict[str, Dict[str, str]] = {}
@@ -16,6 +16,285 @@ _MDNS_DISCOVERED: Dict[str, Dict[str, str]] = {}
 # 512KB = ribuan kali lebih besar dari deskriptor UPnP nyata (~1–50KB), jadi tak ada
 # perangkat sah yang terpotong, tetapi mencegah DoS kehabisan memori dari respons raksasa.
 MAX_SSDP_DESCRIPTOR_BYTES = 512 * 1024
+
+_IDENTITY_QUERIES = {
+    socket.AF_INET: (
+        (
+            'ssdp_ipv4',
+            b'M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\n'
+            b'MAN: "ssdp:discover"\r\nMX: 1\r\nST: ssdp:all\r\n\r\n',
+            ('239.255.255.250', 1900),
+        ),
+        (
+            'mdns_ipv4',
+            b'\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00'
+            b'\x09_services\x07_dns-sd\x04_udp\x05local\x00\x00\x0c\x80\x01',
+            ('224.0.0.251', 5353),
+        ),
+        (
+            'llmnr_ipv4',
+            b'\x00\x01\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00'
+            b'\x01*\x00\x00\x01\x00\x01',
+            ('224.0.0.252', 5355),
+        ),
+    ),
+    socket.AF_INET6: (
+        (
+            'ssdp_ipv6',
+            b'M-SEARCH * HTTP/1.1\r\nHOST: [ff02::c]:1900\r\n'
+            b'MAN: "ssdp:discover"\r\nMX: 1\r\nST: ssdp:all\r\n\r\n',
+            ('ff02::c', 1900),
+        ),
+        (
+            'mdns_ipv6',
+            b'\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00'
+            b'\x09_services\x07_dns-sd\x04_udp\x05local\x00\x00\x0c\x80\x01',
+            ('ff02::fb', 5353),
+        ),
+        (
+            'llmnr_ipv6',
+            b'\x00\x01\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00'
+            b'\x01*\x00\x00\x01\x00\x01',
+            ('ff02::1:3', 5355),
+        ),
+    ),
+}
+
+
+def _read_dns_name(data: bytes, offset: int, depth: int = 0) -> Tuple[str, int]:
+    if depth > 8:
+        return "", offset
+    labels = []
+    cursor = offset
+    next_offset = offset
+    jumped = False
+    while cursor < len(data):
+        length = data[cursor]
+        if length == 0:
+            cursor += 1
+            if not jumped:
+                next_offset = cursor
+            break
+        if length & 0xC0 == 0xC0:
+            if cursor + 1 >= len(data):
+                break
+            pointer = ((length & 0x3F) << 8) | data[cursor + 1]
+            pointed, _ = _read_dns_name(data, pointer, depth + 1)
+            if pointed:
+                labels.append(pointed)
+            cursor += 2
+            if not jumped:
+                next_offset = cursor
+            jumped = True
+            break
+        cursor += 1
+        if cursor + length > len(data):
+            break
+        labels.append(data[cursor:cursor + length].decode("utf-8", errors="ignore"))
+        cursor += length
+        if not jumped:
+            next_offset = cursor
+    return ".".join(part for part in labels if part), next_offset
+
+
+def _parse_dns_identity(data: bytes, protocol: str) -> Dict[str, Any]:
+    if len(data) < 12:
+        return {}
+    question_count = int.from_bytes(data[4:6], "big")
+    record_count = sum(
+        int.from_bytes(data[start:start + 2], "big")
+        for start in (6, 8, 10)
+    )
+    offset = 12
+    try:
+        for _ in range(question_count):
+            _, offset = _read_dns_name(data, offset)
+            offset += 4
+
+        names = []
+        values = []
+        for _ in range(record_count):
+            name, offset = _read_dns_name(data, offset)
+            if offset + 10 > len(data):
+                break
+            record_type = int.from_bytes(data[offset:offset + 2], "big")
+            data_length = int.from_bytes(data[offset + 8:offset + 10], "big")
+            data_offset = offset + 10
+            record_end = data_offset + data_length
+            if record_end > len(data):
+                break
+            if name:
+                names.append(name)
+            if record_type in {5, 12}:
+                value, _ = _read_dns_name(data, data_offset)
+                if value:
+                    values.append(value)
+            elif record_type == 33 and data_length >= 6:
+                value, _ = _read_dns_name(data, data_offset + 6)
+                if value:
+                    values.append(value)
+            elif record_type == 16:
+                raw = data[data_offset:record_end]
+                values.append(raw.decode("utf-8", errors="ignore"))
+            offset = record_end
+    except (IndexError, ValueError):
+        return {}
+
+    candidates = names + values
+    hostname = ""
+    for candidate in candidates:
+        clean = str(candidate).strip().rstrip(".")
+        if not clean or clean.startswith("_"):
+            continue
+        if clean.casefold().endswith(".local"):
+            clean = clean[:-6].rstrip(".")
+        if clean:
+            hostname = clean
+            break
+
+    combined = " ".join(candidates)
+    model = ""
+    for brand in (
+        "iPhone", "iPad", "MacBook", "iMac", "Galaxy", "Pixel",
+        "Poco", "Redmi", "Sony", "LG", "Samsung",
+    ):
+        if brand.casefold() in combined.casefold():
+            model = brand
+            break
+    result: Dict[str, Any] = {"records": candidates}
+    if hostname:
+        result["hostname"] = hostname
+    if protocol == "mdns" and model:
+        result["model"] = model
+    return result
+
+
+def _parse_ssdp_response(data: bytes) -> Dict[str, str]:
+    text = data.decode("utf-8", errors="ignore")
+    headers = {}
+    for line in text.splitlines()[1:]:
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        headers[key.strip().casefold()] = value.strip()
+    result = {
+        "location": headers.get("location", ""),
+        "server": headers.get("server", ""),
+        "st": headers.get("st", ""),
+        "usn": headers.get("usn", ""),
+    }
+    friendly_name = headers.get("friendlyname") or headers.get("x-friendly-name")
+    manufacturer = headers.get("manufacturer") or headers.get("x-manufacturer")
+    model_name = (
+        headers.get("modelname")
+        or headers.get("x-model-name")
+        or headers.get("server")
+    )
+    if friendly_name:
+        result["friendly_name"] = friendly_name
+    if manufacturer:
+        result["manufacturer"] = manufacturer
+    if model_name:
+        result["model_name"] = model_name
+    return {key: value for key, value in result.items() if value}
+
+
+def _merge_identity(
+    destination: Dict[str, Dict[str, Any]],
+    ip: str,
+    identity: Dict[str, Any],
+) -> None:
+    if not identity:
+        return
+    current = destination.setdefault(ip, {})
+    for key, value in identity.items():
+        if value:
+            current[key] = value
+
+
+def collect_identity_multicast(timeout: float = 0.8) -> Dict[str, Any]:
+    """Send one dual-stack identity query per protocol and collect same-socket replies."""
+    protocols = {
+        name: False
+        for queries in _IDENTITY_QUERIES.values()
+        for name, _payload, _destination in queries
+    }
+    errors = []
+    partial_failures = []
+    per_run = {"ssdp": {}, "mdns": {}, "llmnr": {}}
+
+    for family in (socket.AF_INET, socket.AF_INET6):
+        queries = _IDENTITY_QUERIES[family]
+        family_name = "ipv4" if family == socket.AF_INET else "ipv6"
+        try:
+            with socket.socket(family, socket.SOCK_DGRAM, socket.IPPROTO_UDP) as sock:
+                if family == socket.AF_INET:
+                    sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
+                else:
+                    sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_HOPS, 2)
+                sock.settimeout(max(0.01, float(timeout)))
+                for name, payload, destination in queries:
+                    try:
+                        sock.sendto(payload, destination)
+                        protocols[name] = True
+                    except Exception as error:
+                        message = str(error).strip() or type(error).__name__
+                        errors.append({"protocol": name, "error": message})
+                        partial_failures.append({"sensor": name, "error": message})
+
+                while True:
+                    try:
+                        data, address = sock.recvfrom(4096)
+                    except socket.timeout:
+                        break
+                    except Exception as error:
+                        message = str(error).strip() or type(error).__name__
+                        partial_failures.append({
+                            "sensor": f"{family_name}_receive",
+                            "error": message,
+                        })
+                        break
+
+                    ip = str(address[0]).split("%", 1)[0]
+                    port = int(address[1]) if len(address) > 1 else 0
+                    if data.startswith(b"HTTP/"):
+                        protocol = "ssdp"
+                        identity = _parse_ssdp_response(data)
+                    else:
+                        transaction_id = (
+                            int.from_bytes(data[:2], "big")
+                            if len(data) >= 2
+                            else -1
+                        )
+                        protocol = (
+                            "mdns"
+                            if port == 5353 or transaction_id == 0
+                            else "llmnr"
+                        )
+                        identity = _parse_dns_identity(data, protocol)
+                    _merge_identity(per_run[protocol], ip, identity)
+        except Exception as error:
+            message = str(error).strip() or type(error).__name__
+            for name, _payload, _destination in queries:
+                if not protocols[name]:
+                    errors.append({"protocol": name, "error": message})
+                    partial_failures.append({"sensor": name, "error": message})
+
+    for ip, identity in per_run["mdns"].items():
+        _MDNS_DISCOVERED[ip] = dict(identity)
+
+    succeeded = sum(1 for delivered in protocols.values() if delivered)
+    return {
+        "delivery": {
+            "attempted": len(protocols),
+            "succeeded": succeeded,
+            "failed": len(protocols) - succeeded,
+            "protocols": protocols,
+            "errors": errors,
+        },
+        **per_run,
+        "partial_failures": partial_failures,
+    }
 
 
 def _fetch_ssdp_descriptor(loc, ip, opener=urlopen, max_bytes=MAX_SSDP_DESCRIPTOR_BYTES):
