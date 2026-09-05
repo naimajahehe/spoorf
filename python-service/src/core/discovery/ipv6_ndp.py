@@ -57,6 +57,24 @@ def categorize_ipv6(addr: str) -> str:
     except:
         return 'unknown'
 
+
+def _ndp_command_error(command: str, result: subprocess.CompletedProcess) -> OSError:
+    raw_detail = str(
+        getattr(result, 'stderr', '')
+        or getattr(result, 'stdout', '')
+        or 'no diagnostic output'
+    )
+    printable = ''.join(
+        character if character.isprintable() else ' '
+        for character in raw_detail
+    )
+    detail = ' '.join(printable.split())
+    message = (
+        f"{command} failed with exit code {result.returncode}: {detail}"
+    )[:200]
+    return OSError(message)
+
+
 def verify_ipv6_alive(
     mac: str,
     ipv6_addr: str,
@@ -118,6 +136,10 @@ def collect_from_ndp_cache(
                 ['netsh', 'interface', 'ipv6', 'show', 'neighbors'],
                 capture_output=True, text=True, check=False, timeout=1.5
             )
+            if res.returncode != 0:
+                if strict:
+                    raise _ndp_command_error('netsh', res)
+                return
             if res.returncode == 0:
                 lines = res.stdout.splitlines()
                 for line in lines:
@@ -154,6 +176,10 @@ def collect_from_ndp_cache(
                 ['ip', '-6', 'neigh', 'show'],
                 capture_output=True, text=True, check=False, timeout=1.5
             )
+            if res.returncode != 0:
+                if strict:
+                    raise _ndp_command_error('ip -6 neigh show', res)
+                return
             if res.returncode == 0:
                 lines = res.stdout.splitlines()
                 for line in lines:

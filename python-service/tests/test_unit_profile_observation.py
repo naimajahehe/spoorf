@@ -658,6 +658,46 @@ class TestProfileObservation(unittest.TestCase):
             result["partial_failures"],
         )
 
+    def test_profile_refresh_records_nonzero_ndp_command_and_keeps_arp_evidence(self):
+        from src.core.discovery.ipv6_ndp import (
+            collect_from_ndp_cache as real_collect_from_ndp_cache,
+        )
+
+        stack, _ = self._collector_patches()
+        failed_result = unittest.mock.MagicMock(
+            returncode=87,
+            stdout="",
+            stderr="Bad\r\n parameter\x00" + ("!" * 400),
+        )
+        with stack, patch(
+            "src.core.discovery.profile_observation.collect_from_ndp_cache",
+            side_effect=real_collect_from_ndp_cache,
+        ) as collect_ndp, patch(
+            "src.core.discovery.ipv6_ndp.subprocess.run",
+            return_value=failed_result,
+        ), patch("sys.platform", "win32"):
+            result = collect_profile_refresh(
+                [{
+                    "ip": "192.168.1.20",
+                    "mac": "00:07:ab:11:22:33",
+                    "ipv6_addresses": [],
+                }],
+                observation_seconds=3,
+            )
+
+        collect_ndp.assert_called_once_with({}, strict=True)
+        self.assertEqual(result["visible_count"], 1)
+        self.assertIn("ARP", result["devices"][0]["observed_sources"])
+        failure = next(
+            item for item in result["partial_failures"]
+            if item["sensor"] == "ndp_cache"
+        )
+        self.assertIn("netsh failed with exit code 87: Bad parameter", failure["error"])
+        self.assertNotIn("\r", failure["error"])
+        self.assertNotIn("\n", failure["error"])
+        self.assertNotIn("\x00", failure["error"])
+        self.assertLessEqual(len(failure["error"]), 200)
+
     def test_profile_refresh_records_sanitized_netbios_failure(self):
         stack, _ = self._collector_patches()
         with stack, patch(

@@ -385,3 +385,144 @@ the production `micro_cut_batch` scan all passed. No live-network test was run.
   TripleDES deprecation warnings remain during Python test startup.
 - Multicast collection intentionally stops after 64 responses per address
   family even if the LAN continues sending responses; this is the safety bound.
+
+## Fix Round 2
+
+### Review Finding Addressed
+
+- `collect_from_ndp_cache(strict=True)` now treats nonzero `netsh interface
+  ipv6 show neighbors` and `ip -6 neigh show` exit codes as operational
+  failures.
+- Raised messages include the command and exit code while normalizing control
+  characters and limiting the complete message to 200 characters.
+- Default non-strict callers retain the existing empty-result behavior.
+- Profile observation records the strict NDP failure under `ndp_cache` while
+  continuing to use independent evidence such as a valid ARP observation.
+
+### TDD Evidence
+
+The Windows, Unix, and profile-observation regressions were added before the
+production change.
+
+RED command:
+
+```powershell
+Set-Location python-service
+& 'D:\spoorf\python-service\venv\Scripts\python.exe' -m unittest `
+  tests.test_unit_ipv6_ndp.TestIPv6Discovery.test_collect_from_ndp_cache_windows_nonzero_is_strict_only `
+  tests.test_unit_ipv6_ndp.TestIPv6Discovery.test_collect_from_ndp_cache_unix_nonzero_is_strict_only `
+  tests.test_unit_profile_observation.TestProfileObservation.test_profile_refresh_records_nonzero_ndp_command_and_keeps_arp_evidence -v
+```
+
+Observed before implementation:
+
+```text
+test_collect_from_ndp_cache_windows_nonzero_is_strict_only ... FAIL
+test_collect_from_ndp_cache_unix_nonzero_is_strict_only ... FAIL
+test_profile_refresh_records_nonzero_ndp_command_and_keeps_arp_evidence ... ERROR
+Ran 3 tests in 0.175s
+FAILED (failures=2, errors=1)
+```
+
+The two helper tests failed because strict mode did not raise on nonzero command
+exit. The profile test failed because no `ndp_cache` partial failure was
+recorded.
+
+GREEN command:
+
+```powershell
+Set-Location python-service
+& 'D:\spoorf\python-service\venv\Scripts\python.exe' -m unittest `
+  tests.test_unit_ipv6_ndp.TestIPv6Discovery.test_collect_from_ndp_cache_windows_nonzero_is_strict_only `
+  tests.test_unit_ipv6_ndp.TestIPv6Discovery.test_collect_from_ndp_cache_unix_nonzero_is_strict_only `
+  tests.test_unit_profile_observation.TestProfileObservation.test_profile_refresh_records_nonzero_ndp_command_and_keeps_arp_evidence -v
+```
+
+Observed:
+
+```text
+test_collect_from_ndp_cache_windows_nonzero_is_strict_only ... ok
+test_collect_from_ndp_cache_unix_nonzero_is_strict_only ... ok
+test_profile_refresh_records_nonzero_ndp_command_and_keeps_arp_evidence ... ok
+Ran 3 tests in 0.183s
+OK
+```
+
+### Focused Verification
+
+Command:
+
+```powershell
+Set-Location python-service
+& 'D:\spoorf\python-service\venv\Scripts\python.exe' -m unittest `
+  tests.test_unit_profile_observation `
+  tests.test_unit_discovery `
+  tests.test_unit_ipv6_ndp -v
+```
+
+Observed:
+
+```text
+Ran 73 tests in 2.731s
+OK
+```
+
+This includes the existing successful Windows NDP parsing test.
+
+### Full Python Verification
+
+Command:
+
+```powershell
+Set-Location python-service
+& 'D:\spoorf\python-service\venv\Scripts\python.exe' -m unittest discover `
+  -s tests -p 'test_*.py' -v
+```
+
+Observed:
+
+```text
+Ran 291 tests in 11.535s
+OK
+development: precision=1.000 coverage=0.857 unknown=0.143 (3/21)
+holdout: precision=1.000 coverage=0.889 unknown=0.111 (2/18)
+```
+
+### Syntax and Diff Checks
+
+Commands:
+
+```powershell
+& 'D:\spoorf\python-service\venv\Scripts\python.exe' -m py_compile `
+  python-service\src\core\discovery\ipv6_ndp.py `
+  python-service\tests\test_unit_ipv6_ndp.py `
+  python-service\tests\test_unit_profile_observation.py
+git diff --check
+```
+
+Observed:
+
+```text
+py_compile: PASS
+git diff --check: PASS
+```
+
+### Self-Review
+
+- Confirmed both OS branches inspect `returncode` before parsing output.
+- Confirmed strict mode raises `OSError` with command identity, exit code, and a
+  normalized message capped at 200 characters.
+- Confirmed non-strict mode returns without mutating the supplied result map.
+- Confirmed ordinary successful NDP parsing remains unchanged.
+- Confirmed profile observation catches the strict error, sanitizes it again at
+  the response boundary, and preserves usable ARP evidence.
+- Confirmed all subprocess activity in new tests is mocked; no live network
+  operation was performed.
+- Confirmed `frontend-react/src/lib/theme.ts` remains untracked and unstaged.
+
+### Concerns
+
+- Python test startup continues to emit the pre-existing Wireshark manufacturer
+  database warning and Scapy/Cryptography TripleDES deprecation warnings.
+- Command diagnostics are intentionally truncated at 200 characters; the exit
+  code and leading diagnostic context remain available for troubleshooting.

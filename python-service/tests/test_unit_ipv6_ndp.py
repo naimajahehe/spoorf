@@ -93,6 +93,55 @@ fe80::4e14:adff:fe14:ad87%14                  4e-e1-14-14-ad-87  Reachable
         self.assertEqual(discovered[norm_mac]['global'], "2404:8000:1024:3ab::45e1")
         self.assertEqual(len(discovered[norm_mac]['addresses']), 2)
 
+    @patch('subprocess.run')
+    def test_collect_from_ndp_cache_windows_nonzero_is_strict_only(self, mock_run):
+        mock_run.return_value = MagicMock(
+            returncode=5,
+            stdout="",
+            stderr="Access\r\n denied\x00" + ("!" * 400),
+        )
+
+        with patch('sys.platform', 'win32'):
+            discovered = {}
+            collect_from_ndp_cache(discovered)
+            self.assertEqual(discovered, {})
+
+            with self.assertRaises(OSError) as raised:
+                collect_from_ndp_cache({}, strict=True)
+
+        message = str(raised.exception)
+        self.assertIn("netsh", message)
+        self.assertIn("exit code 5", message)
+        self.assertIn("Access denied", message)
+        self.assertNotIn("\r", message)
+        self.assertNotIn("\n", message)
+        self.assertNotIn("\x00", message)
+        self.assertLessEqual(len(message), 200)
+
+    @patch('subprocess.run')
+    def test_collect_from_ndp_cache_unix_nonzero_is_strict_only(self, mock_run):
+        mock_run.return_value = MagicMock(
+            returncode=2,
+            stdout="",
+            stderr="Permission\tdenied\x00" + ("!" * 400),
+        )
+
+        with patch('sys.platform', 'linux'):
+            discovered = {}
+            collect_from_ndp_cache(discovered)
+            self.assertEqual(discovered, {})
+
+            with self.assertRaises(OSError) as raised:
+                collect_from_ndp_cache({}, strict=True)
+
+        message = str(raised.exception)
+        self.assertIn("ip -6 neigh show", message)
+        self.assertIn("exit code 2", message)
+        self.assertIn("Permission denied", message)
+        self.assertNotIn("\t", message)
+        self.assertNotIn("\x00", message)
+        self.assertLessEqual(len(message), 200)
+
     def test_scanner_build_device_dual_stack(self):
         """Scanner enrichment must attach IPv6 properties and flag is_dual_stack."""
         ipv6_snapshot = {
