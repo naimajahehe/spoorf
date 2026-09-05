@@ -16,6 +16,7 @@ import {
     Radar,
     Activity,
     Sparkles,
+    Fingerprint,
     ShieldAlert,
     ShieldCheck,
     ShieldCogCorner,
@@ -520,6 +521,11 @@ function App() {
     // loading tabel disembunyikan, hanya label "Auto Scan" yang tampil. Scan manual tetap terlihat.
     const isAutoScanActive = canAutoScan && scanMode === 'auto';
     const showScanningUI = isScanning && !isAutoScanActive;
+    // Ref agar effect deteksi perangkat-baru membaca nilai terkini tanpa stale closure / re-run.
+    const isAutoScanActiveRef = useRef(false);
+    isAutoScanActiveRef.current = isAutoScanActive;
+    // Antrean animasi "+1 perangkat" (gamifikasi) di atas tombol Auto Scan; tiap entri menghapus dirinya.
+    const [plusOneEvents, setPlusOneEvents] = useState<{ id: string }[]>([]);
 
     // Scan sekali saat buka aplikasi + minta izin notifikasi OS.
     useEffect(() => {
@@ -584,6 +590,11 @@ function App() {
                 // Perangkat baru pertama kali terdeteksi
                 deviceOnlineStatusRef.current.set(macLower, isCurrentlyOnline);
                 if (isCurrentlyOnline) {
+                    // Efek gamifikasi "+1": hanya saat Auto Scan aktif (blok ini sudah lewat load awal).
+                    if (isAutoScanActiveRef.current) {
+                        const plusId = `plus-${macLower}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+                        setPlusOneEvents(prev => [...prev, { id: plusId }]);
+                    }
                     toastsToFire.push({ device: dev, toastType: 'new_device' });
                     historyToFire.push({
                         id: `dev-${dev.mac}-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
@@ -1692,24 +1703,15 @@ function App() {
                                                             });
                                                         }}
                                                         className={cn(
-                                                            "px-3.5 py-1.5 rounded-lg text-xs font-medium transition-all border outline-none flex items-center gap-1.5",
+                                                            "size-8 rounded-lg flex items-center justify-center transition-colors outline-none",
                                                             isSelectMode
-                                                                ? "bg-white/[0.12] text-white border-white/[0.25] shadow-sm"
-                                                                : "bg-white/[0.04] text-zinc-300 border-white/[0.08] hover:bg-white/[0.08] hover:text-white"
+                                                                ? "text-white bg-white/[0.08]"
+                                                                : "text-zinc-400 hover:text-white hover:bg-white/[0.06]"
                                                         )}
                                                         title={isSelectMode ? "Selesai memilih perangkat" : "Pilih perangkat untuk aksi massal"}
+                                                        aria-label={isSelectMode ? "Selesai memilih perangkat" : "Pilih perangkat untuk aksi massal"}
                                                     >
-                                                        {isSelectMode ? (
-                                                            <>
-                                                                <X size={13} className="text-zinc-400" />
-                                                                <span>Batal Pilih</span>
-                                                            </>
-                                                        ) : (
-                                                            <>
-                                                                <CheckSquare size={13} className="text-zinc-400" />
-                                                                <span>Pilih Perangkat</span>
-                                                            </>
-                                                        )}
+                                                        {isSelectMode ? <X size={16} /> : <CheckSquare size={16} />}
                                                     </motion.button>
                                                 )}
                                             </AnimatePresence>
@@ -1724,6 +1726,33 @@ function App() {
                                                         transition={{ duration: 0.2 }}
                                                         className="relative z-50"
                                                     >
+                                                        {/* Gamifikasi: "+1 perangkat" melayang naik di atas tombol Auto Scan saat perangkat baru masuk */}
+                                                        <div className="pointer-events-none absolute inset-x-0 bottom-full flex justify-center">
+                                                            {plusOneEvents.map((e) => (
+                                                                <motion.span
+                                                                    key={e.id}
+                                                                    className="absolute font-mono font-bold text-sm text-cyan-400 drop-shadow-[0_0_6px_rgba(34,211,238,0.6)]"
+                                                                    initial={{ opacity: 0, y: 4, scale: 0.8 }}
+                                                                    animate={{ opacity: [0, 1, 1, 0], y: [4, -10, -18, -26], scale: [0.8, 1.2, 1.1, 1] }}
+                                                                    transition={{ duration: 1.1, ease: 'easeOut', times: [0, 0.2, 0.6, 1] }}
+                                                                    onAnimationComplete={() =>
+                                                                        setPlusOneEvents((prev) => prev.filter((x) => x.id !== e.id))
+                                                                    }
+                                                                >
+                                                                    +1
+                                                                </motion.span>
+                                                            ))}
+                                                        </div>
+                                                        {/* Kilau "level-up" singkat pada tombol tiap ada perangkat baru */}
+                                                        {plusOneEvents.length > 0 && (
+                                                            <motion.span
+                                                                key={`glow-${plusOneEvents[plusOneEvents.length - 1].id}`}
+                                                                className="pointer-events-none absolute inset-0 rounded-lg ring-2 ring-cyan-400/70"
+                                                                initial={{ opacity: 0.7, scale: 1 }}
+                                                                animate={{ opacity: 0, scale: 1.35 }}
+                                                                transition={{ duration: 0.6, ease: 'easeOut' }}
+                                                            />
+                                                        )}
                                                         <Select
                                                             value={scanMode}
                                                             onValueChange={(val) => {
@@ -1733,8 +1762,6 @@ function App() {
                                                                     setAutoScan(false);   // matikan scan otomatis latar
                                                                     setIsTableCollapsed(false);
                                                                     scan();               // satu scan manual
-                                                                } else if (val === 'opt_3b') {
-                                                                    setIsDhcpModalOpen(true);
                                                                 } else if (val === 'auto') {
                                                                     setScanMode('auto');
                                                                     try { localStorage.setItem('sentinel_scanmode', 'auto'); } catch {}
@@ -1772,25 +1799,6 @@ function App() {
                                                                     </div>
                                                                 </SelectItem>
 
-                                                                <SelectItem value="opt_3b" label="Optimasi Teknik 3B" className="py-2">
-                                                                    <div className="flex items-start gap-2.5">
-                                                                        <Sparkles size={14} className="text-emerald-400 mt-0.5 shrink-0" />
-                                                                        <div className="flex flex-col min-w-0 text-left">
-                                                                            <div className="flex items-center gap-1.5">
-                                                                                <span className="font-medium text-emerald-300 text-xs">Optimasi Teknik 3B</span>
-                                                                                {dhcpUnprofiledCount > 0 ? (
-                                                                                    <span className="text-[9px] bg-emerald-500/20 text-emerald-300 px-1 py-0.2 rounded font-mono">
-                                                                                        {dhcpUnprofiledCount} Butuh Profil
-                                                                                    </span>
-                                                                                ) : (
-                                                                                    <span className="text-[9px] bg-emerald-500/20 text-emerald-300 px-1 py-0.2 rounded font-mono">POPULER</span>
-                                                                                )}
-                                                                            </div>
-                                                                            <span className="text-[10px] text-zinc-500 font-normal leading-tight">Membuka dialog profiling DHCP & hostname</span>
-                                                                        </div>
-                                                                    </div>
-                                                                </SelectItem>
-
                                                                 <SelectItem value="auto" label="Auto Scan" className="py-2">
                                                                     <div className="flex items-start gap-2.5">
                                                                         <Activity size={14} className="text-cyan-400 mt-0.5 shrink-0" />
@@ -1816,6 +1824,29 @@ function App() {
                                                             </SelectContent>
                                                         </Select>
                                                     </motion.div>
+                                                )}
+
+                                                {/* Tombol Profiling terpisah (pro/vip) — membuka dialog Identifikasi Perangkat */}
+                                                {!showScanningUI && canAutoScan && (
+                                                    <motion.button
+                                                        key="profiling-button"
+                                                        type="button"
+                                                        initial={{ opacity: 0, scale: 0.95 }}
+                                                        animate={{ opacity: 1, scale: 1 }}
+                                                        exit={{ opacity: 0, scale: 0.95 }}
+                                                        transition={{ duration: 0.2 }}
+                                                        onClick={() => setIsDhcpModalOpen(true)}
+                                                        className="h-8 px-3 py-0 text-xs font-medium rounded-lg outline-none flex items-center gap-1.5 border border-emerald-500/25 bg-emerald-500/10 hover:bg-emerald-500/20 hover:border-emerald-500/40 text-emerald-300 transition-all"
+                                                        title="Identifikasi merek, jenis & nama perangkat (pasif)"
+                                                    >
+                                                        <Fingerprint size={13} className="text-emerald-400 shrink-0" />
+                                                        <span className="font-medium">Profiling</span>
+                                                        {dhcpUnprofiledCount > 0 && (
+                                                            <span className="text-[9px] bg-emerald-500/20 text-emerald-200 px-1 py-0.5 rounded font-mono">
+                                                                {dhcpUnprofiledCount}
+                                                            </span>
+                                                        )}
+                                                    </motion.button>
                                                 )}
 
                                                 {/* Free tier: tombol Scan sederhana + ikon (tanpa mode otomatis) */}
