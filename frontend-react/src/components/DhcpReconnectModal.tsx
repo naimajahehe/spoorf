@@ -50,7 +50,6 @@ export const DhcpReconnectModal: FC<Props> = ({
     isOpen,
     devices,
     onClose,
-    onTriggerReScan,
     onQuickReauth
 }) => {
     const [isOptimizing, setIsOptimizing] = useState(false);
@@ -85,8 +84,7 @@ export const DhcpReconnectModal: FC<Props> = ({
         setStatusMessage(`⚡ Micro-cut serentak ${unknownCount} perangkat Unknown untuk memancing DHCP…`);
         try {
             await onQuickReauth();
-            setStatusMessage('✅ Selesai memancing reconnect — memindai ulang profil...');
-            onTriggerReScan();
+            setStatusMessage('✅ Selesai memancing reconnect — profil perangkat diperbarui.');
         } catch (e) {
             setStatusMessage('⚠️ Gagal menjalankan Quick Re-Auth, coba lagi.');
         } finally {

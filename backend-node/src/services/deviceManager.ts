@@ -1,7 +1,7 @@
 import os from 'os';
 import * as path from 'path';
 import { EventEmitter } from 'events';
-import { PythonBridge } from './pythonBridge';
+import { normalizeProfileIpv6Addresses, PythonBridge } from './pythonBridge';
 import { DatabaseService } from './database';
 import { LicenseManager, FeatureLimitError, FeatureLockedError } from './licenseManager';
 import { Device, ProfileAssessment, ProfileRefreshResult } from '../types';
@@ -1637,21 +1637,30 @@ export class DeviceManager extends EventEmitter {
             }
         }
 
+        const persistedAssessmentMacs = new Set<string>();
         for (const assessment of uniqueAssessments.values()) {
-            const liveDevice = this.findDeviceByMac(assessment.mac);
-            const persistenceAssessment = liveDevice && isPrivateIpv4(liveDevice.ip)
-                ? { ...assessment, ip: liveDevice.ip }
-                : assessment;
-            await this.db.updateDeviceProfileAssessment(persistenceAssessment);
-            if (!liveDevice) continue;
-            this.mergeProfileAssessment(liveDevice, assessment);
-            this.emit('deviceUpdated', liveDevice);
+            if (await this.persistCurrentProfileAssessment(assessment, generation)) {
+                persistedAssessmentMacs.add(assessment.mac);
+            }
         }
 
-        if (uniqueAssessments.size > 0) {
+        this.assertProfileRefreshGeneration(generation);
+        const updatedDevices: Device[] = [];
+        for (const assessment of uniqueAssessments.values()) {
+            if (!persistedAssessmentMacs.has(assessment.mac)) continue;
+            const liveDevice = this.findCurrentOnlineProfileDeviceByMac(assessment.mac);
+            if (!liveDevice) continue;
+            this.mergeProfileAssessment(liveDevice, assessment);
+            updatedDevices.push(liveDevice);
+        }
+        for (const liveDevice of updatedDevices) {
+            this.emit('deviceUpdated', liveDevice);
+        }
+        if (updatedDevices.length > 0) {
             this.emit('devicesUpdated', Array.from(this.devices.values()));
         }
 
+        this.assertProfileRefreshGeneration(generation);
         const result: ProfileRefreshResult = {
             ...response,
             success: true,
@@ -1660,13 +1669,16 @@ export class DeviceManager extends EventEmitter {
             cooldown_remaining_ms: scope === 'all' ? PROFILE_REFRESH_COOLDOWN_MS : 0
         };
         const completedAt = Date.now();
+        this.assertProfileRefreshGeneration(generation);
         for (const target of targets) {
             this.profileEnrichmentCooldowns.set(target.mac, completedAt);
         }
+        this.assertProfileRefreshGeneration(generation);
         if (scope === 'all') {
             this.lastProfileRefresh = { completedAt, result };
         }
 
+        this.assertProfileRefreshGeneration(generation);
         const donePayload = {
             ...result,
             operation: 'profile_refresh',
@@ -1674,7 +1686,9 @@ export class DeviceManager extends EventEmitter {
             count: visibleCount
         };
         this.emit('profileRefreshDone', donePayload);
+        this.assertProfileRefreshGeneration(generation);
         this.emit('quickReauthDone', { ...donePayload, deprecated: true });
+        this.assertProfileRefreshGeneration(generation);
         return result;
     }
 
@@ -1694,13 +1708,11 @@ export class DeviceManager extends EventEmitter {
             ) {
                 continue;
             }
-            const ipv6Addresses = Array.from(new Set([
+            const ipv6Addresses = normalizeProfileIpv6Addresses([
                 ...(device.ipv6_addresses || []),
                 device.ipv6_link_local,
                 device.ipv6_global
-            ].filter((address): address is string =>
-                typeof address === 'string' && address.trim().length > 0
-            ))).slice(0, 8);
+            ]);
             targets.set(mac, {
                 ip: device.ip.trim(),
                 mac,
@@ -1708,6 +1720,60 @@ export class DeviceManager extends EventEmitter {
             });
         }
         return Array.from(targets.values());
+    }
+
+    private assertProfileRefreshGeneration(generation: number): void {
+        if (generation !== this.profileRefreshGeneration) {
+            throw new Error('Network changed before Profile Refresh completed.');
+        }
+    }
+
+    private findCurrentOnlineProfileDeviceByMac(mac: string): Device | undefined {
+        const normalizedMac = normalizeProfileMac(mac);
+        if (!normalizedMac) return undefined;
+        for (const [ip, device] of this.devices.entries()) {
+            if (
+                ip !== device.ip.trim()
+                || normalizeProfileMac(device.mac) !== normalizedMac
+                || !device.is_online
+                || device.is_gateway
+                || device.is_self
+                || !isPrivateIpv4(device.ip)
+            ) {
+                continue;
+            }
+            const occupant = this.devices.get(device.ip.trim());
+            if (occupant && normalizeProfileMac(occupant.mac) === normalizedMac) {
+                return occupant;
+            }
+        }
+        return undefined;
+    }
+
+    private async persistCurrentProfileAssessment(
+        assessment: ProfileAssessment,
+        generation: number
+    ): Promise<boolean> {
+        let persistedIp: string | null = null;
+        for (let attempt = 0; attempt < 3; attempt++) {
+            this.assertProfileRefreshGeneration(generation);
+            const liveDevice = this.findCurrentOnlineProfileDeviceByMac(assessment.mac);
+            if (!liveDevice) return false;
+            const currentIp = liveDevice.ip.trim();
+            if (persistedIp === currentIp) return true;
+
+            await this.db.updateDeviceProfileAssessment({
+                ...assessment,
+                ip: currentIp
+            });
+            this.assertProfileRefreshGeneration(generation);
+            persistedIp = currentIp;
+
+            const currentDevice = this.findCurrentOnlineProfileDeviceByMac(assessment.mac);
+            if (!currentDevice) return false;
+            if (currentDevice.ip.trim() === persistedIp) return true;
+        }
+        return false;
     }
 
     private findDeviceByMac(mac: string): Device | undefined {

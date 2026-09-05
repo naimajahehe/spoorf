@@ -1,9 +1,40 @@
 import { spawn, ChildProcess } from 'child_process';
 import { EventEmitter } from 'events';
+import { isIP } from 'net';
 import * as path from 'path';
 import * as fs from 'fs';
 import WebSocket from 'ws';
 import { Device, ProfileRefreshResponse } from '../types';
+
+export function normalizeProfileIpv6Addresses(addresses: readonly unknown[]): string[] {
+    const normalized = new Set<string>();
+    for (const value of addresses) {
+        if (typeof value !== 'string') continue;
+        const text = value.trim();
+        if (!text) continue;
+
+        const scopeIndex = text.indexOf('%');
+        if (scopeIndex !== -1 && text.indexOf('%', scopeIndex + 1) !== -1) continue;
+        const address = (scopeIndex === -1 ? text : text.slice(0, scopeIndex)).trim();
+        const scope = scopeIndex === -1 ? '' : text.slice(scopeIndex + 1);
+        if (
+            isIP(address) !== 6
+            || (scopeIndex !== -1 && !/^[A-Za-z0-9_.-]+$/.test(scope))
+        ) {
+            continue;
+        }
+
+        const firstHextet = Number.parseInt(address.split(':', 1)[0], 16);
+        const isLinkLocal = (firstHextet & 0xffc0) === 0xfe80;
+        const isUla = (firstHextet & 0xfe00) === 0xfc00;
+        if (!isLinkLocal && !isUla) continue;
+
+        const transmitted = `${address.toLowerCase()}${scope ? `%${scope}` : ''}`;
+        normalized.add(transmitted);
+        if (normalized.size === 8) break;
+    }
+    return Array.from(normalized);
+}
 
 /**
  * Error yang menandai Python engine tak terjangkau/timeout. `code` adalah sumber
@@ -637,12 +668,16 @@ export class PythonBridge extends EventEmitter {
         observationSeconds = 5
     ): Promise<ProfileRefreshResponse> {
         console.log(`📡 [HTTP Call -> Python] POST /api/network/profile-refresh untuk ${targets.length} target...`);
+        const safeTargets = targets.map(target => ({
+            ...target,
+            ipv6_addresses: normalizeProfileIpv6Addresses(target.ipv6_addresses || [])
+        }));
         const timeoutMs = Math.ceil(observationSeconds * 1000) + 15000;
         const res = await this.fetchWithTimeout(`${this.baseUrl}/api/network/profile-refresh`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                targets,
+                targets: safeTargets,
                 observation_seconds: observationSeconds
             })
         }, timeoutMs);

@@ -1025,6 +1025,59 @@ export async function runDatabaseTests() {
         console.log('  ✓ Profile transaction: mid-write failures roll back every mutation');
     }
 
+    // Test 18b: profile persistence never changes another MAC's IP ownership.
+    {
+        const { DatabaseService } = await import('../src/services/database');
+        const db = new DatabaseService(':memory:');
+        await db.init();
+        const mk = (ip: string, mac: string): Device => ({
+            ip,
+            mac,
+            hostname: 'Known',
+            vendor: 'Known Vendor',
+            device_type: 'Laptop',
+            os: 'Windows',
+            rtt_ms: 1,
+            open_ports: [],
+            services: [],
+            is_blocked: false,
+            is_online: true,
+            is_gateway: false
+        });
+        const targetMac = '00:07:ab:11:22:42';
+        const incumbentMac = '00:07:ab:11:22:43';
+        await db.syncScanResults([
+            mk('192.168.1.42', targetMac),
+            mk('192.168.1.43', incumbentMac)
+        ]);
+
+        await db.updateDeviceProfileAssessment({
+            mac: targetMac,
+            ip: '192.168.1.43',
+            vendor: 'Updated Vendor',
+            device_type: 'Laptop',
+            hostname: 'Known',
+            os: 'Windows',
+            vendor_confidence: 90,
+            type_confidence: 90,
+            hostname_confidence: 90,
+            profile_status: 'high',
+            profile_evidence: [],
+            profiled_at: '2026-09-05T12:00:00Z',
+            profile_version: 1
+        });
+
+        const target = await db.getDeviceByMac(targetMac);
+        const incumbent = await db.getDeviceByMac(incumbentMac);
+        assert.strictEqual(target?.ip, '192.168.1.42');
+        assert.strictEqual(target?.vendor, 'Updated Vendor');
+        assert.strictEqual(target?.is_online, true);
+        assert.strictEqual(incumbent?.ip, '192.168.1.43');
+        assert.strictEqual(incumbent?.is_online, true);
+        await db.close();
+        console.log('  ✓ Profile persistence: another MAC retains its IP ownership');
+    }
+
     // Test 19: persisted profile fields survive close/reopen and scan reconciliation.
     {
         const { DatabaseService } = await import('../src/services/database');

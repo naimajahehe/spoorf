@@ -1383,7 +1383,11 @@ export async function runDeviceManagerTests() {
             latestTargets = targets;
             if (profileCalls === 1) await observationGate;
             return makeProfileResponse([unknownAssessment, knownAssessment], {
-                partial_failures: [{ source: 'SSDP', error: 'sensor timeout' }]
+                partial_failures: [{
+                    sensor: 'ssdp',
+                    error: 'sensor timeout',
+                    target: '192.168.1.106'
+                }]
             });
         };
         python.quickReauth = async () => {
@@ -1408,7 +1412,13 @@ export async function runDeviceManagerTests() {
             hostname: 'Old iPhone',
             vendor: 'Old Vendor',
             profile_status: 'high',
-            ipv6_addresses: ['fe80::106']
+            ipv6_addresses: [
+                ' FE80::106%12 ',
+                'fd00::106',
+                '2001:db8::106',
+                'invalid-ipv6'
+            ],
+            ipv6_global: '2404:6800::106'
         });
         const excluded = [
             makeStateRetentionDevice({ ip: '192.168.1.1', mac: '00:11:22:33:44:00', is_gateway: true }),
@@ -1448,10 +1458,18 @@ export async function runDeviceManagerTests() {
             [target.mac, alreadyProfiled.mac].sort(),
             'all eligible devices are included even when already profiled'
         );
-        assert.deepStrictEqual(latestTargets[1].ipv6_addresses, ['fe80::106']);
+        assert.deepStrictEqual(
+            latestTargets[1].ipv6_addresses,
+            ['fe80::106%12', 'fd00::106'],
+            'invalid and global IPv6 values are omitted without poisoning the batch'
+        );
         assert.strictEqual(scanCalls, 0, 'profile refresh must not trigger a follow-up scan');
         assert.strictEqual(persisted.length, 2, 'each assessment is persisted exactly once');
-        assert.deepStrictEqual(firstResult.partial_failures, [{ source: 'SSDP', error: 'sensor timeout' }]);
+        assert.deepStrictEqual(firstResult.partial_failures, [{
+            sensor: 'ssdp',
+            error: 'sensor timeout',
+            target: '192.168.1.106'
+        }]);
         assert.strictEqual(target.vendor, 'Lenovo', 'unknown result preserves last-known display labels');
         assert.strictEqual(target.hostname, 'Target-Laptop');
         assert.strictEqual(target.profile_status, 'unknown');
@@ -1710,6 +1728,145 @@ export async function runDeviceManagerTests() {
         assert.strictEqual(canonicalCalls, 1);
         assert.strictEqual(legacyCalls, 0);
         console.log('  ✓ Compatibility: deprecated manager method delegates to profileRefresh');
+    }
+
+    // Test 34: an assessment is discarded when its device disappears during observation.
+    {
+        const python: any = new EventEmitter();
+        let releaseObservation!: () => void;
+        const observationGate = new Promise<void>(resolve => {
+            releaseObservation = resolve;
+        });
+        const assessment = makeProfileAssessment({
+            vendor: 'Observed Vendor',
+            hostname: 'Observed Host'
+        });
+        python.profileRefresh = async () => {
+            await observationGate;
+            return makeProfileResponse([assessment]);
+        };
+        const persisted: ProfileAssessment[] = [];
+        const manager = new DeviceManager(python, {
+            updateDeviceProfileAssessment: async (profile: ProfileAssessment) => {
+                persisted.push(profile);
+            }
+        } as any);
+        const target = makeStateRetentionDevice();
+        const replacement = makeStateRetentionDevice({
+            mac: '00:11:22:33:44:66',
+            vendor: 'Replacement Vendor',
+            hostname: 'Replacement Host'
+        });
+        (manager as any).devices.set(target.ip, target);
+
+        const refresh = manager.profileRefresh();
+        await new Promise(resolve => setImmediate(resolve));
+        (manager as any).devices.delete(target.ip);
+        (manager as any).devices.set(replacement.ip, replacement);
+        releaseObservation();
+        await refresh;
+
+        assert.deepStrictEqual(persisted, [], 'released devices are not persisted from stale responses');
+        assert.strictEqual(replacement.vendor, 'Replacement Vendor');
+        assert.strictEqual(replacement.hostname, 'Replacement Host');
+        console.log('  ✓ Profile refresh: released IP ownership cannot be revived by stale results');
+    }
+
+    // Test 35: IP churn persists and merges only against the same MAC's current address.
+    {
+        const python: any = new EventEmitter();
+        let releaseObservation!: () => void;
+        const observationGate = new Promise<void>(resolve => {
+            releaseObservation = resolve;
+        });
+        const assessment = makeProfileAssessment({
+            vendor: 'Current Vendor',
+            hostname: 'Current Host'
+        });
+        python.profileRefresh = async () => {
+            await observationGate;
+            return makeProfileResponse([assessment]);
+        };
+        const persisted: ProfileAssessment[] = [];
+        const manager = new DeviceManager(python, {
+            updateDeviceProfileAssessment: async (profile: ProfileAssessment) => {
+                persisted.push(profile);
+            }
+        } as any);
+        const target = makeStateRetentionDevice();
+        const oldIp = target.ip;
+        (manager as any).devices.set(oldIp, target);
+
+        const refresh = manager.profileRefresh();
+        await new Promise(resolve => setImmediate(resolve));
+        const replacement = makeStateRetentionDevice({
+            ip: oldIp,
+            mac: '00:11:22:33:44:77',
+            vendor: 'Replacement Vendor',
+            hostname: 'Replacement Host'
+        });
+        (manager as any).devices.delete(oldIp);
+        target.ip = '192.168.1.205';
+        (manager as any).devices.set(target.ip, target);
+        (manager as any).devices.set(oldIp, replacement);
+        releaseObservation();
+        await refresh;
+
+        assert.deepStrictEqual(
+            persisted.map(item => ({ mac: item.mac, ip: item.ip })),
+            [{ mac: target.mac, ip: '192.168.1.205' }]
+        );
+        assert.strictEqual(target.vendor, 'Current Vendor');
+        assert.strictEqual(target.hostname, 'Current Host');
+        assert.strictEqual(replacement.vendor, 'Replacement Vendor');
+        assert.strictEqual(replacement.hostname, 'Replacement Host');
+        console.log('  ✓ Profile refresh: same-MAC IP churn uses current ownership');
+    }
+
+    // Test 36: a generation change during persistence rejects without stale cache or cooldowns.
+    {
+        const python: any = new EventEmitter();
+        python.profileRefresh = async (targets: any[]) =>
+            makeProfileResponse(targets.map(target => makeProfileAssessment({
+                ...target,
+                vendor: 'Stale Vendor'
+            })));
+        let releasePersistence!: () => void;
+        let persistenceStarted!: () => void;
+        const persistenceGate = new Promise<void>(resolve => {
+            releasePersistence = resolve;
+        });
+        const persistenceEntered = new Promise<void>(resolve => {
+            persistenceStarted = resolve;
+        });
+        const manager = new DeviceManager(python, {
+            updateDeviceProfileAssessment: async () => {
+                persistenceStarted();
+                await persistenceGate;
+            }
+        } as any);
+        const target = makeStateRetentionDevice();
+        (manager as any).devices.set(target.ip, target);
+        (manager as any).scanNetwork = async () => [];
+        let doneEvents = 0;
+        manager.on('profileRefreshDone', () => {
+            doneEvents++;
+        });
+
+        const refresh = manager.profileRefresh();
+        await persistenceEntered;
+        python.emit('networkChanged', { new_gateway: '192.168.2.1' });
+        releasePersistence();
+
+        await assert.rejects(
+            () => refresh,
+            /Network changed before Profile Refresh completed/
+        );
+        assert.strictEqual(target.vendor, 'Lenovo', 'stale assessment is not merged');
+        assert.strictEqual((manager as any).lastProfileRefresh, null);
+        assert.strictEqual((manager as any).profileEnrichmentCooldowns.size, 0);
+        assert.strictEqual(doneEvents, 0);
+        console.log('  ✓ Profile refresh: mid-persistence generation changes reject cleanly');
     }
 
 }

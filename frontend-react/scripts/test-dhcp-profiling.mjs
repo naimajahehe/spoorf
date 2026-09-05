@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-const outputDir = mkdtempSync(join(tmpdir(), 'spoorf-dhcp-profiling-'));
+const outputDir = join(process.cwd(), '.test-output-dhcp-profiling');
+rmSync(outputDir, { recursive: true, force: true });
 
 try {
     execFileSync(
@@ -90,6 +90,18 @@ try {
         dhcpPercentage: null,
         discoveryPercentage: null
     });
+
+    const modalSource = readFileSync('src/components/DhcpReconnectModal.tsx', 'utf8');
+    assert.equal(
+        (modalSource.match(/await onQuickReauth\(\)/g) || []).length,
+        1,
+        'manual profile refresh invokes its endpoint callback exactly once'
+    );
+    assert.equal(
+        modalSource.includes('onTriggerReScan();'),
+        false,
+        'manual profile refresh must not schedule a second scan'
+    );
 
     console.log('DHCP profiling metric assertions passed');
 } finally {

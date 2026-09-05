@@ -1128,19 +1128,8 @@ export class DatabaseService {
         const os = isGenericProfileLabel(validated.os, 'os') ? null : validated.os;
 
         const updateTransaction = this.db.transaction(() => {
-            this.db.prepare(`
-                UPDATE devices
-                SET is_online = 0,
-                    last_ip = CASE WHEN ip != '' AND ip IS NOT NULL THEN ip ELSE last_ip END,
-                    ip = ''
-                WHERE ip = ? AND LOWER(mac) != LOWER(?)
-            `).run(validated.ip, validated.mac);
-
             const result = this.db.prepare(`
                 UPDATE devices SET
-                    ip = ?,
-                    last_ip = ?,
-                    is_online = 1,
                     vendor = CASE WHEN ? IS NOT NULL THEN ? ELSE vendor END,
                     device_type = CASE WHEN ? IS NOT NULL THEN ? ELSE device_type END,
                     hostname = CASE WHEN ? IS NOT NULL THEN ? ELSE hostname END,
@@ -1155,8 +1144,6 @@ export class DatabaseService {
                     last_seen = datetime('now', 'localtime')
                 WHERE LOWER(mac) = LOWER(?)
             `).run(
-                validated.ip,
-                validated.ip,
                 vendor, vendor,
                 deviceType, deviceType,
                 hostname, hostname,

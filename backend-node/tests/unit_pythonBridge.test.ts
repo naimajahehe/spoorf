@@ -222,12 +222,20 @@ export async function runPythonBridgeTests() {
             const target = {
                 ip: '192.168.1.20',
                 mac: '00:07:ab:11:22:33',
-                ipv6_addresses: ['fe80::20']
+                ipv6_addresses: [
+                    ' FE80::20%12 ',
+                    'fd00::20',
+                    '2001:db8::20',
+                    'not-an-ipv6-address'
+                ]
             };
             const result = await bridge.profileRefresh([target], 5);
             assert.strictEqual(requests[0].url.endsWith('/api/network/profile-refresh'), true);
             assert.deepStrictEqual(JSON.parse(requests[0].body || '{}'), {
-                targets: [target],
+                targets: [{
+                    ...target,
+                    ipv6_addresses: ['fe80::20%12', 'fd00::20']
+                }],
                 observation_seconds: 5
             });
             assert.deepStrictEqual(result, responsePayload.data);
@@ -236,7 +244,7 @@ export async function runPythonBridgeTests() {
             const legacy = await bridge.quickReauth([{
                 victim_ip: target.ip,
                 victim_mac: target.mac,
-                victim_ipv6: target.ipv6_addresses[0],
+                victim_ipv6: '2001:db8::20',
                 gateway_ip: '192.168.1.1',
                 gateway_mac: '00:11:22:33:44:55'
             }], 1500);
@@ -244,7 +252,11 @@ export async function runPythonBridgeTests() {
             assert.strictEqual(requests[0].url.endsWith('/api/network/profile-refresh'), true);
             assert.strictEqual(requests[0].url.includes('/quick-reauth'), false);
             assert.deepStrictEqual(JSON.parse(requests[0].body || '{}'), {
-                targets: [target],
+                targets: [{
+                    ip: target.ip,
+                    mac: target.mac,
+                    ipv6_addresses: []
+                }],
                 observation_seconds: 5
             });
             assert.deepStrictEqual(legacy, responsePayload.data);

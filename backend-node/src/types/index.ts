@@ -88,7 +88,7 @@ export interface ProfileRefreshResponse {
     coverage_percentage: number | null;
     sources: Record<string, number>;
     ap_isolation: Record<string, unknown>;
-    partial_failures: Array<{ source: string; error: string }>;
+    partial_failures: Array<{ sensor: string; error: string; target?: string }>;
     duration_ms: number;
     devices: ProfileAssessment[];
 }
