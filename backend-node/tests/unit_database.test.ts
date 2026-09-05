@@ -3,6 +3,80 @@ import fs from 'fs';
 import path from 'path';
 import { Device, ProfileAssessment } from '../src/types';
 
+function createLegacyMacRepairSchema(rawDb: any): void {
+    rawDb.exec(`
+        CREATE TABLE devices (
+            mac TEXT PRIMARY KEY,
+            ip TEXT NOT NULL,
+            last_ip TEXT,
+            hostname TEXT,
+            vendor TEXT,
+            os TEXT,
+            device_type TEXT DEFAULT 'Unknown',
+            web_title TEXT,
+            web_server TEXT,
+            workgroup TEXT,
+            user_name TEXT,
+            open_ports TEXT DEFAULT '[]',
+            services TEXT DEFAULT '[]',
+            is_blocked INTEGER DEFAULT 0,
+            is_online INTEGER DEFAULT 1,
+            is_gateway INTEGER DEFAULT 0,
+            is_self INTEGER DEFAULT 0,
+            rtt_ms REAL DEFAULT 0,
+            ttl INTEGER,
+            is_randomized_mac INTEGER DEFAULT 0,
+            mac_type TEXT,
+            alias TEXT,
+            profile_id TEXT,
+            matched_by TEXT,
+            session_id TEXT,
+            speed_limit INTEGER DEFAULT 100,
+            dhcp_vendor_class TEXT,
+            dhcp_fingerprint TEXT,
+            dhcp_client_id TEXT,
+            dhcp_fqdn TEXT,
+            match_score INTEGER,
+            candidate_profile_id TEXT,
+            is_archived INTEGER DEFAULT 0,
+            is_redirected INTEGER DEFAULT 0,
+            redirect_url TEXT,
+            distance_zone TEXT DEFAULT 'unknown',
+            estimated_range TEXT DEFAULT '-',
+            ipv6_link_local TEXT,
+            ipv6_global TEXT,
+            ipv6_addresses TEXT DEFAULT '[]',
+            is_dual_stack INTEGER DEFAULT 0,
+            profile_status TEXT DEFAULT 'unknown',
+            vendor_confidence INTEGER DEFAULT 0,
+            type_confidence INTEGER DEFAULT 0,
+            hostname_confidence INTEGER DEFAULT 0,
+            profile_evidence TEXT DEFAULT '[]',
+            profiled_at TEXT,
+            profile_version INTEGER DEFAULT 1,
+            first_seen TEXT DEFAULT (datetime('now', 'localtime')),
+            last_seen TEXT DEFAULT (datetime('now', 'localtime'))
+        );
+
+        CREATE TABLE device_profiles (
+            id TEXT PRIMARY KEY,
+            alias TEXT NOT NULL,
+            hostname TEXT,
+            os TEXT,
+            vendor TEXT,
+            device_type TEXT,
+            is_blocked INTEGER DEFAULT 0,
+            speed_limit INTEGER DEFAULT 100,
+            dhcp_fingerprint TEXT,
+            dhcp_vendor_class TEXT,
+            dhcp_client_id TEXT,
+            linked_macs TEXT DEFAULT '[]',
+            created_at TEXT DEFAULT (datetime('now', 'localtime')),
+            updated_at TEXT DEFAULT (datetime('now', 'localtime'))
+        );
+    `);
+}
+
 export async function runDatabaseTests() {
     console.log('\n--- [Node] Testing Database & Data Reconciliation Logic ---');
 
@@ -1196,5 +1270,301 @@ export async function runDatabaseTests() {
 
         await db.close();
         console.log('  ✓ Archived reconciliation: last-known labels survive an Unknown refresh and the row is unarchived');
+    }
+
+    // Test 22: initialization repairs a directly seeded uppercase legacy primary key before scan upsert.
+    {
+        const { DatabaseService } = await import('../src/services/database');
+        const db = new DatabaseService(':memory:');
+        const rawDb = (db as any).db;
+        createLegacyMacRepairSchema(rawDb);
+
+        const uppercaseMac = '00:07:AB:11:22:80';
+        const lowercaseMac = uppercaseMac.toLowerCase();
+        rawDb.prepare(`
+            INSERT INTO device_profiles (
+                id, alias, hostname, os, vendor, device_type, is_blocked,
+                speed_limit, linked_macs
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+            'prof_legacy_upper',
+            'Legacy Owner',
+            'Galaxy-Legacy',
+            'Android',
+            'Samsung',
+            'Smartphone / Tablet',
+            1,
+            25,
+            JSON.stringify([uppercaseMac])
+        );
+        rawDb.prepare(`
+            INSERT INTO devices (
+                mac, ip, last_ip, hostname, vendor, os, device_type,
+                is_blocked, is_online, alias, profile_id, matched_by,
+                session_id, speed_limit, candidate_profile_id, is_archived,
+                is_redirected, redirect_url, profile_status, vendor_confidence,
+                type_confidence, hostname_confidence, profile_evidence,
+                profiled_at, profile_version, first_seen, last_seen
+            ) VALUES (
+                ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?,
+                ?, ?, ?, ?,
+                ?, ?, ?, ?,
+                ?, ?, ?,
+                ?, ?, ?, ?
+            )
+        `).run(
+            uppercaseMac,
+            '192.168.1.80',
+            '192.168.1.79',
+            'Galaxy-Legacy',
+            'Samsung',
+            'Android',
+            'Smartphone / Tablet',
+            1,
+            0,
+            'Legacy Owner',
+            'prof_legacy_upper',
+            'manual_link',
+            'session_legacy_upper',
+            25,
+            'candidate_legacy',
+            1,
+            1,
+            'https://legacy.portal/',
+            'high',
+            97,
+            96,
+            95,
+            JSON.stringify([{
+                source: 'mdns',
+                group: 'explicit_identity',
+                field: 'model',
+                value: 'SM-A055F',
+                strength: 'explicit',
+                observed_at: '2026-09-04T16:00:00Z'
+            }]),
+            '2026-09-04T16:00:05Z',
+            7,
+            '2026-09-01 08:00:00',
+            '2026-09-04 16:00:10'
+        );
+
+        await db.init();
+
+        const repaired = rawDb.prepare('SELECT * FROM devices').all();
+        assert.strictEqual(repaired.length, 1);
+        assert.strictEqual(repaired[0].mac, lowercaseMac, 'Legacy uppercase primary key must be canonicalized during initialization');
+        assert.strictEqual(repaired[0].ip, '192.168.1.80');
+        assert.strictEqual(repaired[0].last_ip, '192.168.1.79');
+        assert.strictEqual(repaired[0].alias, 'Legacy Owner');
+        assert.strictEqual(repaired[0].is_blocked, 1);
+        assert.strictEqual(repaired[0].session_id, 'session_legacy_upper');
+        assert.strictEqual(repaired[0].speed_limit, 25);
+        assert.strictEqual(repaired[0].profile_id, 'prof_legacy_upper');
+        assert.strictEqual(repaired[0].matched_by, 'manual_link');
+        assert.strictEqual(repaired[0].candidate_profile_id, 'candidate_legacy');
+        assert.strictEqual(repaired[0].is_archived, 1);
+        assert.strictEqual(repaired[0].is_redirected, 1);
+        assert.strictEqual(repaired[0].redirect_url, 'https://legacy.portal/');
+        assert.strictEqual(repaired[0].profile_status, 'high');
+        assert.strictEqual(repaired[0].vendor_confidence, 97);
+        assert.strictEqual(repaired[0].type_confidence, 96);
+        assert.strictEqual(repaired[0].hostname_confidence, 95);
+        assert.strictEqual(repaired[0].profile_version, 7);
+        assert.strictEqual(
+            JSON.parse(rawDb.prepare('SELECT linked_macs FROM device_profiles WHERE id = ?').get('prof_legacy_upper').linked_macs)[0],
+            lowercaseMac
+        );
+
+        await db.syncScanResults([{
+            ip: '192.168.1.80',
+            mac: lowercaseMac,
+            hostname: 'Unknown',
+            vendor: 'Generic Device',
+            device_type: 'Generic Client Device',
+            os: 'Unknown OS',
+            rtt_ms: 2,
+            open_ports: [],
+            services: [],
+            is_blocked: false,
+            is_online: true,
+            is_gateway: false
+        }]);
+
+        const rowsAfterScan = rawDb.prepare('SELECT * FROM devices WHERE LOWER(mac) = LOWER(?)').all(lowercaseMac);
+        assert.strictEqual(rowsAfterScan.length, 1, 'Lowercase scan must not create a second case-distinct row');
+        assert.strictEqual(rowsAfterScan[0].mac, lowercaseMac);
+        assert.strictEqual(rowsAfterScan[0].alias, 'Legacy Owner');
+        assert.strictEqual(rowsAfterScan[0].is_blocked, 1);
+        assert.strictEqual(rowsAfterScan[0].session_id, 'session_legacy_upper');
+        assert.strictEqual(rowsAfterScan[0].speed_limit, 25);
+        assert.strictEqual(rowsAfterScan[0].profile_status, 'high');
+
+        await db.close();
+        console.log('  ✓ Legacy MAC repair: uppercase primary keys canonicalize before lowercase scan upserts');
+    }
+
+    // Test 23: pre-existing case duplicates merge deterministically without losing intent or fresh observations.
+    {
+        const { DatabaseService } = await import('../src/services/database');
+        const db = new DatabaseService(':memory:');
+        const rawDb = (db as any).db;
+        createLegacyMacRepairSchema(rawDb);
+
+        const uppercaseMac = '00:07:AB:11:22:90';
+        const lowercaseMac = uppercaseMac.toLowerCase();
+        rawDb.prepare(`
+            INSERT INTO device_profiles (id, alias, linked_macs)
+            VALUES (?, ?, ?)
+        `).run(
+            'prof_duplicate',
+            'Duplicate Owner',
+            JSON.stringify([uppercaseMac, lowercaseMac, '00:07:ab:11:22:91'])
+        );
+        const insertDuplicate = rawDb.prepare(`
+            INSERT INTO devices (
+                mac, ip, last_ip, hostname, vendor, os, device_type,
+                is_blocked, is_online, is_gateway, is_self, rtt_ms,
+                alias, profile_id, matched_by, session_id, speed_limit,
+                candidate_profile_id, is_archived, is_redirected, redirect_url,
+                profile_status, vendor_confidence, type_confidence,
+                hostname_confidence, profile_evidence, profiled_at,
+                profile_version, first_seen, last_seen
+            ) VALUES (
+                ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?,
+                ?, ?, ?, ?,
+                ?, ?, ?,
+                ?, ?, ?,
+                ?, ?, ?
+            )
+        `);
+        insertDuplicate.run(
+            uppercaseMac,
+            '192.168.1.90',
+            '192.168.1.89',
+            'Galaxy-Duplicate',
+            'Samsung',
+            'Android',
+            'Smartphone / Tablet',
+            1,
+            0,
+            0,
+            0,
+            8,
+            'Duplicate Owner',
+            'prof_duplicate',
+            'manual_link',
+            'session_duplicate_block',
+            0,
+            'candidate_duplicate',
+            1,
+            0,
+            null,
+            'high',
+            95,
+            94,
+            93,
+            JSON.stringify([{ source: 'mdns', group: 'explicit_identity', field: 'model', value: 'SM-A055F', strength: 'explicit', observed_at: '2026-09-04T16:30:00Z' }]),
+            '2026-09-04T16:30:05Z',
+            7,
+            '2026-09-01 08:00:00',
+            '2026-09-04 16:30:10'
+        );
+        insertDuplicate.run(
+            lowercaseMac,
+            '192.168.1.92',
+            '192.168.1.91',
+            'Unknown',
+            'Generic Device',
+            'Unknown OS',
+            'Generic Client Device',
+            0,
+            1,
+            0,
+            0,
+            2,
+            '',
+            null,
+            null,
+            null,
+            100,
+            null,
+            0,
+            1,
+            'https://fresh.portal/',
+            'unknown',
+            0,
+            0,
+            0,
+            '[]',
+            '2026-09-04T17:00:05Z',
+            8,
+            '2026-09-02 08:00:00',
+            '2026-09-04 17:00:10'
+        );
+
+        await db.init();
+        (db as any).initialized = false;
+        await db.init();
+
+        const mergedRows = rawDb.prepare('SELECT * FROM devices WHERE LOWER(mac) = LOWER(?)').all(lowercaseMac);
+        assert.strictEqual(mergedRows.length, 1);
+        const merged = mergedRows[0];
+        assert.strictEqual(merged.mac, lowercaseMac);
+        assert.strictEqual(merged.ip, '192.168.1.92', 'Newest observation IP must win');
+        assert.strictEqual(merged.last_ip, '192.168.1.91', 'Newest observation last_ip must win');
+        assert.strictEqual(merged.rtt_ms, 2, 'Newest observation telemetry must win');
+        assert.strictEqual(merged.hostname, 'Galaxy-Duplicate', 'Non-empty identity must survive');
+        assert.strictEqual(merged.vendor, 'Samsung');
+        assert.strictEqual(merged.os, 'Android');
+        assert.strictEqual(merged.device_type, 'Smartphone / Tablet');
+        assert.strictEqual(merged.alias, 'Duplicate Owner');
+        assert.strictEqual(merged.profile_id, 'prof_duplicate');
+        assert.strictEqual(merged.matched_by, 'manual_link');
+        assert.strictEqual(merged.candidate_profile_id, 'candidate_duplicate');
+        assert.strictEqual(merged.is_blocked, 1, 'Active block intent must survive');
+        assert.strictEqual(merged.session_id, 'session_duplicate_block', 'Active session intent must survive');
+        assert.strictEqual(merged.speed_limit, 0, 'Most restrictive speed intent must survive');
+        assert.strictEqual(merged.is_redirected, 1, 'Active redirect intent must survive');
+        assert.strictEqual(merged.redirect_url, 'https://fresh.portal/');
+        assert.strictEqual(merged.is_archived, 0, 'An active duplicate must remain visible');
+        assert.strictEqual(merged.profile_status, 'unknown', 'Newest assessment bundle must win');
+        assert.strictEqual(merged.vendor_confidence, 0);
+        assert.strictEqual(merged.type_confidence, 0);
+        assert.strictEqual(merged.hostname_confidence, 0);
+        assert.deepStrictEqual(JSON.parse(merged.profile_evidence), []);
+        assert.strictEqual(merged.profiled_at, '2026-09-04T17:00:05Z');
+        assert.strictEqual(merged.profile_version, 8);
+        assert.strictEqual(merged.first_seen, '2026-09-01 08:00:00');
+        assert.strictEqual(merged.last_seen, '2026-09-04 17:00:10');
+        assert.deepStrictEqual(
+            JSON.parse(rawDb.prepare('SELECT linked_macs FROM device_profiles WHERE id = ?').get('prof_duplicate').linked_macs),
+            [lowercaseMac, '00:07:ab:11:22:91']
+        );
+
+        await db.syncScanResults([{
+            ip: '192.168.1.92',
+            mac: lowercaseMac,
+            hostname: 'Unknown',
+            vendor: 'Generic Device',
+            device_type: 'Generic Client Device',
+            os: 'Unknown OS',
+            rtt_ms: 1,
+            open_ports: [],
+            services: [],
+            is_blocked: false,
+            is_online: true,
+            is_gateway: false
+        }]);
+        assert.strictEqual(
+            rawDb.prepare('SELECT COUNT(*) AS count FROM devices WHERE LOWER(mac) = LOWER(?)').get(lowercaseMac).count,
+            1
+        );
+
+        await db.close();
+        console.log('  ✓ Duplicate MAC repair: case variants merge idempotently with intent and newest observations preserved');
     }
 }

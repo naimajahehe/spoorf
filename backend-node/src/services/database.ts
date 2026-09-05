@@ -293,6 +293,44 @@ function validateProfileAssessment(
     };
 }
 
+function hasStoredValue(value: unknown): boolean {
+    return value !== null
+        && value !== undefined
+        && (typeof value !== 'string' || value.trim() !== '');
+}
+
+function timestampRank(value: unknown): number {
+    if (typeof value !== 'string' || value.trim() === '') return Number.NEGATIVE_INFINITY;
+    const parsed = Date.parse(value);
+    return Number.isFinite(parsed) ? parsed : Number.NEGATIVE_INFINITY;
+}
+
+function compareNewestDeviceRows(left: any, right: any): number {
+    const leftLastSeen = timestampRank(left.last_seen);
+    const rightLastSeen = timestampRank(right.last_seen);
+    const lastSeenDifference = leftLastSeen === rightLastSeen
+        ? 0
+        : rightLastSeen > leftLastSeen ? 1 : -1;
+    if (lastSeenDifference !== 0) return lastSeenDifference;
+
+    const leftProfiledAt = timestampRank(left.profiled_at);
+    const rightProfiledAt = timestampRank(right.profiled_at);
+    const profiledAtDifference = leftProfiledAt === rightProfiledAt
+        ? 0
+        : rightProfiledAt > leftProfiledAt ? 1 : -1;
+    if (profiledAtDifference !== 0) return profiledAtDifference;
+
+    const lowercaseDifference = Number(right.mac === String(right.mac).toLowerCase())
+        - Number(left.mac === String(left.mac).toLowerCase());
+    if (lowercaseDifference !== 0) return lowercaseDifference;
+
+    return String(left.mac).localeCompare(String(right.mac));
+}
+
+function quoteSqlIdentifier(identifier: string): string {
+    return `"${identifier.replace(/"/g, '""')}"`;
+}
+
 export class DatabaseService {
     private db: Database.Database;
     private initialized: boolean = false;
@@ -470,12 +508,243 @@ export class DatabaseService {
                 }
             }
 
+            this.reconcileCanonicalDeviceMacs();
+
             console.log(`✅ SQLite connected & schema initialized (${this.dbPath})`);
             this.initialized = true;
         } catch (error) {
             console.error('❌ Failed to initialize SQLite database:', error);
             throw error;
         }
+    }
+
+    private reconcileCanonicalDeviceMacs(): void {
+        const deviceColumns = this.db.pragma('table_info(devices)') as Array<{ name: string }>;
+        const deviceColumnNames = new Set(deviceColumns.map(column => column.name));
+        if (!deviceColumnNames.has('mac')) return;
+
+        const rows = this.db.prepare('SELECT rowid AS __rowid, * FROM devices').all() as any[];
+        const groupedRows = new Map<string, any[]>();
+        for (const row of rows) {
+            let canonicalMac: string;
+            try {
+                canonicalMac = normalizeMacAddress(row.mac);
+            } catch {
+                continue;
+            }
+            const group = groupedRows.get(canonicalMac) || [];
+            group.push(row);
+            groupedRows.set(canonicalMac, group);
+        }
+
+        const groupsToRepair = Array.from(groupedRows.entries()).filter(
+            ([canonicalMac, group]) => group.length > 1 || group[0].mac !== canonicalMac
+        );
+        const canonicalProfileIds = new Map<string, string>();
+
+        const repairTransaction = this.db.transaction(() => {
+            for (const [canonicalMac, group] of groupsToRepair) {
+                const ordered = [...group].sort(compareNewestDeviceRows);
+                const merged = { ...ordered[0], mac: canonicalMac };
+
+                const pickNewestValue = (field: string): any => {
+                    const source = ordered.find(row => hasStoredValue(row[field]));
+                    return source ? source[field] : merged[field];
+                };
+                for (const field of ['hostname', 'vendor', 'os', 'device_type'] as const) {
+                    if (deviceColumnNames.has(field)) {
+                        const identitySource = ordered.find(
+                            row => hasStoredValue(row[field]) && !isGenericProfileLabel(row[field], field)
+                        );
+                        merged[field] = identitySource ? identitySource[field] : pickNewestValue(field);
+                    }
+                }
+                for (const field of [
+                    'web_title',
+                    'web_server',
+                    'workgroup',
+                    'user_name',
+                    'mac_type',
+                    'alias',
+                    'dhcp_vendor_class',
+                    'dhcp_fingerprint',
+                    'dhcp_client_id',
+                    'dhcp_fqdn',
+                    'candidate_profile_id'
+                ]) {
+                    if (deviceColumnNames.has(field)) {
+                        merged[field] = pickNewestValue(field);
+                    }
+                }
+
+                const profileSource = ordered.find(row => hasStoredValue(row.profile_id));
+                if (profileSource) {
+                    merged.profile_id = profileSource.profile_id;
+                    merged.matched_by = hasStoredValue(profileSource.matched_by)
+                        ? profileSource.matched_by
+                        : pickNewestValue('matched_by');
+                    canonicalProfileIds.set(canonicalMac, profileSource.profile_id);
+                } else if (deviceColumnNames.has('matched_by')) {
+                    merged.matched_by = pickNewestValue('matched_by');
+                }
+
+                if (deviceColumnNames.has('is_blocked')) {
+                    merged.is_blocked = group.some(row => Boolean(row.is_blocked)) ? 1 : 0;
+                }
+                if (deviceColumnNames.has('is_redirected')) {
+                    merged.is_redirected = group.some(row => Boolean(row.is_redirected)) ? 1 : 0;
+                }
+                if (deviceColumnNames.has('is_gateway')) {
+                    merged.is_gateway = group.some(row => Boolean(row.is_gateway)) ? 1 : 0;
+                }
+                if (deviceColumnNames.has('is_self')) {
+                    merged.is_self = group.some(row => Boolean(row.is_self)) ? 1 : 0;
+                }
+                if (deviceColumnNames.has('is_randomized_mac')) {
+                    merged.is_randomized_mac = group.some(row => Boolean(row.is_randomized_mac)) ? 1 : 0;
+                }
+                if (deviceColumnNames.has('is_dual_stack')) {
+                    merged.is_dual_stack = group.some(row => Boolean(row.is_dual_stack)) ? 1 : 0;
+                }
+                if (deviceColumnNames.has('is_archived')) {
+                    merged.is_archived = group.every(row => Boolean(row.is_archived)) ? 1 : 0;
+                }
+
+                const intentRows = [...ordered].sort((left, right) => {
+                    const rightIntent = Number(Boolean(right.is_blocked || right.is_redirected || hasStoredValue(right.session_id)));
+                    const leftIntent = Number(Boolean(left.is_blocked || left.is_redirected || hasStoredValue(left.session_id)));
+                    return rightIntent - leftIntent || compareNewestDeviceRows(left, right);
+                });
+                if (deviceColumnNames.has('session_id')) {
+                    const sessionSource = intentRows.find(row => hasStoredValue(row.session_id));
+                    merged.session_id = sessionSource ? sessionSource.session_id : merged.session_id;
+                }
+                if (deviceColumnNames.has('redirect_url')) {
+                    const redirectSource = intentRows.find(
+                        row => Boolean(row.is_redirected) && hasStoredValue(row.redirect_url)
+                    ) || intentRows.find(row => hasStoredValue(row.redirect_url));
+                    merged.redirect_url = redirectSource ? redirectSource.redirect_url : merged.redirect_url;
+                }
+                if (deviceColumnNames.has('speed_limit')) {
+                    const speedLimits = group
+                        .map(row => Number(row.speed_limit))
+                        .filter(value => Number.isFinite(value));
+                    if (speedLimits.length > 0) {
+                        merged.speed_limit = Math.min(...speedLimits);
+                    }
+                }
+
+                const assessmentSource = [...ordered].sort((left, right) => {
+                    const rightHasAssessment = Number(hasStoredValue(right.profiled_at));
+                    const leftHasAssessment = Number(hasStoredValue(left.profiled_at));
+                    if (rightHasAssessment !== leftHasAssessment) {
+                        return rightHasAssessment - leftHasAssessment;
+                    }
+                    const leftProfiledAt = timestampRank(left.profiled_at);
+                    const rightProfiledAt = timestampRank(right.profiled_at);
+                    const profiledDifference = leftProfiledAt === rightProfiledAt
+                        ? 0
+                        : rightProfiledAt > leftProfiledAt ? 1 : -1;
+                    if (profiledDifference !== 0) return profiledDifference;
+                    const versionDifference = Number(right.profile_version || 0) - Number(left.profile_version || 0);
+                    return versionDifference || compareNewestDeviceRows(left, right);
+                })[0];
+                for (const field of [
+                    'profile_status',
+                    'vendor_confidence',
+                    'type_confidence',
+                    'hostname_confidence',
+                    'profile_evidence',
+                    'profiled_at',
+                    'profile_version'
+                ]) {
+                    if (deviceColumnNames.has(field)) {
+                        merged[field] = assessmentSource[field];
+                    }
+                }
+
+                if (deviceColumnNames.has('first_seen')) {
+                    const firstSeenSource = [...group]
+                        .filter(row => hasStoredValue(row.first_seen))
+                        .sort((left, right) => {
+                            const leftFirstSeen = timestampRank(left.first_seen);
+                            const rightFirstSeen = timestampRank(right.first_seen);
+                            const difference = leftFirstSeen === rightFirstSeen
+                                ? 0
+                                : leftFirstSeen < rightFirstSeen ? -1 : 1;
+                            return difference || String(left.first_seen).localeCompare(String(right.first_seen));
+                        })[0];
+                    if (firstSeenSource) merged.first_seen = firstSeenSource.first_seen;
+                }
+
+                const survivor = group.find(row => row.mac === canonicalMac) || ordered[0];
+                const deleteRow = this.db.prepare('DELETE FROM devices WHERE rowid = ?');
+                for (const row of group) {
+                    if (row.__rowid !== survivor.__rowid) deleteRow.run(row.__rowid);
+                }
+
+                const assignments = deviceColumns
+                    .map(column => `${quoteSqlIdentifier(column.name)} = ?`)
+                    .join(', ');
+                this.db.prepare(`UPDATE devices SET ${assignments} WHERE rowid = ?`).run(
+                    ...deviceColumns.map(column => merged[column.name]),
+                    survivor.__rowid
+                );
+            }
+
+            const profileColumns = this.db.pragma('table_info(device_profiles)') as Array<{ name: string }>;
+            if (
+                profileColumns.some(column => column.name === 'id')
+                && profileColumns.some(column => column.name === 'linked_macs')
+            ) {
+                const profiles = this.db.prepare('SELECT id, linked_macs FROM device_profiles').all() as any[];
+                const updateLinkedMacs = this.db.prepare(
+                    'UPDATE device_profiles SET linked_macs = ? WHERE id = ?'
+                );
+                for (const profile of profiles) {
+                    let linkedMacs: unknown;
+                    try {
+                        linkedMacs = JSON.parse(profile.linked_macs || '[]');
+                    } catch {
+                        continue;
+                    }
+                    if (!Array.isArray(linkedMacs)) continue;
+
+                    const repaired: unknown[] = [];
+                    const seen = new Set<string>();
+                    for (const linkedMac of linkedMacs) {
+                        let value = linkedMac;
+                        if (typeof linkedMac === 'string') {
+                            try {
+                                value = normalizeMacAddress(linkedMac);
+                            } catch {
+                                value = linkedMac;
+                            }
+                        }
+                        const key = typeof value === 'string'
+                            ? `string:${value.toLowerCase()}`
+                            : `json:${JSON.stringify(value)}`;
+                        if (!seen.has(key)) {
+                            seen.add(key);
+                            repaired.push(value);
+                        }
+                    }
+                    for (const [canonicalMac, profileId] of canonicalProfileIds) {
+                        if (profileId === profile.id && !seen.has(`string:${canonicalMac}`)) {
+                            seen.add(`string:${canonicalMac}`);
+                            repaired.push(canonicalMac);
+                        }
+                    }
+
+                    const serialized = JSON.stringify(repaired);
+                    if (serialized !== profile.linked_macs) {
+                        updateLinkedMacs.run(serialized, profile.id);
+                    }
+                }
+            }
+        });
+
+        repairTransaction();
     }
 
     /**
