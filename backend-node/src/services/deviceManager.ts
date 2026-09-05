@@ -4,7 +4,7 @@ import { EventEmitter } from 'events';
 import { PythonBridge } from './pythonBridge';
 import { DatabaseService } from './database';
 import { LicenseManager, FeatureLimitError, FeatureLockedError } from './licenseManager';
-import { Device } from '../types';
+import { Device, ProfileAssessment, ProfileRefreshResult } from '../types';
 import type { ScanOptions } from './pythonBridge';
 
 // Retensi: perangkat tamu yang offline lebih lama dari ini diarsipkan (bukan dihapus)
@@ -13,6 +13,10 @@ import type { ScanOptions } from './pythonBridge';
 export const STALE_DEVICE_RETENTION_DAYS = 14;
 const RETENTION_SWEEP_INTERVAL_MS = 24 * 60 * 60 * 1000; // sekali per hari
 const DHCP_OPTIMIZATION_COOLDOWN_MS = 20_000;
+const PROFILE_REFRESH_COOLDOWN_MS = 20_000;
+const PROFILE_ENRICHMENT_COOLDOWN_MS = 60_000;
+const PROFILE_ENRICHMENT_DEBOUNCE_MS = 1_500;
+const PROFILE_MAC_PATTERN = /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/;
 
 interface DhcpOptimizationResult {
     success: true;
@@ -27,6 +31,44 @@ interface DhcpOptimizationResult {
 
 interface DeviceScanOptions extends ScanOptions {
     requireFresh?: boolean;
+}
+
+function normalizeProfileMac(mac: unknown): string | null {
+    if (typeof mac !== 'string') return null;
+    const normalized = mac.trim().replace(/-/g, ':').toLowerCase();
+    return PROFILE_MAC_PATTERN.test(normalized) ? normalized : null;
+}
+
+function isPrivateIpv4(ip: unknown): ip is string {
+    if (typeof ip !== 'string') return false;
+    const text = ip.trim();
+    const parts = text.split('.');
+    if (parts.length !== 4 || parts.some(part => !/^\d{1,3}$/.test(part))) return false;
+    const octets = parts.map(Number);
+    if (
+        octets.some(part => part < 0 || part > 255)
+        || parts.some((part, index) => String(octets[index]) !== part)
+    ) {
+        return false;
+    }
+    return octets[0] === 10
+        || (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31)
+        || (octets[0] === 192 && octets[1] === 168);
+}
+
+function isGenericProfileLabel(
+    value: unknown,
+    field: 'vendor' | 'device_type' | 'hostname' | 'os'
+): boolean {
+    if (typeof value !== 'string' || value.trim() === '') return true;
+    const normalized = value.trim().toLowerCase();
+    if (normalized === '-' || normalized === 'n/a' || normalized === 'none') return true;
+    if (normalized === 'unknown' || normalized.startsWith('unknown ')) return true;
+    if (normalized === 'generic' || normalized.startsWith('generic ')) return true;
+    if (field === 'vendor' && normalized.startsWith('private device')) return true;
+    if (field === 'hostname' && normalized === 'device') return true;
+    if (field === 'device_type' && (normalized === 'device' || normalized === 'client device')) return true;
+    return false;
 }
 
 export function isIpInSameSubnet(ip: string, gatewayIp: string): boolean {
@@ -112,6 +154,16 @@ export class DeviceManager extends EventEmitter {
         completedAt: number;
         result: DhcpOptimizationResult;
     } | null = null;
+    private inFlightProfileRefresh: Promise<ProfileRefreshResult> | null = null;
+    private inFlightProfileRefreshScope: 'all' | 'subset' | null = null;
+    private profileRefreshGeneration = 0;
+    private lastProfileRefresh: {
+        completedAt: number;
+        result: ProfileRefreshResult;
+    } | null = null;
+    private pendingProfileMacs = new Set<string>();
+    private profileEnrichmentTimer: NodeJS.Timeout | null = null;
+    private profileEnrichmentCooldowns = new Map<string, number>();
     private dhcpScanDebounceTimer: NodeJS.Timeout | null = null;
     private offlineCooldownTimers: Map<string, NodeJS.Timeout> = new Map();
     // Perangkat yang dikelola Gaming Mode, DIKUNCI per-MAC (lowercase) agar tahan ganti-IP.
@@ -148,6 +200,14 @@ export class DeviceManager extends EventEmitter {
         this.python.on('networkChanged', (data) => {
             this.dhcpOptimizationGeneration++;
             this.lastDhcpOptimization = null;
+            this.profileRefreshGeneration++;
+            this.lastProfileRefresh = null;
+            this.profileEnrichmentCooldowns.clear();
+            this.pendingProfileMacs.clear();
+            if (this.profileEnrichmentTimer) {
+                clearTimeout(this.profileEnrichmentTimer);
+                this.profileEnrichmentTimer = null;
+            }
             this.emit('networkChanged', data);
             this.scanNetwork().catch(console.error);
         });
@@ -316,8 +376,8 @@ export class DeviceManager extends EventEmitter {
                     this.emit('devicesUpdated', Array.from(this.devices.values()));
                     // Perangkat aktif kembali via DHCP selagi Gaming Mode aktif -> ikut di-throttle.
                     await this._maybeApplyGamingToNewDevice(dev);
-                    if (profileChanged && !this.inFlightDhcpOptimization) {
-                        this.debouncedScan(1500);
+                    if (profileChanged) {
+                        this.scheduleProfileEnrichment(normMac, PROFILE_ENRICHMENT_DEBOUNCE_MS);
                     }
                 } else {
                     isNewDevice = true;
@@ -711,6 +771,7 @@ export class DeviceManager extends EventEmitter {
             for (const d of this.devices.values()) {
                 currentMemByMac.set(d.mac.toLowerCase(), d);
             }
+            const newlyAddedProfileMacs = new Set<string>();
 
             for (const dev of allDevices) {
                 // Lewati perangkat tanpa IP valid
@@ -784,6 +845,15 @@ export class DeviceManager extends EventEmitter {
                             this.devices.delete(dev.ip);
                         }
                         this.devices.set(dev.ip, { ...dev });
+                        if (
+                            dev.is_online
+                            && !dev.is_gateway
+                            && !dev.is_self
+                            && normalizeProfileMac(dev.mac)
+                            && isPrivateIpv4(dev.ip)
+                        ) {
+                            newlyAddedProfileMacs.add(devMacNorm);
+                        }
                     }
                 }
             }
@@ -882,6 +952,10 @@ export class DeviceManager extends EventEmitter {
             // Diserialisasi (runExclusive) + recheck gamingActive agar tak balapan dgn disable.
             if (this.gamingActive && gateway) {
                 await this._reapplyGamingSweep(gateway);
+            }
+
+            for (const mac of newlyAddedProfileMacs) {
+                this.scheduleProfileEnrichment(mac, PROFILE_ENRICHMENT_DEBOUNCE_MS);
             }
 
             this.emit('devicesUpdated', Array.from(this.devices.values()));
@@ -1448,47 +1522,317 @@ export class DeviceManager extends EventEmitter {
         return this.python.getDhcpStats();
     }
 
-    /**
-     * Quick Re-Auth Profiling: micro-cut SERENTAK ke semua perangkat yang masih Unknown/unprofiled
-     * (online, bukan gateway/self, tidak sedang diblokir/redirect) untuk memancing DHCP re-request,
-     * lalu re-scan agar profil hasil sniffer DHCP tergabung. Tidak dibungkus runExclusive karena
-     * memanggil scanNetwork() di akhir (mencegah re-entrant deadlock).
-     */
-    async quickReauthProfiling(): Promise<{ success: boolean; count: number; devices: Device[] }> {
-        const gateway = this.findGateway();
-        if (!gateway) {
-            throw new Error('Gateway not found');
+    async profileRefresh(): Promise<ProfileRefreshResult> {
+        let waitedForSubset = false;
+        while (this.inFlightProfileRefresh) {
+            if (this.inFlightProfileRefreshScope === 'all') {
+                return this.inFlightProfileRefresh;
+            }
+            waitedForSubset = true;
+            const subset = this.inFlightProfileRefresh;
+            try {
+                await subset;
+            } catch {
+                // A manual request still gets one fresh full attempt after subset failure.
+            }
         }
 
-        const isProfiled = (d: Device): boolean =>
-            Boolean(d.dhcp_fingerprint || d.dhcp_vendor_class || (d.hostname && !d.hostname.startsWith('Unknown') && d.hostname !== d.ip));
-
-        const targets = Array.from(this.devices.values())
-            .filter(d => d.is_online && !d.is_gateway && !d.is_self && !d.is_blocked && !d.is_redirected && !d.session_id && !isProfiled(d))
-            .map(d => ({
-                victim_ip: d.ip,
-                victim_mac: d.mac,
-                gateway_ip: gateway.ip,
-                gateway_mac: gateway.mac,
-                victim_ipv6: d.ipv6_link_local || d.ipv6_global,
-                gateway_ipv6: gateway.ipv6_link_local || gateway.ipv6_global
-            }));
-
-        if (targets.length === 0) {
-            const devices = await this.scanNetwork();
-            return { success: true, count: 0, devices };
+        const now = Date.now();
+        if (
+            !waitedForSubset
+            &&
+            this.lastProfileRefresh
+            && now - this.lastProfileRefresh.completedAt < PROFILE_REFRESH_COOLDOWN_MS
+        ) {
+            const elapsed = now - this.lastProfileRefresh.completedAt;
+            return {
+                ...this.lastProfileRefresh.result,
+                cached: true,
+                cooldown_remaining_ms: Math.max(0, PROFILE_REFRESH_COOLDOWN_MS - elapsed)
+            };
         }
 
-        console.log(`⚡ [DeviceManager] Quick Re-Auth micro-cut SERENTAK untuk ${targets.length} perangkat Unknown...`);
-        this.emit('quickReauthStarted', { count: targets.length });
-        try {
-            await this.python.quickReauth(targets, 1500);
-        } catch (err) {
-            console.warn('Notice quick re-auth:', err);
+        return this.runProfileRefresh(null, 'all');
+    }
+
+    async runProfileRefresh(
+        targetMacs: Set<string> | null,
+        scope: 'all' | 'subset'
+    ): Promise<ProfileRefreshResult> {
+        while (this.inFlightProfileRefresh) {
+            const active = this.inFlightProfileRefresh;
+            if (this.inFlightProfileRefreshScope === 'all') {
+                if (scope === 'subset') {
+                    this.pendingProfileMacs.clear();
+                }
+                return active;
+            }
+            try {
+                await active;
+            } catch {
+                // A queued operation is independent and may still make a fresh attempt.
+            }
         }
-        const devices = await this.scanNetwork();
-        this.emit('quickReauthDone', { count: targets.length });
-        return { success: true, count: targets.length, devices };
+
+        if (scope === 'all') {
+            this.pendingProfileMacs.clear();
+            if (this.profileEnrichmentTimer) {
+                clearTimeout(this.profileEnrichmentTimer);
+                this.profileEnrichmentTimer = null;
+            }
+        }
+
+        const normalizedTargetMacs = targetMacs === null
+            ? null
+            : new Set(
+                Array.from(targetMacs)
+                    .map(normalizeProfileMac)
+                    .filter((mac): mac is string => mac !== null)
+            );
+        const generation = this.profileRefreshGeneration;
+        let trackedPromise: Promise<ProfileRefreshResult>;
+        trackedPromise = this.executeProfileRefresh(normalizedTargetMacs, scope, generation)
+            .finally(() => {
+                if (this.inFlightProfileRefresh === trackedPromise) {
+                    this.inFlightProfileRefresh = null;
+                    this.inFlightProfileRefreshScope = null;
+                }
+                if (this.pendingProfileMacs.size > 0 && !this.profileEnrichmentTimer) {
+                    this.armProfileEnrichmentTimer(0);
+                }
+            });
+        this.inFlightProfileRefresh = trackedPromise;
+        this.inFlightProfileRefreshScope = scope;
+        return trackedPromise;
+    }
+
+    private async executeProfileRefresh(
+        targetMacs: Set<string> | null,
+        scope: 'all' | 'subset',
+        generation: number
+    ): Promise<ProfileRefreshResult> {
+        const targets = this.snapshotProfileTargets(targetMacs);
+        const visibleCount = targets.length;
+        const startedPayload = {
+            operation: 'profile_refresh',
+            scope,
+            count: visibleCount
+        };
+        this.emit('profileRefreshStarted', startedPayload);
+        this.emit('quickReauthStarted', { ...startedPayload, deprecated: true });
+
+        const response = await this.python.profileRefresh(targets, 5);
+        if (generation !== this.profileRefreshGeneration) {
+            throw new Error('Network changed before Profile Refresh completed.');
+        }
+
+        const uniqueAssessments = new Map<string, ProfileAssessment>();
+        for (const assessment of response.devices || []) {
+            const normalizedMac = normalizeProfileMac(assessment.mac);
+            if (normalizedMac) {
+                uniqueAssessments.set(normalizedMac, {
+                    ...assessment,
+                    mac: normalizedMac
+                });
+            }
+        }
+
+        for (const assessment of uniqueAssessments.values()) {
+            const liveDevice = this.findDeviceByMac(assessment.mac);
+            const persistenceAssessment = liveDevice && isPrivateIpv4(liveDevice.ip)
+                ? { ...assessment, ip: liveDevice.ip }
+                : assessment;
+            await this.db.updateDeviceProfileAssessment(persistenceAssessment);
+            if (!liveDevice) continue;
+            this.mergeProfileAssessment(liveDevice, assessment);
+            this.emit('deviceUpdated', liveDevice);
+        }
+
+        if (uniqueAssessments.size > 0) {
+            this.emit('devicesUpdated', Array.from(this.devices.values()));
+        }
+
+        const result: ProfileRefreshResult = {
+            ...response,
+            success: true,
+            devices: this.getDevices(),
+            cached: false,
+            cooldown_remaining_ms: scope === 'all' ? PROFILE_REFRESH_COOLDOWN_MS : 0
+        };
+        const completedAt = Date.now();
+        for (const target of targets) {
+            this.profileEnrichmentCooldowns.set(target.mac, completedAt);
+        }
+        if (scope === 'all') {
+            this.lastProfileRefresh = { completedAt, result };
+        }
+
+        const donePayload = {
+            ...result,
+            operation: 'profile_refresh',
+            scope,
+            count: visibleCount
+        };
+        this.emit('profileRefreshDone', donePayload);
+        this.emit('quickReauthDone', { ...donePayload, deprecated: true });
+        return result;
+    }
+
+    private snapshotProfileTargets(
+        targetMacs: Set<string> | null
+    ): Array<{ ip: string; mac: string; ipv6_addresses: string[] }> {
+        const targets = new Map<string, { ip: string; mac: string; ipv6_addresses: string[] }>();
+        for (const device of this.devices.values()) {
+            const mac = normalizeProfileMac(device.mac);
+            if (
+                !mac
+                || (targetMacs !== null && !targetMacs.has(mac))
+                || !device.is_online
+                || device.is_gateway
+                || device.is_self
+                || !isPrivateIpv4(device.ip)
+            ) {
+                continue;
+            }
+            const ipv6Addresses = Array.from(new Set([
+                ...(device.ipv6_addresses || []),
+                device.ipv6_link_local,
+                device.ipv6_global
+            ].filter((address): address is string =>
+                typeof address === 'string' && address.trim().length > 0
+            ))).slice(0, 8);
+            targets.set(mac, {
+                ip: device.ip.trim(),
+                mac,
+                ipv6_addresses: ipv6Addresses
+            });
+        }
+        return Array.from(targets.values());
+    }
+
+    private findDeviceByMac(mac: string): Device | undefined {
+        const normalizedMac = normalizeProfileMac(mac);
+        if (!normalizedMac) return undefined;
+        for (const device of this.devices.values()) {
+            if (normalizeProfileMac(device.mac) === normalizedMac) {
+                return device;
+            }
+        }
+        return undefined;
+    }
+
+    private mergeProfileAssessment(device: Device, assessment: ProfileAssessment): void {
+        if (!isGenericProfileLabel(assessment.vendor, 'vendor')) {
+            device.vendor = assessment.vendor;
+        }
+        if (!isGenericProfileLabel(assessment.device_type, 'device_type')) {
+            device.device_type = assessment.device_type;
+        }
+        if (!isGenericProfileLabel(assessment.hostname, 'hostname')) {
+            device.hostname = assessment.hostname;
+        }
+        if (!isGenericProfileLabel(assessment.os, 'os')) {
+            device.os = assessment.os;
+        }
+        device.vendor_confidence = assessment.vendor_confidence;
+        device.type_confidence = assessment.type_confidence;
+        device.hostname_confidence = assessment.hostname_confidence;
+        device.profile_status = assessment.profile_status;
+        device.profile_evidence = assessment.profile_evidence;
+        device.profiled_at = assessment.profiled_at;
+        device.profile_version = assessment.profile_version;
+    }
+
+    private scheduleProfileEnrichment(
+        mac: string,
+        delayMs: number = PROFILE_ENRICHMENT_DEBOUNCE_MS
+    ): void {
+        const normalizedMac = normalizeProfileMac(mac);
+        if (!normalizedMac) return;
+        if (this.inFlightProfileRefreshScope === 'all') {
+            this.pendingProfileMacs.delete(normalizedMac);
+            return;
+        }
+        const completedAt = this.profileEnrichmentCooldowns.get(normalizedMac);
+        if (
+            completedAt !== undefined
+            && Date.now() - completedAt < PROFILE_ENRICHMENT_COOLDOWN_MS
+        ) {
+            return;
+        }
+        this.pendingProfileMacs.add(normalizedMac);
+        if (!this.profileEnrichmentTimer) {
+            this.armProfileEnrichmentTimer(delayMs);
+        }
+    }
+
+    private armProfileEnrichmentTimer(delayMs: number): void {
+        this.profileEnrichmentTimer = setTimeout(() => {
+            this.profileEnrichmentTimer = null;
+            this.drainProfileEnrichment().catch(error => {
+                console.warn('Notice automatic profile enrichment:', error);
+            });
+        }, Math.max(0, delayMs));
+        this.profileEnrichmentTimer.unref();
+    }
+
+    private async drainProfileEnrichment(): Promise<void> {
+        if (this.pendingProfileMacs.size === 0) return;
+        if (this.inFlightProfileRefresh) {
+            if (this.inFlightProfileRefreshScope === 'all') {
+                this.pendingProfileMacs.clear();
+                return;
+            }
+            const active = this.inFlightProfileRefresh;
+            active.then(
+                () => {
+                    if (this.pendingProfileMacs.size > 0 && !this.profileEnrichmentTimer) {
+                        this.armProfileEnrichmentTimer(0);
+                    }
+                },
+                () => {
+                    if (this.pendingProfileMacs.size > 0 && !this.profileEnrichmentTimer) {
+                        this.armProfileEnrichmentTimer(0);
+                    }
+                }
+            );
+            return;
+        }
+
+        const now = Date.now();
+        const eligibleMacs = new Set<string>();
+        for (const mac of this.pendingProfileMacs) {
+            const completedAt = this.profileEnrichmentCooldowns.get(mac);
+            if (
+                completedAt !== undefined
+                && now - completedAt < PROFILE_ENRICHMENT_COOLDOWN_MS
+            ) {
+                this.pendingProfileMacs.delete(mac);
+                continue;
+            }
+            const device = this.findDeviceByMac(mac);
+            if (
+                !device
+                || !device.is_online
+                || device.is_gateway
+                || device.is_self
+                || !isPrivateIpv4(device.ip)
+            ) {
+                this.pendingProfileMacs.delete(mac);
+                continue;
+            }
+            eligibleMacs.add(mac);
+            this.pendingProfileMacs.delete(mac);
+        }
+
+        if (eligibleMacs.size > 0) {
+            await this.runProfileRefresh(eligibleMacs, 'subset');
+        }
+    }
+
+    /** @deprecated Use profileRefresh(). */
+    async quickReauthProfiling(): Promise<ProfileRefreshResult> {
+        return this.profileRefresh();
     }
 
     async getApIsolationStatus(): Promise<any> {

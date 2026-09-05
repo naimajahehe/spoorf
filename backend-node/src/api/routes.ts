@@ -404,11 +404,25 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
         }
     });
 
-    // Quick Re-Auth Profiling (micro-cut serentak untuk memancing DHCP re-request)
+    router.post('/api/network/profile-refresh', async (_req: Request, res: Response) => {
+        try {
+            const result = await deviceManager.profileRefresh();
+            res.json({ success: true, data: result });
+        } catch (err: any) {
+            respondError(res, err);
+        }
+    });
+
+    // Deprecated compatibility alias for safe passive Profile Refresh.
     router.post('/api/network/quick-reauth', async (_req: Request, res: Response) => {
         try {
-            const result = await deviceManager.quickReauthProfiling();
-            res.json({ success: true, message: 'Quick Re-Auth profiling completed', data: result });
+            const result = await deviceManager.profileRefresh();
+            res.json({
+                success: true,
+                deprecated: true,
+                message: 'Quick Re-Auth is deprecated; safe Profile Refresh completed',
+                data: result
+            });
         } catch (err: any) {
             respondError(res, err);
         }

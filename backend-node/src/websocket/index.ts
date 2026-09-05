@@ -94,6 +94,14 @@ export class WebSocketManager {
             this.io.emit('dhcpEvent', data);
         });
 
+        this.deviceManager.on('profileRefreshStarted', (data) => {
+            this.io.emit('profileRefreshStarted', data);
+        });
+
+        this.deviceManager.on('profileRefreshDone', (data) => {
+            this.io.emit('profileRefreshDone', data);
+        });
+
         this.deviceManager.on('quickReauthStarted', (data) => {
             this.io.emit('quickReauthStarted', data);
         });

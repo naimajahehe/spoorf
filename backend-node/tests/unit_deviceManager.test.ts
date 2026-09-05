@@ -1,6 +1,6 @@
 import assert from 'assert';
 import { EventEmitter } from 'events';
-import { Device } from '../src/types';
+import { Device, ProfileAssessment, ProfileRefreshResponse, ProfileRefreshResult } from '../src/types';
 import { OFFLINE_GRACE_SECONDS } from '../src/services/database';
 import { DeviceManager } from '../src/services/deviceManager';
 
@@ -50,6 +50,58 @@ function snapshotDevice(device: Device): Device {
         ...device,
         open_ports: [...device.open_ports],
         services: [...device.services]
+    };
+}
+
+function makeProfileAssessment(over: Partial<ProfileAssessment> = {}): ProfileAssessment {
+    return {
+        ip: '192.168.1.105',
+        mac: 'a8:3b:76:0c:dc:55',
+        vendor: 'Lenovo',
+        device_type: 'PC / Laptop',
+        hostname: 'Target-Laptop',
+        os: 'Windows 11',
+        vendor_confidence: 90,
+        type_confidence: 88,
+        hostname_confidence: 86,
+        profile_status: 'high',
+        profile_evidence: [{
+            source: 'DHCP',
+            group: 'identity',
+            field: 'hostname',
+            value: 'Target-Laptop',
+            strength: 'strong',
+            observed_at: '2026-09-05T10:00:00.000Z'
+        }],
+        profiled_at: '2026-09-05T10:00:01.000Z',
+        profile_version: 1,
+        ...over
+    };
+}
+
+function makeProfileResponse(
+    assessments: ProfileAssessment[],
+    over: Partial<ProfileRefreshResponse> = {}
+): ProfileRefreshResponse {
+    return {
+        visible_count: assessments.length,
+        high_confidence_count: assessments.filter(item => item.profile_status === 'high').length,
+        medium_confidence_count: assessments.filter(item => item.profile_status === 'medium').length,
+        unknown_count: assessments.filter(item => item.profile_status === 'unknown').length,
+        hostname_count: assessments.filter(item => item.hostname !== 'Unknown').length,
+        coverage_percentage: assessments.length === 0
+            ? null
+            : Math.round(
+                assessments.filter(item => item.profile_status !== 'unknown').length
+                * 100
+                / assessments.length
+            ),
+        sources: {},
+        ap_isolation: {},
+        partial_failures: [],
+        duration_ms: 25,
+        devices: assessments,
+        ...over
     };
 }
 
@@ -1138,9 +1190,9 @@ export async function runDeviceManagerTests() {
             dhcp_fqdn: undefined
         });
         (manager as any).devices.set(target.ip, target);
-        const scheduled: number[] = [];
-        (manager as any).debouncedScan = (delay: number) => {
-            scheduled.push(delay);
+        const scheduled: Array<{ mac: string; delay: number }> = [];
+        (manager as any).scheduleProfileEnrichment = (mac: string, delay: number) => {
+            scheduled.push({ mac, delay });
         };
         const event = {
             mac: target.mac,
@@ -1162,7 +1214,11 @@ export async function runDeviceManagerTests() {
         assert.strictEqual(target.dhcp_client_id, event.client_id);
         assert.strictEqual(target.dhcp_fqdn, event.fqdn);
         assert.strictEqual(persisted.length, 2, 'each DHCP event persists one atomic snapshot');
-        assert.deepStrictEqual(scheduled, [1500], 'only a meaningful profile delta schedules enrichment');
+        assert.deepStrictEqual(
+            scheduled,
+            [{ mac: target.mac.toLowerCase(), delay: 1500 }],
+            'only a meaningful profile delta schedules enrichment'
+        );
 
         scheduled.length = 0;
         (manager as any).inFlightDhcpOptimization = Promise.resolve({});
@@ -1172,8 +1228,8 @@ export async function runDeviceManagerTests() {
         });
         assert.deepStrictEqual(
             scheduled,
-            [],
-            'an active Method 1 workflow owns the one enrichment scan'
+            [{ mac: target.mac.toLowerCase(), delay: 1500 }],
+            'profile enrichment remains targeted while Method 1 owns its full scan'
         );
         console.log('  ✓ DHCP live event: complete evidence persists and enrichment coalesces');
     }
@@ -1291,6 +1347,369 @@ export async function runDeviceManagerTests() {
         assert.strictEqual(scanCalls.length, 2);
         assert.deepStrictEqual(scanCalls[1], { skipMulticastWakeup: true });
         console.log('  ✓ DHCP optimization: post-observation scan is fresh and wakeup-suppressed');
+    }
+
+    // Test 27: full profile refresh is single-flight, safe-filtered, merged, persisted, and cached.
+    {
+        const python: any = new EventEmitter();
+        let profileCalls = 0;
+        let releaseObservation!: () => void;
+        let latestTargets: any[] = [];
+        const observationGate = new Promise<void>(resolve => {
+            releaseObservation = resolve;
+        });
+        const unknownAssessment = makeProfileAssessment({
+            mac: 'A8:3B:76:0C:DC:55',
+            vendor: 'Unknown',
+            device_type: 'Unknown',
+            hostname: 'Unknown',
+            os: 'Unknown',
+            vendor_confidence: 0,
+            type_confidence: 0,
+            hostname_confidence: 0,
+            profile_status: 'unknown',
+            profile_evidence: []
+        });
+        const knownAssessment = makeProfileAssessment({
+            ip: '192.168.1.106',
+            mac: '00:07:AB:11:22:33',
+            vendor: 'Apple',
+            device_type: 'Smartphone / Tablet',
+            hostname: 'iPhone',
+            os: 'iOS'
+        });
+        python.profileRefresh = async (targets: any[]) => {
+            profileCalls++;
+            latestTargets = targets;
+            if (profileCalls === 1) await observationGate;
+            return makeProfileResponse([unknownAssessment, knownAssessment], {
+                partial_failures: [{ source: 'SSDP', error: 'sensor timeout' }]
+            });
+        };
+        python.quickReauth = async () => {
+            throw new Error('legacy Python route must never be called');
+        };
+        const persisted: ProfileAssessment[] = [];
+        const db: any = {
+            updateDeviceProfileAssessment: async (profile: ProfileAssessment) => {
+                persisted.push(profile);
+            }
+        };
+        const manager = new DeviceManager(python, db);
+        const target = makeStateRetentionDevice({
+            vendor_confidence: 95,
+            type_confidence: 94,
+            hostname_confidence: 93,
+            profile_status: 'high'
+        });
+        const alreadyProfiled = makeStateRetentionDevice({
+            ip: '192.168.1.106',
+            mac: '00:07:ab:11:22:33',
+            hostname: 'Old iPhone',
+            vendor: 'Old Vendor',
+            profile_status: 'high',
+            ipv6_addresses: ['fe80::106']
+        });
+        const excluded = [
+            makeStateRetentionDevice({ ip: '192.168.1.1', mac: '00:11:22:33:44:00', is_gateway: true }),
+            makeStateRetentionDevice({ ip: '192.168.1.2', mac: '00:11:22:33:44:01', is_self: true }),
+            makeStateRetentionDevice({ ip: '203.0.113.20', mac: '00:11:22:33:44:02' }),
+            makeStateRetentionDevice({ ip: '192.168.1.30', mac: 'not-a-mac' }),
+            makeStateRetentionDevice({ ip: '192.168.1.31', mac: '00:11:22:33:44:03', is_online: false })
+        ];
+        for (const device of [target, alreadyProfiled, ...excluded]) {
+            (manager as any).devices.set(device.ip, device);
+        }
+        let scanCalls = 0;
+        (manager as any).scanNetwork = async () => {
+            scanCalls++;
+            return [];
+        };
+        const events: Array<{ name: string; data: any }> = [];
+        for (const name of [
+            'profileRefreshStarted',
+            'profileRefreshDone',
+            'quickReauthStarted',
+            'quickReauthDone'
+        ]) {
+            manager.on(name, data => events.push({ name, data }));
+        }
+
+        const first = manager.profileRefresh();
+        const second = manager.profileRefresh();
+        await new Promise(resolve => setImmediate(resolve));
+        assert.strictEqual(profileCalls, 1, 'concurrent full refreshes share one Python request');
+        releaseObservation();
+        const [firstResult, secondResult] = await Promise.all([first, second]);
+
+        assert.deepStrictEqual(firstResult, secondResult);
+        assert.deepStrictEqual(
+            latestTargets.map(item => item.mac).sort(),
+            [target.mac, alreadyProfiled.mac].sort(),
+            'all eligible devices are included even when already profiled'
+        );
+        assert.deepStrictEqual(latestTargets[1].ipv6_addresses, ['fe80::106']);
+        assert.strictEqual(scanCalls, 0, 'profile refresh must not trigger a follow-up scan');
+        assert.strictEqual(persisted.length, 2, 'each assessment is persisted exactly once');
+        assert.deepStrictEqual(firstResult.partial_failures, [{ source: 'SSDP', error: 'sensor timeout' }]);
+        assert.strictEqual(target.vendor, 'Lenovo', 'unknown result preserves last-known display labels');
+        assert.strictEqual(target.hostname, 'Target-Laptop');
+        assert.strictEqual(target.profile_status, 'unknown');
+        assert.strictEqual(target.vendor_confidence, 0);
+        assert.strictEqual(alreadyProfiled.vendor, 'Apple');
+        assert.strictEqual(alreadyProfiled.hostname, 'iPhone');
+        assert.ok(events.some(item =>
+            item.name === 'quickReauthStarted'
+            && item.data.operation === 'profile_refresh'
+            && item.data.deprecated === true
+            && item.data.count === 2
+        ));
+        assert.ok(events.some(item =>
+            item.name === 'quickReauthDone'
+            && item.data.operation === 'profile_refresh'
+            && item.data.deprecated === true
+            && item.data.count === 2
+        ));
+
+        const cached = await manager.profileRefresh();
+        assert.strictEqual(profileCalls, 1, 'manual cooldown reuses the completed result');
+        assert.strictEqual(cached.cached, true);
+        assert.ok(cached.cooldown_remaining_ms > 0);
+
+        (manager as any).scheduleProfileEnrichment(target.mac, 1);
+        await new Promise(resolve => setTimeout(resolve, 15));
+        assert.strictEqual(profileCalls, 1, 'a successful full refresh starts the per-MAC cooldown');
+
+        (manager as any).profileEnrichmentCooldowns.clear();
+        (manager as any).scheduleProfileEnrichment(target.mac, 5_000);
+        assert.strictEqual((manager as any).pendingProfileMacs.size, 1);
+        assert.ok((manager as any).profileEnrichmentTimer);
+        (manager as any).scanNetwork = async () => [];
+        python.emit('networkChanged', { new_gateway: '192.168.2.1' });
+        await new Promise(resolve => setImmediate(resolve));
+        assert.strictEqual((manager as any).pendingProfileMacs.size, 0);
+        assert.strictEqual((manager as any).profileEnrichmentTimer, null);
+        const fresh = await manager.profileRefresh();
+        assert.strictEqual(profileCalls, 2, 'network changes invalidate manual cooldown');
+        assert.strictEqual(fresh.cached, false);
+        console.log('  ✓ Profile refresh: safe full snapshot, single-flight, merge, events, and cooldown');
+    }
+
+    // Test 28: total collector failure rejects without manufacturing an empty success.
+    {
+        const python: any = new EventEmitter();
+        python.profileRefresh = async () => {
+            throw new Error('collector unavailable');
+        };
+        const persisted: ProfileAssessment[] = [];
+        const manager = new DeviceManager(python, {
+            updateDeviceProfileAssessment: async (profile: ProfileAssessment) => {
+                persisted.push(profile);
+            }
+        } as any);
+        const target = makeStateRetentionDevice();
+        (manager as any).devices.set(target.ip, target);
+
+        await assert.rejects(() => manager.profileRefresh(), /collector unavailable/);
+        assert.deepStrictEqual(persisted, []);
+        console.log('  ✓ Profile refresh: total Python failure rejects');
+    }
+
+    // Test 29: a manual full refresh waits for a subset, then starts one fresh full request.
+    {
+        const python: any = new EventEmitter();
+        let calls = 0;
+        let releaseSubset!: () => void;
+        const subsetGate = new Promise<void>(resolve => {
+            releaseSubset = resolve;
+        });
+        python.profileRefresh = async (targets: any[]) => {
+            calls++;
+            if (calls === 1) await subsetGate;
+            return makeProfileResponse(targets.map(target => makeProfileAssessment(target)));
+        };
+        const manager = new DeviceManager(python, {
+            updateDeviceProfileAssessment: async () => {}
+        } as any);
+        const target = makeStateRetentionDevice();
+        (manager as any).devices.set(target.ip, target);
+        (manager as any).lastProfileRefresh = {
+            completedAt: Date.now(),
+            result: {
+                ...makeProfileResponse([]),
+                success: true,
+                devices: [],
+                cached: false,
+                cooldown_remaining_ms: 20_000
+            }
+        };
+
+        const subset = manager.runProfileRefresh(new Set([target.mac]), 'subset');
+        await new Promise(resolve => setImmediate(resolve));
+        const manual = manager.profileRefresh();
+        await new Promise(resolve => setImmediate(resolve));
+        assert.strictEqual(calls, 1, 'manual request waits for active subset');
+        releaseSubset();
+        await subset;
+        await manual;
+        assert.strictEqual(calls, 2, 'manual request starts a fresh full refresh after subset');
+        console.log('  ✓ Profile refresh: full requests never reuse subset results');
+    }
+
+    // Test 30: automatic enrichment batches MACs, re-reads current IP, and honors cooldown.
+    {
+        const python: any = new EventEmitter();
+        const targetB = makeStateRetentionDevice({
+            ip: '192.168.1.106',
+            mac: '00:07:ab:11:22:33'
+        });
+        const requests: any[][] = [];
+        const persisted: ProfileAssessment[] = [];
+        python.profileRefresh = async (targets: any[]) => {
+            requests.push(targets);
+            return makeProfileResponse(targets.map(target => makeProfileAssessment(target)));
+        };
+        const manager = new DeviceManager(python, {
+            updateDeviceProfileAssessment: async (assessment: ProfileAssessment) => {
+                persisted.push(assessment);
+            }
+        } as any);
+        const targetA = makeStateRetentionDevice();
+        (manager as any).devices.set(targetA.ip, targetA);
+        (manager as any).devices.set(targetB.ip, targetB);
+
+        (manager as any).scheduleProfileEnrichment(targetA.mac, 5);
+        (manager as any).scheduleProfileEnrichment(targetB.mac, 5);
+        (manager as any).devices.delete(targetA.ip);
+        targetA.ip = '192.168.1.205';
+        (manager as any).devices.set(targetA.ip, targetA);
+        await new Promise(resolve => setTimeout(resolve, 30));
+
+        assert.strictEqual(requests.length, 1, 'pending MACs batch behind one timer');
+        assert.strictEqual(requests[0].length, 2);
+        assert.ok(requests[0].some(target => target.mac === targetA.mac && target.ip === '192.168.1.205'));
+        assert.ok(persisted.some(item => item.mac === targetA.mac && item.ip === '192.168.1.205'));
+
+        (manager as any).scheduleProfileEnrichment(targetA.mac, 1);
+        await new Promise(resolve => setTimeout(resolve, 15));
+        assert.strictEqual(requests.length, 1, 'per-MAC cooldown suppresses repeat advertisements');
+        console.log('  ✓ Profile enrichment: debounced batching, IP churn safety, and per-MAC cooldown');
+    }
+
+    // Test 31: automatic events during a full refresh are absorbed.
+    {
+        const python: any = new EventEmitter();
+        let calls = 0;
+        let releaseFull!: () => void;
+        const fullGate = new Promise<void>(resolve => {
+            releaseFull = resolve;
+        });
+        python.profileRefresh = async (targets: any[]) => {
+            calls++;
+            await fullGate;
+            return makeProfileResponse(targets.map(target => makeProfileAssessment(target)));
+        };
+        const manager = new DeviceManager(python, {
+            updateDeviceProfileAssessment: async () => {}
+        } as any);
+        const target = makeStateRetentionDevice();
+        (manager as any).devices.set(target.ip, target);
+
+        const full = manager.profileRefresh();
+        await new Promise(resolve => setImmediate(resolve));
+        (manager as any).scheduleProfileEnrichment(target.mac, 1);
+        releaseFull();
+        await full;
+        await new Promise(resolve => setTimeout(resolve, 15));
+        assert.strictEqual(calls, 1);
+        assert.strictEqual((manager as any).pendingProfileMacs.size, 0);
+        console.log('  ✓ Profile enrichment: automatic events are absorbed by an active full refresh');
+    }
+
+    // Test 32: scan reconciliation and DHCP evidence each schedule one targeted enrichment.
+    {
+        const newDevice = makeStateRetentionDevice({
+            ip: '192.168.1.220',
+            mac: '22:33:44:55:66:77',
+            hostname: 'New Device'
+        });
+        const python: any = new EventEmitter();
+        python.scan = async () => [newDevice];
+        const db: any = {
+            syncScanResults: async () => ({
+                allDevices: [newDevice],
+                autoReblockTargets: [],
+                autoThrottleTargets: [],
+                zombieSessionsToStop: []
+            }),
+            updateDeviceDhcpProfile: async () => {}
+        };
+        const manager = new DeviceManager(python, db);
+        const scheduled: Array<{ mac: string; delay: number }> = [];
+        (manager as any).scheduleProfileEnrichment = (mac: string, delay: number) => {
+            scheduled.push({ mac, delay });
+        };
+
+        await manager.scanNetwork();
+        assert.deepStrictEqual(scheduled, [{ mac: newDevice.mac, delay: 1500 }]);
+
+        scheduled.length = 0;
+        await (manager as any)._handleDhcpEvent({
+            mac: newDevice.mac,
+            ip: newDevice.ip,
+            hostname: 'New Identity',
+            vendor_class: 'android-dhcp-14',
+            message_type: 'REQUEST'
+        });
+        await (manager as any)._handleDhcpEvent({
+            mac: newDevice.mac,
+            ip: newDevice.ip,
+            hostname: 'New Identity',
+            vendor_class: 'android-dhcp-14',
+            message_type: 'REQUEST'
+        });
+        assert.deepStrictEqual(
+            scheduled,
+            [{ mac: newDevice.mac, delay: 1500 }],
+            'only meaningful new DHCP evidence schedules enrichment'
+        );
+        console.log('  ✓ Profile enrichment: scan additions and DHCP evidence schedule exactly once');
+    }
+
+    // Test 33: the deprecated manager method delegates only to the canonical workflow.
+    {
+        const python: any = new EventEmitter();
+        let legacyCalls = 0;
+        python.quickReauth = async () => {
+            legacyCalls++;
+        };
+        const manager = new DeviceManager(python, {} as any);
+        const expected: ProfileRefreshResult = {
+            success: true,
+            visible_count: 0,
+            high_confidence_count: 0,
+            medium_confidence_count: 0,
+            unknown_count: 0,
+            hostname_count: 0,
+            coverage_percentage: null,
+            sources: {},
+            ap_isolation: {},
+            partial_failures: [],
+            duration_ms: 0,
+            devices: [],
+            cached: false,
+            cooldown_remaining_ms: 20_000
+        };
+        let canonicalCalls = 0;
+        (manager as any).profileRefresh = async () => {
+            canonicalCalls++;
+            return expected;
+        };
+
+        assert.strictEqual(await manager.quickReauthProfiling(), expected);
+        assert.strictEqual(canonicalCalls, 1);
+        assert.strictEqual(legacyCalls, 0);
+        console.log('  ✓ Compatibility: deprecated manager method delegates to profileRefresh');
     }
 
 }

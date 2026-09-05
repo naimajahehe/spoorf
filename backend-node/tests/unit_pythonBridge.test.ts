@@ -186,6 +186,103 @@ export async function runPythonBridgeTests() {
         console.log('  ✓ Contract: HTTP failures are typed, safe, and preserve validation detail');
     }
 
+    // Contract: profile refresh uses only the canonical safe endpoint and returns data.
+    {
+        const originalFetch = globalThis.fetch;
+        const requests: Array<{ url: string; body?: string }> = [];
+        const responsePayload = {
+            success: true,
+            data: {
+                visible_count: 1,
+                high_confidence_count: 1,
+                medium_confidence_count: 0,
+                unknown_count: 0,
+                hostname_count: 1,
+                coverage_percentage: 100,
+                sources: { DHCP: 1 },
+                ap_isolation: { is_isolated: false },
+                partial_failures: [],
+                duration_ms: 25,
+                devices: []
+            }
+        };
+        try {
+            (bridge as any).ready = true;
+            globalThis.fetch = (async (input: any, init?: RequestInit) => {
+                requests.push({
+                    url: String(input),
+                    body: typeof init?.body === 'string' ? init.body : undefined
+                });
+                return new Response(JSON.stringify(responsePayload), {
+                    status: 200,
+                    headers: { 'Content-Type': 'application/json' }
+                });
+            }) as typeof fetch;
+
+            const target = {
+                ip: '192.168.1.20',
+                mac: '00:07:ab:11:22:33',
+                ipv6_addresses: ['fe80::20']
+            };
+            const result = await bridge.profileRefresh([target], 5);
+            assert.strictEqual(requests[0].url.endsWith('/api/network/profile-refresh'), true);
+            assert.deepStrictEqual(JSON.parse(requests[0].body || '{}'), {
+                targets: [target],
+                observation_seconds: 5
+            });
+            assert.deepStrictEqual(result, responsePayload.data);
+
+            requests.length = 0;
+            const legacy = await bridge.quickReauth([{
+                victim_ip: target.ip,
+                victim_mac: target.mac,
+                victim_ipv6: target.ipv6_addresses[0],
+                gateway_ip: '192.168.1.1',
+                gateway_mac: '00:11:22:33:44:55'
+            }], 1500);
+            assert.strictEqual(requests.length, 1);
+            assert.strictEqual(requests[0].url.endsWith('/api/network/profile-refresh'), true);
+            assert.strictEqual(requests[0].url.includes('/quick-reauth'), false);
+            assert.deepStrictEqual(JSON.parse(requests[0].body || '{}'), {
+                targets: [target],
+                observation_seconds: 5
+            });
+            assert.deepStrictEqual(legacy, responsePayload.data);
+        } finally {
+            globalThis.fetch = originalFetch;
+        }
+        console.log('  ✓ Contract: canonical and legacy bridge calls use safe profile refresh');
+    }
+
+    // Contract: canonical profile refresh rejects downstream HTTP failures.
+    {
+        const originalFetch = globalThis.fetch;
+        try {
+            (bridge as any).ready = true;
+            globalThis.fetch = (async () => new Response(JSON.stringify({
+                success: false,
+                error: 'collector unavailable'
+            }), {
+                status: 503,
+                headers: { 'Content-Type': 'application/json' }
+            })) as typeof fetch;
+            await assert.rejects(
+                () => bridge.profileRefresh([{
+                    ip: '192.168.1.20',
+                    mac: '00:07:ab:11:22:33',
+                    ipv6_addresses: []
+                }]),
+                (error: any) =>
+                    error.name === 'BridgeHttpError'
+                    && error.status === 503
+                    && /HTTP 503/.test(error.message)
+            );
+        } finally {
+            globalThis.fetch = originalFetch;
+        }
+        console.log('  ✓ Contract: profile refresh propagates typed HTTP failures');
+    }
+
     // Test 1: getTelemetry mengembalikan null (bukan throw/hang) saat engine tak terjangkau
     {
         (bridge as any).ready = false;

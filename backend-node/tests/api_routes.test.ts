@@ -285,6 +285,96 @@ export async function runApiRoutesTests() {
         console.log('  ✓ Contract: Gaming status has no duplicate direct broadcast');
     }
 
+    // Contract: canonical and legacy profile routes share the safe manager workflow.
+    {
+        const result = {
+            success: true,
+            visible_count: 1,
+            high_confidence_count: 1,
+            medium_confidence_count: 0,
+            unknown_count: 0,
+            hostname_count: 1,
+            coverage_percentage: 100,
+            sources: { DHCP: 1 },
+            ap_isolation: {},
+            partial_failures: [],
+            duration_ms: 25,
+            devices: [],
+            cached: false,
+            cooldown_remaining_ms: 20_000
+        };
+        let profileCalls = 0;
+        let legacyManagerCalls = 0;
+        const manager = {
+            profileRefresh: async () => {
+                profileCalls++;
+                return result;
+            },
+            quickReauthProfiling: async () => {
+                legacyManagerCalls++;
+                return result;
+            }
+        };
+        const router = createRouter(manager as any);
+        const canonical = (router as any).stack.find((item: any) =>
+            item.route?.path === '/api/network/profile-refresh' && item.route.methods.post
+        );
+        const legacy = (router as any).stack.find((item: any) =>
+            item.route?.path === '/api/network/quick-reauth' && item.route.methods.post
+        );
+        assert.ok(canonical, 'canonical profile refresh route must be registered');
+        assert.ok(legacy, 'legacy profile refresh alias must remain registered');
+
+        let canonicalBody: any;
+        await canonical.route.stack[0].handle(
+            {} as any,
+            { json: (body: any) => { canonicalBody = body; } } as any,
+            () => {}
+        );
+        let legacyBody: any;
+        await legacy.route.stack[0].handle(
+            {} as any,
+            { json: (body: any) => { legacyBody = body; } } as any,
+            () => {}
+        );
+
+        assert.deepStrictEqual(canonicalBody, { success: true, data: result });
+        assert.deepStrictEqual(legacyBody, {
+            success: true,
+            deprecated: true,
+            message: 'Quick Re-Auth is deprecated; safe Profile Refresh completed',
+            data: result
+        });
+        assert.strictEqual(profileCalls, 2);
+        assert.strictEqual(legacyManagerCalls, 0);
+        console.log('  ✓ Contract: canonical route and deprecated alias share profileRefresh');
+    }
+
+    // Contract: Socket.IO forwards canonical and compatibility profile events once.
+    {
+        class FakeDeviceManager extends EventEmitter {}
+        const manager = new FakeDeviceManager();
+        const httpServer = createServer();
+        const websocket = new WebSocketManager(httpServer, manager as any);
+        const broadcasts: Array<{ event: string; data: any }> = [];
+        (websocket as any).io.emit = (event: string, data: any) => {
+            broadcasts.push({ event, data });
+            return true;
+        };
+        const payload = { operation: 'profile_refresh', count: 1 };
+        manager.emit('profileRefreshStarted', payload);
+        manager.emit('profileRefreshDone', payload);
+        manager.emit('quickReauthStarted', { ...payload, deprecated: true });
+        manager.emit('quickReauthDone', { ...payload, deprecated: true });
+
+        assert.deepStrictEqual(
+            broadcasts.map(item => item.event),
+            ['profileRefreshStarted', 'profileRefreshDone', 'quickReauthStarted', 'quickReauthDone']
+        );
+        await new Promise<void>(resolve => (websocket as any).io.close(() => resolve()));
+        console.log('  ✓ Contract: Socket.IO forwards profile refresh events and legacy aliases');
+    }
+
     // Contract: SIGINT and SIGTERM share one idempotent shutdown handler.
     {
         const { registerGracefulShutdown } = require('../src/shutdown');

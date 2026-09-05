@@ -3,7 +3,7 @@ import { EventEmitter } from 'events';
 import * as path from 'path';
 import * as fs from 'fs';
 import WebSocket from 'ws';
-import { Device } from '../types';
+import { Device, ProfileRefreshResponse } from '../types';
 
 /**
  * Error yang menandai Python engine tak terjangkau/timeout. `code` adalah sumber
@@ -632,16 +632,32 @@ export class PythonBridge extends EventEmitter {
         return data;
     }
 
-    async quickReauth(targets: any[], holdMs: number = 1500): Promise<any> {
-        console.log(`📡 [HTTP Call -> Python] POST /api/network/quick-reauth untuk ${targets.length} target...`);
-        const res = await this.fetchWithTimeout(`${this.baseUrl}/api/network/quick-reauth`, {
+    async profileRefresh(
+        targets: Array<{ ip: string; mac: string; ipv6_addresses: string[] }>,
+        observationSeconds = 5
+    ): Promise<ProfileRefreshResponse> {
+        console.log(`📡 [HTTP Call -> Python] POST /api/network/profile-refresh untuk ${targets.length} target...`);
+        const timeoutMs = Math.ceil(observationSeconds * 1000) + 15000;
+        const res = await this.fetchWithTimeout(`${this.baseUrl}/api/network/profile-refresh`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ targets, hold_ms: holdMs })
-        }, holdMs + 20000);
+            body: JSON.stringify({
+                targets,
+                observation_seconds: observationSeconds
+            })
+        }, timeoutMs);
 
-        const data = await this.readMutationResponse(res, 'Quick re-auth');
-        return data.data;
+        const payload = await this.readMutationResponse(res, 'Profile refresh');
+        return payload.data;
+    }
+
+    async quickReauth(targets: any[], _holdMs: number = 1500): Promise<ProfileRefreshResponse> {
+        const convertedTargets = targets.map(target => ({
+            ip: target.victim_ip,
+            mac: target.victim_mac,
+            ipv6_addresses: target.victim_ipv6 ? [target.victim_ipv6] : []
+        }));
+        return this.profileRefresh(convertedTargets, 5);
     }
 
     async getDhcpStats(): Promise<any> {
