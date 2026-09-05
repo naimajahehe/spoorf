@@ -1,3 +1,30 @@
+export type ProfileStatus = 'high' | 'medium' | 'unknown';
+
+export interface ProfileEvidence {
+    source: string;
+    group: string;
+    field: string;
+    value: string;
+    strength: 'weak' | 'medium' | 'strong' | 'explicit';
+    observed_at: string;
+}
+
+export interface ProfileAssessment {
+    mac: string;
+    ip: string;
+    vendor: string;
+    device_type: string;
+    hostname: string;
+    os: string;
+    vendor_confidence: number;
+    type_confidence: number;
+    hostname_confidence: number;
+    profile_status: ProfileStatus;
+    profile_evidence: ProfileEvidence[];
+    profiled_at: string;
+    profile_version: number;
+}
+
 export interface Device {
     ip: string;
     last_ip?: string;
@@ -43,6 +70,35 @@ export interface Device {
     ipv6_global?: string;
     ipv6_addresses?: string[];
     is_dual_stack?: boolean;
+    profile_status?: ProfileStatus;
+    vendor_confidence?: number;
+    type_confidence?: number;
+    hostname_confidence?: number;
+    profile_evidence?: ProfileEvidence[];
+    profiled_at?: string;
+    profile_version?: number;
+}
+
+export interface ProfileRefreshResponse {
+    visible_count: number;
+    high_confidence_count: number;
+    medium_confidence_count: number;
+    unknown_count: number;
+    hostname_count: number;
+    coverage_percentage: number | null;
+    sources: Record<string, number>;
+    ap_isolation: Record<string, unknown>;
+    partial_failures: Array<{ source: string; error: string }>;
+    duration_ms: number;
+    devices: ProfileAssessment[];
+}
+
+export interface ProfileRefreshResult
+    extends Omit<ProfileRefreshResponse, 'devices'> {
+    success: true;
+    devices: Device[];
+    cached: boolean;
+    cooldown_remaining_ms: number;
 }
 
 export interface SpoofSession {

@@ -1,5 +1,7 @@
 import assert from 'assert';
-import { Device } from '../src/types';
+import fs from 'fs';
+import path from 'path';
+import { Device, ProfileAssessment } from '../src/types';
 
 export async function runDatabaseTests() {
     console.log('\n--- [Node] Testing Database & Data Reconciliation Logic ---');
@@ -604,5 +606,431 @@ export async function runDatabaseTests() {
         await db.close();
         console.log('  ✓ DHCP persistence: live profile evidence is stored atomically');
     }
-}
 
+    // Test 15: profile columns are added to a legacy schema idempotently.
+    {
+        const { DatabaseService } = await import('../src/services/database');
+        const db = new DatabaseService(':memory:');
+        const rawDb = (db as any).db;
+        rawDb.exec(`
+            CREATE TABLE devices (
+                mac TEXT PRIMARY KEY,
+                ip TEXT NOT NULL,
+                hostname TEXT,
+                vendor TEXT,
+                os TEXT,
+                device_type TEXT DEFAULT 'Unknown',
+                web_title TEXT,
+                web_server TEXT,
+                workgroup TEXT,
+                user_name TEXT,
+                open_ports TEXT DEFAULT '[]',
+                services TEXT DEFAULT '[]',
+                is_blocked INTEGER DEFAULT 0,
+                is_online INTEGER DEFAULT 1,
+                is_gateway INTEGER DEFAULT 0,
+                is_self INTEGER DEFAULT 0,
+                rtt_ms REAL DEFAULT 0,
+                ttl INTEGER,
+                is_randomized_mac INTEGER DEFAULT 0,
+                mac_type TEXT,
+                alias TEXT,
+                profile_id TEXT,
+                matched_by TEXT,
+                session_id TEXT,
+                speed_limit INTEGER DEFAULT 100,
+                dhcp_vendor_class TEXT,
+                dhcp_fingerprint TEXT,
+                dhcp_client_id TEXT,
+                dhcp_fqdn TEXT,
+                match_score INTEGER,
+                candidate_profile_id TEXT,
+                is_archived INTEGER DEFAULT 0,
+                distance_zone TEXT DEFAULT 'unknown',
+                estimated_range TEXT DEFAULT '-',
+                ipv6_link_local TEXT,
+                ipv6_global TEXT,
+                ipv6_addresses TEXT DEFAULT '[]',
+                is_dual_stack INTEGER DEFAULT 0,
+                first_seen TEXT DEFAULT (datetime('now', 'localtime')),
+                last_seen TEXT DEFAULT (datetime('now', 'localtime'))
+            )
+        `);
+
+        await db.init();
+        (db as any).initialized = false;
+        await db.init();
+
+        const columns = new Set(
+            (rawDb.pragma('table_info(devices)') as Array<{ name: string }>).map(column => column.name)
+        );
+        for (const column of [
+            'last_ip',
+            'profile_status',
+            'vendor_confidence',
+            'type_confidence',
+            'hostname_confidence',
+            'profile_evidence',
+            'profiled_at',
+            'profile_version'
+        ]) {
+            assert.ok(columns.has(column), `Migration must add ${column}`);
+        }
+
+        await db.close();
+        console.log('  ✓ Profile migration: legacy devices schema is upgraded idempotently');
+    }
+
+    // Test 16: profile persistence updates identity atomically without clearing control-plane state.
+    {
+        const { DatabaseService } = await import('../src/services/database');
+        const db = new DatabaseService(':memory:');
+        await db.init();
+
+        const device: Device = {
+            ip: '192.168.1.20',
+            mac: '00:07:ab:11:22:33',
+            hostname: 'Unknown Device',
+            vendor: 'Generic Device',
+            device_type: 'Generic Client Device',
+            os: 'Unknown OS',
+            rtt_ms: 8,
+            open_ports: [],
+            services: [],
+            is_blocked: false,
+            is_online: true,
+            is_gateway: false
+        };
+        await db.syncScanResults([device]);
+        await db.setDeviceAlias(device.mac, 'Living Room Phone');
+        await db.setDeviceBlocked(device.mac, true, 'session_profile_1');
+        await db.setDeviceSpeedLimit(device.mac, 25);
+
+        const rawDb = (db as any).db;
+        rawDb.exec(`
+            ALTER TABLE devices ADD COLUMN is_redirected INTEGER DEFAULT 0;
+            ALTER TABLE devices ADD COLUMN redirect_url TEXT;
+        `);
+        rawDb.prepare(`
+            UPDATE devices
+            SET is_redirected = 1,
+                redirect_url = ?,
+                matched_by = ?,
+                candidate_profile_id = ?
+            WHERE LOWER(mac) = LOWER(?)
+        `).run('https://portal.local/', 'manual_link', 'candidate_7', device.mac);
+
+        await db.updateDeviceProfileAssessment({
+            mac: '00:07:AB:11:22:33',
+            ip: '192.168.1.20',
+            vendor: 'Samsung',
+            device_type: 'Smartphone / Tablet',
+            hostname: 'Galaxy-A07',
+            os: 'Android',
+            vendor_confidence: 94,
+            type_confidence: 96,
+            hostname_confidence: 90,
+            profile_status: 'high',
+            profile_evidence: [{
+                source: 'mdns',
+                group: 'explicit_identity',
+                field: 'model',
+                value: 'SM-A055F',
+                strength: 'explicit',
+                observed_at: '2026-09-04T08:00:00Z'
+            }],
+            profiled_at: '2026-09-04T08:00:05Z',
+            profile_version: 1
+        });
+
+        let stored = await db.getDeviceByMac(device.mac) as any;
+        assert.strictEqual(stored.vendor, 'Samsung');
+        assert.strictEqual(stored.device_type, 'Smartphone / Tablet');
+        assert.strictEqual(stored.hostname, 'Galaxy-A07');
+        assert.strictEqual(stored.os, 'Android');
+        assert.strictEqual(stored.profile_status, 'high');
+        assert.strictEqual(stored.vendor_confidence, 94);
+        assert.strictEqual(stored.type_confidence, 96);
+        assert.strictEqual(stored.hostname_confidence, 90);
+        assert.strictEqual(stored.profile_evidence?.[0].source, 'mdns');
+        assert.strictEqual(stored.profiled_at, '2026-09-04T08:00:05Z');
+        assert.strictEqual(stored.profile_version, 1);
+
+        const controls = rawDb.prepare(`
+            SELECT alias, is_blocked, session_id, speed_limit, profile_id,
+                   matched_by, candidate_profile_id, is_redirected, redirect_url
+            FROM devices WHERE LOWER(mac) = LOWER(?)
+        `).get(device.mac);
+        assert.strictEqual(controls.alias, 'Living Room Phone');
+        assert.strictEqual(controls.is_blocked, 1);
+        assert.strictEqual(controls.session_id, 'session_profile_1');
+        assert.strictEqual(controls.speed_limit, 25);
+        assert.ok(controls.profile_id);
+        assert.strictEqual(controls.matched_by, 'manual_link');
+        assert.strictEqual(controls.candidate_profile_id, 'candidate_7');
+        assert.strictEqual(controls.is_redirected, 1);
+        assert.strictEqual(controls.redirect_url, 'https://portal.local/');
+
+        await db.updateDeviceProfileAssessment({
+            mac: device.mac,
+            ip: device.ip,
+            vendor: 'Generic Device',
+            device_type: 'Generic Client Device',
+            hostname: 'Unknown',
+            os: 'Unknown OS',
+            vendor_confidence: 0,
+            type_confidence: 0,
+            hostname_confidence: 0,
+            profile_status: 'unknown',
+            profile_evidence: [],
+            profiled_at: '2026-09-04T09:00:00Z',
+            profile_version: 2
+        });
+
+        stored = await db.getDeviceByMac(device.mac) as any;
+        assert.strictEqual(stored.vendor, 'Samsung', 'Unknown refresh must preserve last-known vendor');
+        assert.strictEqual(stored.device_type, 'Smartphone / Tablet', 'Unknown refresh must preserve last-known type');
+        assert.strictEqual(stored.hostname, 'Galaxy-A07', 'Unknown refresh must preserve last-known hostname');
+        assert.strictEqual(stored.os, 'Android', 'Unknown refresh must preserve last-known OS');
+        assert.strictEqual(stored.profile_status, 'unknown', 'Fresh status must replace stale high status');
+        assert.strictEqual(stored.vendor_confidence, 0);
+        assert.strictEqual(stored.type_confidence, 0);
+        assert.strictEqual(stored.hostname_confidence, 0);
+        assert.deepStrictEqual(stored.profile_evidence, []);
+        assert.strictEqual(stored.profiled_at, '2026-09-04T09:00:00Z');
+        assert.strictEqual(stored.profile_version, 2);
+
+        await db.close();
+        console.log('  ✓ Profile persistence: labels and control-plane state are preserved correctly');
+    }
+
+    // Test 17: malformed profile inputs are rejected before SQLite mutation.
+    {
+        const { DatabaseService } = await import('../src/services/database');
+        const db = new DatabaseService(':memory:');
+        await db.init();
+        await db.syncScanResults([{
+            ip: '192.168.1.30',
+            mac: '00:07:ab:11:22:44',
+            hostname: 'Known-Host',
+            vendor: 'Known Vendor',
+            device_type: 'Laptop',
+            os: 'Windows',
+            rtt_ms: 4,
+            open_ports: [],
+            services: [],
+            is_blocked: false,
+            is_online: true,
+            is_gateway: false
+        }]);
+
+        const valid: ProfileAssessment = {
+            mac: '00:07:ab:11:22:44',
+            ip: '192.168.1.30',
+            vendor: 'Dell',
+            device_type: 'Laptop',
+            hostname: 'Office-Laptop',
+            os: 'Windows 11',
+            vendor_confidence: 90,
+            type_confidence: 91,
+            hostname_confidence: 92,
+            profile_status: 'high',
+            profile_evidence: [],
+            profiled_at: '2026-09-04T10:00:00Z',
+            profile_version: 1
+        };
+
+        await assert.rejects(
+            () => db.updateDeviceProfileAssessment({ ...valid, mac: 'not-a-mac' }),
+            /MAC/i
+        );
+        await assert.rejects(
+            () => db.updateDeviceProfileAssessment({ ...valid, vendor_confidence: 90.5 }),
+            /confidence/i
+        );
+        await assert.rejects(
+            () => db.updateDeviceProfileAssessment({ ...valid, type_confidence: 101 }),
+            /confidence/i
+        );
+        await assert.rejects(
+            () => db.updateDeviceProfileAssessment({ ...valid, profile_status: 'stale' } as any),
+            /status/i
+        );
+        await assert.rejects(
+            () => db.updateDeviceProfileAssessment({ ...valid, profile_evidence: { source: 'mdns' } } as any),
+            /evidence/i
+        );
+        await assert.rejects(
+            () => db.updateDeviceProfileAssessment({
+                ...valid,
+                profile_evidence: [{
+                    source: 'mdns',
+                    group: 'explicit_identity',
+                    field: 'model',
+                    value: 'x'.repeat(33 * 1024),
+                    strength: 'explicit',
+                    observed_at: '2026-09-04T10:00:00Z'
+                }]
+            }),
+            /32 KiB/i
+        );
+        await assert.rejects(
+            () => db.updateDeviceProfileAssessment({ ...valid, profile_version: 0 }),
+            /version/i
+        );
+
+        const stored = await db.getDeviceByMac(valid.mac) as any;
+        assert.strictEqual(stored.profile_status, 'unknown');
+        assert.strictEqual(stored.vendor, 'Known Vendor');
+        await db.close();
+        console.log('  ✓ Profile validation: malformed and oversized assessments are rejected');
+    }
+
+    // Test 18: a mid-transaction SQLite failure rolls back IP reconciliation.
+    {
+        const { DatabaseService } = await import('../src/services/database');
+        const db = new DatabaseService(':memory:');
+        await db.init();
+        const mk = (ip: string, mac: string): Device => ({
+            ip,
+            mac,
+            hostname: 'Known',
+            vendor: 'Known Vendor',
+            device_type: 'Laptop',
+            os: 'Windows',
+            rtt_ms: 1,
+            open_ports: [],
+            services: [],
+            is_blocked: false,
+            is_online: true,
+            is_gateway: false
+        });
+        await db.syncScanResults([
+            mk('192.168.1.40', '00:07:ab:11:22:40'),
+            mk('192.168.1.41', '00:07:ab:11:22:41')
+        ]);
+
+        const rawDb = (db as any).db;
+        rawDb.exec(`
+            CREATE TRIGGER fail_profile_update
+            BEFORE UPDATE OF profile_status ON devices
+            WHEN LOWER(OLD.mac) = '00:07:ab:11:22:40'
+            BEGIN
+                SELECT RAISE(ABORT, 'forced profile failure');
+            END;
+        `);
+
+        await assert.rejects(
+            () => db.updateDeviceProfileAssessment({
+                mac: '00:07:ab:11:22:40',
+                ip: '192.168.1.41',
+                vendor: 'Dell',
+                device_type: 'Laptop',
+                hostname: 'Office-Laptop',
+                os: 'Windows 11',
+                vendor_confidence: 90,
+                type_confidence: 90,
+                hostname_confidence: 90,
+                profile_status: 'high',
+                profile_evidence: [],
+                profiled_at: '2026-09-04T11:00:00Z',
+                profile_version: 1
+            }),
+            /forced profile failure/
+        );
+
+        const target = rawDb.prepare('SELECT ip, profile_status FROM devices WHERE mac = ?')
+            .get('00:07:ab:11:22:40');
+        const incumbent = rawDb.prepare('SELECT ip, is_online FROM devices WHERE mac = ?')
+            .get('00:07:ab:11:22:41');
+        assert.strictEqual(target.ip, '192.168.1.40');
+        assert.strictEqual(target.profile_status, 'unknown');
+        assert.strictEqual(incumbent.ip, '192.168.1.41');
+        assert.strictEqual(incumbent.is_online, 1);
+        await db.close();
+        console.log('  ✓ Profile transaction: mid-write failures roll back every mutation');
+    }
+
+    // Test 19: persisted profile fields survive close/reopen and scan reconciliation.
+    {
+        const { DatabaseService } = await import('../src/services/database');
+        const dbPath = path.join(process.cwd(), 'data', 'unit-profile-restart.sqlite');
+        const cleanup = () => {
+            for (const suffix of ['', '-wal', '-shm']) {
+                fs.rmSync(`${dbPath}${suffix}`, { force: true });
+            }
+        };
+        cleanup();
+
+        try {
+            let db = new DatabaseService(dbPath);
+            await db.init();
+            const scanned: Device = {
+                ip: '192.168.1.50',
+                mac: '00:07:ab:11:22:50',
+                hostname: 'Unknown',
+                vendor: 'Generic Device',
+                device_type: 'Generic Client Device',
+                os: 'Unknown OS',
+                rtt_ms: 3,
+                open_ports: [],
+                services: [],
+                is_blocked: false,
+                is_online: true,
+                is_gateway: false
+            };
+            await db.syncScanResults([scanned]);
+            await db.updateDeviceProfileAssessment({
+                mac: scanned.mac,
+                ip: scanned.ip,
+                vendor: 'Samsung',
+                device_type: 'Smartphone / Tablet',
+                hostname: 'Galaxy-Restart',
+                os: 'Android',
+                vendor_confidence: 94,
+                type_confidence: 96,
+                hostname_confidence: 90,
+                profile_status: 'high',
+                profile_evidence: [{
+                    source: 'ssdp',
+                    group: 'service_behavior',
+                    field: 'server',
+                    value: 'Samsung UPnP',
+                    strength: 'strong',
+                    observed_at: '2026-09-04T12:00:00Z'
+                }],
+                profiled_at: '2026-09-04T12:00:05Z',
+                profile_version: 3
+            });
+            await db.close();
+
+            db = new DatabaseService(dbPath);
+            await db.init();
+            let stored = await db.getDeviceByMac(scanned.mac) as any;
+            assert.strictEqual(stored.profile_status, 'high');
+            assert.strictEqual(stored.vendor_confidence, 94);
+            assert.strictEqual(stored.profile_evidence?.[0].source, 'ssdp');
+            assert.strictEqual(stored.profile_version, 3);
+
+            await db.syncScanResults([{
+                ...scanned,
+                hostname: 'Unknown',
+                vendor: 'Generic Device',
+                device_type: 'Generic Client Device',
+                os: 'Unknown OS',
+                rtt_ms: 2
+            }]);
+            stored = await db.getDeviceByMac(scanned.mac) as any;
+            assert.strictEqual(stored.profile_status, 'high');
+            assert.strictEqual(stored.vendor_confidence, 94);
+            assert.strictEqual(stored.profile_evidence?.[0].source, 'ssdp');
+            assert.strictEqual(stored.vendor, 'Samsung');
+            assert.strictEqual(stored.device_type, 'Smartphone / Tablet');
+            assert.strictEqual(stored.hostname, 'Galaxy-Restart');
+            await db.close();
+        } finally {
+            cleanup();
+        }
+        console.log('  ✓ Profile restart: assessment mapping survives restart and scan reconciliation');
+    }
+}

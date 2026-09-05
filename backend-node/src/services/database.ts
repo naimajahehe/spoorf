@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import path from 'path';
 import fs from 'fs';
-import { Device, CachedLicense } from '../types';
+import { Device, CachedLicense, ProfileAssessment, ProfileEvidence, ProfileStatus } from '../types';
 
 /**
  * Grace period (detik) sebelum perangkat yang hilang dari hasil scan ditandai offline.
@@ -9,6 +9,15 @@ import { Device, CachedLicense } from '../types';
  * oleh SQL setOffline dan diimpor oleh test agar SQL & test tidak lagi berbeda (75 vs 90).
  */
 export const OFFLINE_GRACE_SECONDS = 75;
+const MAX_PROFILE_EVIDENCE_BYTES = 32 * 1024;
+const PROFILE_STATUSES = new Set<ProfileStatus>(['high', 'medium', 'unknown']);
+const PROFILE_EVIDENCE_STRENGTHS = new Set<ProfileEvidence['strength']>([
+    'weak',
+    'medium',
+    'strong',
+    'explicit'
+]);
+const MAC_ADDRESS_PATTERN = /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/i;
 
 export const GENERIC_FACTORY_PATTERNS = [
     /^galaxy[\s\-_]?(a|s|z|m|note|tab|fold|flip|j)[\s\-_]?[0-9]+/i,
@@ -180,6 +189,107 @@ function safeParseJson<T>(val: any, fallback: T): T {
     return fallback;
 }
 
+function normalizeMacAddress(mac: unknown): string {
+    if (typeof mac !== 'string') {
+        throw new Error('Invalid profile MAC address');
+    }
+    const normalized = mac.trim().replace(/-/g, ':').toLowerCase();
+    if (!MAC_ADDRESS_PATTERN.test(normalized)) {
+        throw new Error('Invalid profile MAC address');
+    }
+    return normalized;
+}
+
+function isGenericProfileLabel(value: unknown, field: 'vendor' | 'device_type' | 'hostname' | 'os'): boolean {
+    if (typeof value !== 'string' || value.trim() === '') return true;
+    const normalized = value.trim().toLowerCase();
+    if (normalized === '-' || normalized === 'n/a' || normalized === 'none') return true;
+    if (normalized === 'unknown' || normalized.startsWith('unknown ')) return true;
+    if (normalized === 'generic' || normalized.startsWith('generic ')) return true;
+    if (field === 'vendor' && normalized.startsWith('private device')) return true;
+    if (field === 'hostname' && normalized === 'device') return true;
+    if (field === 'device_type' && (normalized === 'device' || normalized === 'client device')) return true;
+    return false;
+}
+
+function validateConfidence(value: unknown, field: string): number {
+    if (!Number.isFinite(value) || !Number.isInteger(value) || (value as number) < 0 || (value as number) > 100) {
+        throw new Error(`${field} confidence must be a finite integer from 0 to 100`);
+    }
+    return value as number;
+}
+
+function serializeProfileEvidence(evidence: unknown): string {
+    if (!Array.isArray(evidence)) {
+        throw new Error('Profile evidence must be an array');
+    }
+    for (const item of evidence) {
+        const entry = item as Record<string, unknown>;
+        if (
+            !item
+            || typeof item !== 'object'
+            || typeof entry.source !== 'string'
+            || typeof entry.group !== 'string'
+            || typeof entry.field !== 'string'
+            || typeof entry.value !== 'string'
+            || typeof entry.observed_at !== 'string'
+            || !PROFILE_EVIDENCE_STRENGTHS.has(entry.strength as ProfileEvidence['strength'])
+        ) {
+            throw new Error('Profile evidence contains a malformed entry');
+        }
+    }
+
+    let serialized: string;
+    try {
+        serialized = JSON.stringify(evidence);
+    } catch {
+        throw new Error('Profile evidence must be JSON serializable');
+    }
+    if (Buffer.byteLength(serialized, 'utf8') > MAX_PROFILE_EVIDENCE_BYTES) {
+        throw new Error('Profile evidence must not exceed 32 KiB');
+    }
+    return serialized;
+}
+
+function validateProfileAssessment(profile: ProfileAssessment): ProfileAssessment & { evidenceJson: string } {
+    if (!profile || typeof profile !== 'object') {
+        throw new Error('Profile assessment is required');
+    }
+    const mac = normalizeMacAddress(profile.mac);
+    if (typeof profile.ip !== 'string' || profile.ip.trim() === '') {
+        throw new Error('Profile IP address is required');
+    }
+    if (!PROFILE_STATUSES.has(profile.profile_status)) {
+        throw new Error('Invalid profile status');
+    }
+    if (!Number.isInteger(profile.profile_version) || profile.profile_version <= 0) {
+        throw new Error('Profile version must be a positive integer');
+    }
+    if (typeof profile.profiled_at !== 'string' || profile.profiled_at.trim() === '') {
+        throw new Error('Profile timestamp is required');
+    }
+    for (const field of ['vendor', 'device_type', 'hostname', 'os'] as const) {
+        if (typeof profile[field] !== 'string') {
+            throw new Error(`Profile ${field} must be a string`);
+        }
+    }
+
+    return {
+        ...profile,
+        mac,
+        ip: profile.ip.trim(),
+        vendor: profile.vendor.trim(),
+        device_type: profile.device_type.trim(),
+        hostname: profile.hostname.trim(),
+        os: profile.os.trim(),
+        vendor_confidence: validateConfidence(profile.vendor_confidence, 'Vendor'),
+        type_confidence: validateConfidence(profile.type_confidence, 'Type'),
+        hostname_confidence: validateConfidence(profile.hostname_confidence, 'Hostname'),
+        profiled_at: profile.profiled_at.trim(),
+        evidenceJson: serializeProfileEvidence(profile.profile_evidence)
+    };
+}
+
 export class DatabaseService {
     private db: Database.Database;
     private initialized: boolean = false;
@@ -285,6 +395,13 @@ export class DatabaseService {
                     ipv6_global TEXT,
                     ipv6_addresses TEXT DEFAULT '[]',
                     is_dual_stack INTEGER DEFAULT 0,
+                    profile_status TEXT DEFAULT 'unknown',
+                    vendor_confidence INTEGER DEFAULT 0,
+                    type_confidence INTEGER DEFAULT 0,
+                    hostname_confidence INTEGER DEFAULT 0,
+                    profile_evidence TEXT DEFAULT '[]',
+                    profiled_at TEXT,
+                    profile_version INTEGER DEFAULT 1,
                     first_seen TEXT DEFAULT (datetime('now', 'localtime')),
                     last_seen TEXT DEFAULT (datetime('now', 'localtime'))
                 );
@@ -333,10 +450,21 @@ export class DatabaseService {
                 );
             `);
 
-            try {
-                this.db.exec(`ALTER TABLE devices ADD COLUMN last_ip TEXT;`);
-            } catch {
-                // Kolom last_ip sudah ada
+            const additiveDeviceColumns = [
+                ['last_ip', 'TEXT'],
+                ['profile_status', "TEXT DEFAULT 'unknown'"],
+                ['vendor_confidence', 'INTEGER DEFAULT 0'],
+                ['type_confidence', 'INTEGER DEFAULT 0'],
+                ['hostname_confidence', 'INTEGER DEFAULT 0'],
+                ['profile_evidence', "TEXT DEFAULT '[]'"],
+                ['profiled_at', 'TEXT'],
+                ['profile_version', 'INTEGER DEFAULT 1']
+            ] as const;
+            for (const [column, definition] of additiveDeviceColumns) {
+                const existingColumns = this.db.pragma('table_info(devices)') as Array<{ name: string }>;
+                if (!existingColumns.some(existing => existing.name === column)) {
+                    this.db.exec(`ALTER TABLE devices ADD COLUMN ${column} ${definition}`);
+                }
             }
 
             console.log(`✅ SQLite connected & schema initialized (${this.dbPath})`);
@@ -393,6 +521,8 @@ export class DatabaseService {
                 d.dhcp_vendor_class, d.dhcp_fingerprint, d.dhcp_client_id, d.dhcp_fqdn, d.match_score, d.candidate_profile_id, d.is_archived,
                 d.distance_zone, d.estimated_range,
                 d.ipv6_link_local, d.ipv6_global, d.ipv6_addresses, d.is_dual_stack,
+                d.profile_status, d.vendor_confidence, d.type_confidence, d.hostname_confidence,
+                d.profile_evidence, d.profiled_at, d.profile_version,
                 p.linked_macs,
                 d.first_seen,
                 d.last_seen
@@ -693,6 +823,68 @@ export class DatabaseService {
         updateTransaction();
     }
 
+    async updateDeviceProfileAssessment(profile: ProfileAssessment): Promise<void> {
+        await this.init();
+        const validated = validateProfileAssessment(profile);
+        const vendor = isGenericProfileLabel(validated.vendor, 'vendor') ? null : validated.vendor;
+        const deviceType = isGenericProfileLabel(validated.device_type, 'device_type')
+            ? null
+            : validated.device_type;
+        const hostname = isGenericProfileLabel(validated.hostname, 'hostname') ? null : validated.hostname;
+        const os = isGenericProfileLabel(validated.os, 'os') ? null : validated.os;
+
+        const updateTransaction = this.db.transaction(() => {
+            this.db.prepare(`
+                UPDATE devices
+                SET is_online = 0,
+                    last_ip = CASE WHEN ip != '' AND ip IS NOT NULL THEN ip ELSE last_ip END,
+                    ip = ''
+                WHERE ip = ? AND LOWER(mac) != LOWER(?)
+            `).run(validated.ip, validated.mac);
+
+            const result = this.db.prepare(`
+                UPDATE devices SET
+                    ip = ?,
+                    last_ip = ?,
+                    is_online = 1,
+                    vendor = CASE WHEN ? IS NOT NULL THEN ? ELSE vendor END,
+                    device_type = CASE WHEN ? IS NOT NULL THEN ? ELSE device_type END,
+                    hostname = CASE WHEN ? IS NOT NULL THEN ? ELSE hostname END,
+                    os = CASE WHEN ? IS NOT NULL THEN ? ELSE os END,
+                    vendor_confidence = ?,
+                    type_confidence = ?,
+                    hostname_confidence = ?,
+                    profile_status = ?,
+                    profile_evidence = ?,
+                    profiled_at = ?,
+                    profile_version = ?,
+                    last_seen = datetime('now', 'localtime')
+                WHERE LOWER(mac) = LOWER(?)
+            `).run(
+                validated.ip,
+                validated.ip,
+                vendor, vendor,
+                deviceType, deviceType,
+                hostname, hostname,
+                os, os,
+                validated.vendor_confidence,
+                validated.type_confidence,
+                validated.hostname_confidence,
+                validated.profile_status,
+                validated.evidenceJson,
+                validated.profiled_at,
+                validated.profile_version,
+                validated.mac
+            );
+
+            if (result.changes === 0) {
+                throw new Error(`Device with MAC ${validated.mac} not found`);
+            }
+        });
+
+        updateTransaction();
+    }
+
     /**
      * Sinkronisasi perangkat hasil scan dengan database SQLite:
      * - Mengenali perangkat lama berdasarkan MAC address
@@ -757,7 +949,9 @@ export class DatabaseService {
                 rtt_ms, session_id, is_self, ttl, is_randomized_mac, mac_type, alias, profile_id, matched_by, speed_limit,
                 dhcp_vendor_class, dhcp_fingerprint, dhcp_client_id, dhcp_fqdn, match_score, candidate_profile_id, first_seen, last_seen,
                 distance_zone, estimated_range,
-                ipv6_link_local, ipv6_global, ipv6_addresses, is_dual_stack
+                ipv6_link_local, ipv6_global, ipv6_addresses, is_dual_stack,
+                profile_status, vendor_confidence, type_confidence, hostname_confidence,
+                profile_evidence, profiled_at, profile_version
             ) VALUES (
                 ?, ?, ?, ?, ?, ?, ?,
                 ?, ?, ?, ?,
@@ -765,7 +959,9 @@ export class DatabaseService {
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                 ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now', 'localtime')), datetime('now', 'localtime'),
                 ?, ?,
-                ?, ?, ?, ?
+                ?, ?, ?, ?,
+                COALESCE(?, 'unknown'), COALESCE(?, 0), COALESCE(?, 0), COALESCE(?, 0),
+                COALESCE(?, '[]'), ?, COALESCE(?, 1)
             )
             ON CONFLICT (mac) DO UPDATE SET
                 ip = excluded.ip,
@@ -803,6 +999,13 @@ export class DatabaseService {
                 ipv6_global = CASE WHEN excluded.ipv6_global IS NOT NULL AND excluded.ipv6_global != '' THEN excluded.ipv6_global ELSE devices.ipv6_global END,
                 ipv6_addresses = CASE WHEN excluded.ipv6_addresses IS NOT NULL AND excluded.ipv6_addresses != '[]' THEN excluded.ipv6_addresses ELSE devices.ipv6_addresses END,
                 is_dual_stack = CASE WHEN excluded.is_dual_stack IS NOT NULL THEN excluded.is_dual_stack ELSE devices.is_dual_stack END,
+                profile_status = CASE WHEN excluded.profiled_at IS NOT NULL THEN excluded.profile_status ELSE devices.profile_status END,
+                vendor_confidence = CASE WHEN excluded.profiled_at IS NOT NULL THEN excluded.vendor_confidence ELSE devices.vendor_confidence END,
+                type_confidence = CASE WHEN excluded.profiled_at IS NOT NULL THEN excluded.type_confidence ELSE devices.type_confidence END,
+                hostname_confidence = CASE WHEN excluded.profiled_at IS NOT NULL THEN excluded.hostname_confidence ELSE devices.hostname_confidence END,
+                profile_evidence = CASE WHEN excluded.profiled_at IS NOT NULL THEN excluded.profile_evidence ELSE devices.profile_evidence END,
+                profiled_at = CASE WHEN excluded.profiled_at IS NOT NULL THEN excluded.profiled_at ELSE devices.profiled_at END,
+                profile_version = CASE WHEN excluded.profiled_at IS NOT NULL THEN excluded.profile_version ELSE devices.profile_version END,
                 is_archived = 0,
                 last_seen = datetime('now', 'localtime')
         `;
@@ -852,6 +1055,24 @@ export class DatabaseService {
                 let matchedBy = existing ? existing.matched_by : undefined;
                 let matchScore: number | undefined = existing ? existing.match_score : undefined;
                 let candidateProfileId: string | undefined = existing ? existing.candidate_profile_id : undefined;
+                let scannedAssessment: ReturnType<typeof validateProfileAssessment> | null = null;
+                if (scanned.profiled_at !== undefined) {
+                    scannedAssessment = validateProfileAssessment({
+                        mac: scanned.mac,
+                        ip: scanned.ip,
+                        vendor: scanned.vendor,
+                        device_type: scanned.device_type,
+                        hostname: scanned.hostname,
+                        os: scanned.os,
+                        vendor_confidence: scanned.vendor_confidence as number,
+                        type_confidence: scanned.type_confidence as number,
+                        hostname_confidence: scanned.hostname_confidence as number,
+                        profile_status: scanned.profile_status as ProfileStatus,
+                        profile_evidence: scanned.profile_evidence as ProfileEvidence[],
+                        profiled_at: scanned.profiled_at,
+                        profile_version: scanned.profile_version as number
+                    });
+                }
 
                 // Jika perangkat baru / tidak ada di existing, terapkan Multi-Factor Fingerprint Scoring
                 if (!existing) {
@@ -926,14 +1147,27 @@ export class DatabaseService {
                     });
                 }
 
+                const incomingHostname = existing && isGenericProfileLabel(scanned.hostname, 'hostname')
+                    ? ''
+                    : scanned.hostname || '';
+                const incomingVendor = existing && isGenericProfileLabel(scanned.vendor, 'vendor')
+                    ? ''
+                    : scanned.vendor || '';
+                const incomingOs = existing && isGenericProfileLabel(scanned.os, 'os')
+                    ? ''
+                    : scanned.os || '';
+                const incomingDeviceType = existing && isGenericProfileLabel(scanned.device_type, 'device_type')
+                    ? ''
+                    : scanned.device_type || 'Unknown';
+
                 upsertStmt.run(
                     scanned.mac,
                     scanned.ip,
                     scanned.ip, // last_ip
-                    scanned.hostname || '',
-                    scanned.vendor || '',
-                    scanned.os || '',
-                    scanned.device_type || 'Unknown',
+                    incomingHostname,
+                    incomingVendor,
+                    incomingOs,
+                    incomingDeviceType,
                     scanned.web_title || '',
                     scanned.web_server || '',
                     scanned.workgroup || '',
@@ -964,7 +1198,14 @@ export class DatabaseService {
                     scanned.ipv6_link_local || null,
                     scanned.ipv6_global || null,
                     JSON.stringify(scanned.ipv6_addresses || []),
-                    scanned.is_dual_stack ? 1 : 0
+                    scanned.is_dual_stack ? 1 : 0,
+                    scannedAssessment?.profile_status ?? null,
+                    scannedAssessment?.vendor_confidence ?? null,
+                    scannedAssessment?.type_confidence ?? null,
+                    scannedAssessment?.hostname_confidence ?? null,
+                    scannedAssessment?.evidenceJson ?? null,
+                    scannedAssessment?.profiled_at ?? null,
+                    scannedAssessment?.profile_version ?? null
                 );
             }
 
@@ -1032,7 +1273,22 @@ export class DatabaseService {
             ipv6_link_local: row.ipv6_link_local || undefined,
             ipv6_global: row.ipv6_global || undefined,
             ipv6_addresses: safeParseJson<string[]>(row.ipv6_addresses, []),
-            is_dual_stack: Boolean(row.is_dual_stack)
+            is_dual_stack: Boolean(row.is_dual_stack),
+            profile_status: PROFILE_STATUSES.has(row.profile_status) ? row.profile_status : 'unknown',
+            vendor_confidence: row.vendor_confidence !== null && row.vendor_confidence !== undefined
+                ? Number(row.vendor_confidence)
+                : 0,
+            type_confidence: row.type_confidence !== null && row.type_confidence !== undefined
+                ? Number(row.type_confidence)
+                : 0,
+            hostname_confidence: row.hostname_confidence !== null && row.hostname_confidence !== undefined
+                ? Number(row.hostname_confidence)
+                : 0,
+            profile_evidence: safeParseJson<ProfileEvidence[]>(row.profile_evidence, []),
+            profiled_at: row.profiled_at || undefined,
+            profile_version: row.profile_version !== null && row.profile_version !== undefined
+                ? Number(row.profile_version)
+                : 1
         };
     }
 
