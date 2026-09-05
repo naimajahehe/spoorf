@@ -99,6 +99,7 @@ function App() {
         rogueDhcpAlert,
         clearRogueDhcpAlert,
         scan,
+        setAutoScan,
         block,
         unblock,
         deleteDevice,
@@ -201,7 +202,14 @@ function App() {
         port: 80
     });
     const [isDhcpModalOpen, setIsDhcpModalOpen] = useState<boolean>(false);
-    const [scanMode, setScanMode] = useState<'normal' | 'opt_3b' | 'auto' | 'super'>('auto');
+    const [scanMode, setScanMode] = useState<'normal' | 'opt_3b' | 'auto' | 'super'>(() => {
+        // Ingat pilihan lintas sesi; hanya 'normal'/'auto' yang persisten (opt_3b membuka modal, super ditunda).
+        try {
+            const saved = localStorage.getItem('sentinel_scanmode');
+            if (saved === 'normal' || saved === 'auto') return saved;
+        } catch {}
+        return 'auto';
+    });
     const [apIsolation, setApIsolation] = useState<ApIsolationInfo | null>(null);
     const [isWifiPopoverOpen, setIsWifiPopoverOpen] = useState<boolean>(false);
     const [isRefreshingApIsolation, setIsRefreshingApIsolation] = useState<boolean>(false);
@@ -506,12 +514,28 @@ function App() {
         }
     }, [inspectorDevice, selectedInspectorIp]);
 
-    // Auto-scan and request OS notification permission on mount
+    // Auto Scan hanya untuk tier berbayar; free = "Scan saja".
+    const canAutoScan = authStatus?.license?.tier !== 'free';
+
+    // Scan sekali saat buka aplikasi + minta izin notifikasi OS.
     useEffect(() => {
         scan();
         fetchApIsolation();
         requestNotificationPermission();
     }, []);
+
+    // Sinkronkan Auto Scan ke backend sesuai tier + pilihan tersimpan, saat lisensi & koneksi siap.
+    // Free dipaksa "Scan saja"; pro/vip menerapkan scanMode ('auto' → on, 'normal' → off).
+    useEffect(() => {
+        if (!isConnected || !authStatus?.license) return;
+        if (!canAutoScan) {
+            if (scanMode !== 'normal') setScanMode('normal');
+            setAutoScan(false);
+        } else {
+            setAutoScan(scanMode === 'auto');
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [isConnected, authStatus?.license?.tier, canAutoScan]);
 
     useEffect(() => {
         if (!isScanning) {
@@ -1686,7 +1710,7 @@ function App() {
                                             </AnimatePresence>
 
                                             <AnimatePresence>
-                                                {!isScanning && (
+                                                {!isScanning && canAutoScan && (
                                                     <motion.div
                                                         key="scan-select-dropdown"
                                                         initial={{ opacity: 0, scale: 0.95 }}
@@ -1700,14 +1724,18 @@ function App() {
                                                             onValueChange={(val) => {
                                                                 if (val === 'normal') {
                                                                     setScanMode('normal');
+                                                                    try { localStorage.setItem('sentinel_scanmode', 'normal'); } catch {}
+                                                                    setAutoScan(false);   // matikan scan otomatis latar
                                                                     setIsTableCollapsed(false);
-                                                                    scan();
+                                                                    scan();               // satu scan manual
                                                                 } else if (val === 'opt_3b') {
                                                                     setIsDhcpModalOpen(true);
                                                                 } else if (val === 'auto') {
                                                                     setScanMode('auto');
+                                                                    try { localStorage.setItem('sentinel_scanmode', 'auto'); } catch {}
+                                                                    setAutoScan(true);    // backend langsung scan seketika + watchdog aktif
                                                                 } else if (val === 'super') {
-                                                                    setScanMode('super');
+                                                                    // Super Scan ditunda ('SEGERA').
                                                                 }
                                                             }}
                                                         >
@@ -1763,7 +1791,7 @@ function App() {
                                                                         <Activity size={14} className="text-cyan-400 mt-0.5 shrink-0" />
                                                                         <div className="flex flex-col min-w-0 text-left">
                                                                             <span className="font-medium text-cyan-300 text-xs">Auto Scan (Background)</span>
-                                                                            <span className="text-[10px] text-zinc-500 font-normal leading-tight">Monitor otomatis tiap 10 detik di background</span>
+                                                                            <span className="text-[10px] text-zinc-500 font-normal leading-tight">Pantau otomatis di background + scan saat ada perangkat baru</span>
                                                                         </div>
                                                                     </div>
                                                                 </SelectItem>
@@ -1783,6 +1811,24 @@ function App() {
                                                             </SelectContent>
                                                         </Select>
                                                     </motion.div>
+                                                )}
+
+                                                {/* Free tier: tombol Scan sederhana + ikon (tanpa mode otomatis) */}
+                                                {!isScanning && !canAutoScan && (
+                                                    <motion.button
+                                                        key="scan-simple-button"
+                                                        type="button"
+                                                        initial={{ opacity: 0, scale: 0.95 }}
+                                                        animate={{ opacity: 1, scale: 1 }}
+                                                        exit={{ opacity: 0, scale: 0.95 }}
+                                                        transition={{ duration: 0.2 }}
+                                                        onClick={() => { setIsTableCollapsed(false); scan(); }}
+                                                        className="h-8 px-3 py-0 text-xs font-medium rounded-lg outline-none flex items-center gap-2 border border-white/[0.15] bg-white/[0.08] hover:bg-white/[0.14] text-white transition-all"
+                                                        title="Pindai jaringan sekarang"
+                                                    >
+                                                        <Radar size={13} className="text-zinc-300 shrink-0" />
+                                                        <span className="font-medium">Scan</span>
+                                                    </motion.button>
                                                 )}
                                             </AnimatePresence>
 

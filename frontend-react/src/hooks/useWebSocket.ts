@@ -390,6 +390,14 @@ export function useWebSocket() {
             refreshAbortControllerRef.current?.abort();
             const generation = refreshSequencerRef.current.startGeneration();
             void refreshAuthoritativeState(generation);
+            // Pulihkan preferensi Auto Scan tersimpan ke backend (yang default OFF setiap start).
+            // Enforcement per-tier (free dipaksa OFF) dilakukan di App setelah lisensi diketahui.
+            try {
+                const savedAuto = localStorage.getItem('sentinel_autoscan');
+                if (savedAuto !== null) {
+                    newSocket.emit('setAutoScan', { enabled: savedAuto === '1' });
+                }
+            } catch {}
         });
 
         newSocket.on('licenseStatus', (data: AuthStatusResponse) => {
@@ -906,6 +914,15 @@ export function useWebSocket() {
         socket.emit('scan');
     };
 
+    // Aktif/nonaktifkan Auto Scan di backend (watchdog + scan-saat-perangkat-baru + scan seketika).
+    // Pilihan disimpan agar diingat lintas sesi.
+    const setAutoScan = (enabled: boolean) => {
+        try { localStorage.setItem('sentinel_autoscan', enabled ? '1' : '0'); } catch {}
+        if (socket?.connected) {
+            socket.emit('setAutoScan', { enabled });
+        }
+    };
+
     const block = (ip: string, gatewayIp: string) => {
         if (!socket?.connected) {
             setError('Tidak dapat memblokir perangkat saat koneksi backend terputus. Tunggu hingga tersambung lalu coba lagi.');
@@ -1367,6 +1384,7 @@ export function useWebSocket() {
         rogueDhcpAlert,
         clearRogueDhcpAlert,
         scan,
+        setAutoScan,
         block,
         unblock,
         deleteDevice,

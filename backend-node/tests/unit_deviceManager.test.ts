@@ -1869,4 +1869,63 @@ export async function runDeviceManagerTests() {
         console.log('  ✓ Profile refresh: mid-persistence generation changes reject cleanly');
     }
 
+    // ===== Auto Scan gating: real feature, not cosmetic =====
+    {
+        const python: any = new EventEmitter();
+        const db: any = { getDeviceByMac: async () => undefined };
+        const manager = new DeviceManager(python, db);
+        let scans = 0;
+        (manager as any).scanNetwork = async () => { scans += 1; return []; };
+
+        // Enabling Auto Scan triggers exactly one immediate scan.
+        const result = manager.setAutoScan(true);
+        assert.strictEqual(result, true, 'setAutoScan(true) returns enabled=true');
+        assert.strictEqual(manager.isAutoScanEnabled(), true);
+        assert.strictEqual(scans, 1, 'enabling Auto Scan scans immediately');
+
+        // Re-enabling (no change) does NOT scan again.
+        manager.setAutoScan(true);
+        assert.strictEqual(scans, 1, 'idempotent enable does not re-scan');
+
+        // Disabling stops auto scanning.
+        assert.strictEqual(manager.setAutoScan(false), false);
+        assert.strictEqual(manager.isAutoScanEnabled(), false);
+        console.log('  ✓ Auto Scan: enabling scans immediately, idempotent, disables cleanly');
+    }
+
+    {
+        const python: any = new EventEmitter();
+        const db: any = {
+            getDeviceByMac: async () => undefined,
+            updateDeviceDhcpProfile: async () => {}
+        };
+        const manager = new DeviceManager(python, db);
+        let debounced = 0;
+        (manager as any).debouncedScan = () => { debounced += 1; };
+        (manager as any).scanNetwork = async () => [];
+
+        const newDeviceEvent = {
+            mac: 'aa:bb:cc:dd:ee:77',
+            ip: '192.168.1.77',
+            hostname: 'New-Phone',
+            vendor_class: 'android-dhcp-14',
+            message_type: 'REQUEST'
+        };
+
+        // Auto Scan OFF ("Scan saja"): a brand-new device must NOT trigger a follow-up scan.
+        (manager as any).autoScanEnabled = false;
+        await (manager as any)._handleDhcpEvent(newDeviceEvent);
+        assert.strictEqual(debounced, 0, 'new device does not auto-scan when Auto Scan is off');
+
+        // Auto Scan ON: a brand-new device triggers a follow-up scan.
+        const manager2 = new DeviceManager(python, db);
+        let debounced2 = 0;
+        (manager2 as any).debouncedScan = () => { debounced2 += 1; };
+        (manager2 as any).scanNetwork = async () => [];
+        (manager2 as any).autoScanEnabled = true;
+        await (manager2 as any)._handleDhcpEvent({ ...newDeviceEvent, mac: 'aa:bb:cc:dd:ee:88', ip: '192.168.1.88' });
+        assert.strictEqual(debounced2, 1, 'new device auto-scans when Auto Scan is on');
+        console.log('  ✓ Auto Scan: new-device follow-up scan gated by the toggle');
+    }
+
 }

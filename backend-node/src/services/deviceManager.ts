@@ -146,6 +146,10 @@ interface PendingGamingDisable {
 export class DeviceManager extends EventEmitter {
     private devices: Map<string, Device> = new Map();
     private scanning: boolean = false;
+    // Auto Scan sebagai fitur NYATA (bukan kosmetik): saat false ("Scan saja"), tak ada scan
+    // otomatis latar (watchdog) maupun scan susulan saat perangkat baru masuk. Hanya scan
+    // manual (tombol), scan saat buka aplikasi, dan scan reaktif saat ganti jaringan yang jalan.
+    private autoScanEnabled: boolean = false;
     private inFlightScan: Promise<Device[]> | null = null;
     private inFlightDhcpOptimization: Promise<DhcpOptimizationResult> | null = null;
     private inFlightDhcpOptimizationGeneration: number | null = null;
@@ -391,8 +395,9 @@ export class DeviceManager extends EventEmitter {
                     vendor_class: data.vendor_class
                 });
 
-                // Debounce network scan: Hanya jadwalkan scan bila ada perangkat baru yang belum terdaftar di database/memory
-                if (isNewDevice && !this.inFlightDhcpOptimization) {
+                // Auto-scan saat perangkat baru masuk — HANYA bila Auto Scan aktif. Di mode
+                // "Scan saja", perangkat baru tetap muncul (dari DHCP pasif) tanpa scan aktif susulan.
+                if (isNewDevice && this.autoScanEnabled && !this.inFlightDhcpOptimization) {
                     this.debouncedScan();
                 }
             }
@@ -522,9 +527,10 @@ export class DeviceManager extends EventEmitter {
         }, RETENTION_SWEEP_INTERVAL_MS);
         retentionTimer.unref();
 
-        // Background Liveness Watchdog: Periodically verify active network state every 25 seconds
+        // Background Liveness Watchdog: verifikasi state jaringan tiap 25 detik — HANYA saat Auto Scan
+        // aktif. Di mode "Scan saja" watchdog diam total (tak ada scan latar).
         const watchdogTimer = setInterval(() => {
-            if (!this.scanning && this.devices.size > 0) {
+            if (this.autoScanEnabled && !this.scanning && this.devices.size > 0) {
                 this.scanNetwork().catch(err => console.warn('Notice background watchdog scan:', err.message));
             }
         }, 25000);
@@ -558,6 +564,35 @@ export class DeviceManager extends EventEmitter {
             }
         }, delayMs);
         this.dhcpScanDebounceTimer.unref();
+    }
+
+    /**
+     * Aktifkan/nonaktifkan Auto Scan. Saat diaktifkan, langsung menjalankan satu scan
+     * seketika; watchdog latar & scan-saat-perangkat-baru menjadi aktif. Saat dimatikan,
+     * seluruh scan otomatis berhenti (mode "Scan saja"): pembatalan debounce yang tertunda
+     * agar tak ada scan latar yang menyusul. Mengembalikan status akhir.
+     */
+    setAutoScan(enabled: boolean): boolean {
+        const next = Boolean(enabled);
+        const changed = next !== this.autoScanEnabled;
+        this.autoScanEnabled = next;
+
+        if (!next && this.dhcpScanDebounceTimer) {
+            clearTimeout(this.dhcpScanDebounceTimer);
+            this.dhcpScanDebounceTimer = null;
+        }
+
+        this.emit('autoScanChanged', { enabled: this.autoScanEnabled });
+
+        // Mengaktifkan Auto Scan langsung memicu satu scan seketika.
+        if (next && changed && !this.scanning) {
+            this.scanNetwork().catch(err => console.warn('Notice immediate auto-scan:', err?.message));
+        }
+        return this.autoScanEnabled;
+    }
+
+    isAutoScanEnabled(): boolean {
+        return this.autoScanEnabled;
     }
 
     isScanning(): boolean {

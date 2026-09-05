@@ -64,6 +64,10 @@ export class WebSocketManager {
             this.io.emit('devicesUpdate', devices);
         });
 
+        this.deviceManager.on('autoScanChanged', (data) => {
+            this.io.emit('autoScanChanged', data);
+        });
+
         this.deviceManager.on('deviceUpdated', (device) => {
             this.io.emit('deviceUpdate', device);
         });
@@ -184,6 +188,17 @@ export class WebSocketManager {
             socket.on('scan', async () => {
                 try {
                     await this.deviceManager.scanNetwork();
+                } catch (error: any) {
+                    socket.emit('scanError', { error: error.message });
+                }
+            });
+
+            // Auto Scan toggle: mengaktifkan → scan seketika + watchdog/new-device-scan hidup;
+            // menonaktifkan → mode "Scan saja" (tanpa scan otomatis latar).
+            socket.on('setAutoScan', (data: { enabled?: boolean }) => {
+                try {
+                    const enabled = this.deviceManager.setAutoScan(Boolean(data?.enabled));
+                    socket.emit('autoScanChanged', { enabled });
                 } catch (error: any) {
                     socket.emit('scanError', { error: error.message });
                 }
