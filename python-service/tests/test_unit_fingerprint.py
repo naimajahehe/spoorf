@@ -68,6 +68,70 @@ class TestCoreFingerprint(unittest.TestCase):
         )
         self.assertEqual(get_vendor("00:11:22:33:44:55"), "Example Networks")
 
+    @patch("src.core.fingerprint.vendors.get_oui_record")
+    def test_get_vendor_does_not_match_acer_inside_kronback_tracers(self, mock_get_oui_record):
+        mock_get_oui_record.return_value = OUIRecord(
+            organization="Kronback Tracers",
+            assignment="001122",
+            prefix_bits=24,
+        )
+
+        self.assertEqual(get_vendor("00:11:22:33:44:55"), "Kronback Tracers")
+
+    @patch("src.core.fingerprint.vendors.get_oui_record")
+    def test_get_vendor_does_not_match_acer_inside_apacer(self, mock_get_oui_record):
+        mock_get_oui_record.return_value = OUIRecord(
+            organization="Apacer Technology Inc.",
+            assignment="001122",
+            prefix_bits=24,
+        )
+
+        self.assertEqual(get_vendor("00:11:22:33:44:55"), "Apacer Technology Inc.")
+
+    @patch("src.core.fingerprint.vendors.get_oui_record")
+    def test_get_vendor_does_not_match_intel_inside_intelligent(self, mock_get_oui_record):
+        mock_get_oui_record.return_value = OUIRecord(
+            organization="Intelligent Technology Co., Ltd.",
+            assignment="001122",
+            prefix_bits=24,
+        )
+
+        self.assertEqual(
+            get_vendor("00:11:22:33:44:55"),
+            "Intelligent Technology Co., Ltd.",
+        )
+
+    @patch("src.core.fingerprint.vendors.get_oui_record")
+    def test_get_vendor_preserves_intended_aliases(self, mock_get_oui_record):
+        aliases = (
+            ("Apple Computer, Inc.", "Apple"),
+            ("Samsung Electronics Co., Ltd.", "Samsung"),
+            ("TP-Link Corporation Limited", "TP-Link"),
+        )
+
+        for organization, expected in aliases:
+            with self.subTest(organization=organization):
+                mock_get_oui_record.return_value = OUIRecord(
+                    organization=organization,
+                    assignment="001122",
+                    prefix_bits=24,
+                )
+                self.assertEqual(get_vendor("00:11:22:33:44:55"), expected)
+
+    @patch("src.core.fingerprint.vendors.get_oui_record")
+    def test_get_vendor_prefers_specific_multi_token_alias(self, mock_get_oui_record):
+        mock_get_oui_record.return_value = OUIRecord(
+            organization="Cisco Meraki LLC",
+            assignment="001122",
+            prefix_bits=24,
+        )
+
+        with patch(
+            "src.core.fingerprint.vendors._VENDOR_ALIASES",
+            (("cisco meraki", "Cisco Meraki"), ("cisco", "Cisco")),
+        ):
+            self.assertEqual(get_vendor("00:11:22:33:44:55"), "Cisco Meraki")
+
     def test_oui_registry_prefers_longest_registered_prefix(self):
         """Registry lookup should prefer MA-S over MA-M over MA-L."""
         registry = OUIRegistry.from_mapping({

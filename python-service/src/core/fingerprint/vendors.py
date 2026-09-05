@@ -2,6 +2,8 @@
 Vendor & OUI Database + MAC Randomization Heuristics
 """
 
+import re
+
 from .oui_registry import OUIRecord, OUIRegistry, get_oui_record
 
 
@@ -42,12 +44,25 @@ _VENDOR_ALIASES = (
     ("raspberry pi", "Raspberry Pi"),
     ("nokia", "Nokia"),
 )
+_TOKEN_RE = re.compile(r"[0-9A-Za-z]+")
+
+
+def _contains_token_sequence(haystack: tuple[str, ...], needle: tuple[str, ...]) -> bool:
+    if not needle or len(needle) > len(haystack):
+        return False
+    limit = len(haystack) - len(needle) + 1
+    for index in range(limit):
+        if haystack[index:index + len(needle)] == needle:
+            return True
+    return False
 
 
 def _compat_vendor_label(organization: str) -> str:
-    lowered = organization.casefold()
+    lowered = (organization or "").casefold()
+    tokens = tuple(_TOKEN_RE.findall(lowered))
     for needle, label in _VENDOR_ALIASES:
-        if needle in lowered:
+        alias_tokens = tuple(_TOKEN_RE.findall(needle.casefold()))
+        if _contains_token_sequence(tokens, alias_tokens):
             return label
     return organization
 
