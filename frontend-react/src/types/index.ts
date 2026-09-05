@@ -43,6 +43,29 @@ export interface Device {
     ipv6_global?: string;
     ipv6_addresses?: string[];
     is_dual_stack?: boolean;
+    // Passive identity profiling (evidence-fusion classifier output).
+    profile_status?: 'high' | 'medium' | 'unknown';
+    vendor_confidence?: number;
+    type_confidence?: number;
+    hostname_confidence?: number;
+    profile_evidence?: string[];
+    profiled_at?: string;
+    profile_version?: number;
+}
+
+export interface ProfileRefreshSummary {
+    visible_count: number;
+    high_confidence_count: number;
+    medium_confidence_count: number;
+    unknown_count: number;
+    hostname_count: number;
+    coverage_percentage: number | null;
+    sources: Record<string, number>;
+    ap_isolation: Record<string, unknown>;
+    partial_failures: Array<{ sensor: string; error: string; target?: string }>;
+    duration_ms: number;
+    cached?: boolean;
+    cooldown_remaining_ms?: number;
 }
 
 export interface SpoofStatus {

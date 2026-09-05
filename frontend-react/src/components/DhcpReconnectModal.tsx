@@ -16,20 +16,20 @@ import {
     ShieldCheck,
     HelpCircle
 } from 'lucide-react';
-import { Device } from '../types';
+import { Device, ProfileRefreshSummary } from '../types';
 import { apiFetch } from '../api/client';
 import {
     calculateDhcpCoverage,
     hasDhcpEvidence
 } from '../lib/dhcpProfiling';
+import { calculateProfileCoverage } from '../lib/profileCoverage';
 import { cn } from '../lib/utils';
 
 interface Props {
     isOpen: boolean;
     devices: Device[];
     onClose: () => void;
-    onTriggerReScan: () => void;
-    onQuickReauth?: () => Promise<any>;
+    onProfileRefresh?: () => Promise<ProfileRefreshSummary>;
 }
 
 interface DhcpOptimizationResult {
@@ -50,15 +50,22 @@ export const DhcpReconnectModal: FC<Props> = ({
     isOpen,
     devices,
     onClose,
-    onQuickReauth
+    onProfileRefresh
 }) => {
     const [isOptimizing, setIsOptimizing] = useState(false);
-    const [isReauthing, setIsReauthing] = useState(false);
+    const [isProfiling, setIsProfiling] = useState(false);
     const [statusMessage, setStatusMessage] = useState<string | null>(null);
     const [lastOptimization, setLastOptimization] = useState<DhcpOptimizationResult | null>(null);
+    const [profileResult, setProfileResult] = useState<ProfileRefreshSummary | null>(null);
 
     const profilingStats = useMemo(
         () => calculateDhcpCoverage(devices),
+        [devices]
+    );
+    // Live client-side identity coverage over the visible devices, so the panel
+    // shows a meaningful baseline before any manual profiling pass is run.
+    const identityCoverage = useMemo(
+        () => calculateProfileCoverage(devices),
         [devices]
     );
     const eligibleDevices = useMemo(() => {
@@ -71,27 +78,29 @@ export const DhcpReconnectModal: FC<Props> = ({
         return Array.from(unique.values());
     }, [devices]);
 
-    const unknownCount = Math.max(
-        0,
-        profilingStats.eligible - profilingStats.dhcpProfiled
-    );
-
     if (!isOpen) return null;
 
-    const handleQuickReauth = async () => {
-        if (!onQuickReauth || unknownCount === 0) return;
-        setIsReauthing(true);
-        setStatusMessage(`⚡ Micro-cut serentak ${unknownCount} perangkat Unknown untuk memancing DHCP…`);
+    const handleProfileRefresh = async () => {
+        if (!onProfileRefresh || isProfiling) return;
+        setIsProfiling(true);
+        setStatusMessage('Mengumpulkan bukti identitas pasif untuk perangkat yang terlihat…');
         try {
-            await onQuickReauth();
-            setStatusMessage('✅ Selesai memancing reconnect — profil perangkat diperbarui.');
+            const summary = await onProfileRefresh();
+            setProfileResult(summary);
+            const high = summary?.high_confidence_count ?? 0;
+            const visible = summary?.visible_count ?? 0;
+            setStatusMessage(`Profiling selesai: ${high} dari ${visible} perangkat teridentifikasi keyakinan tinggi.`);
         } catch (e) {
-            setStatusMessage('⚠️ Gagal menjalankan Quick Re-Auth, coba lagi.');
+            setStatusMessage(
+                e instanceof Error
+                    ? `Profiling gagal: ${e.message}`
+                    : 'Profiling identitas gagal.'
+            );
         } finally {
             setTimeout(() => {
-                setIsReauthing(false);
+                setIsProfiling(false);
                 setStatusMessage(null);
-            }, 2800);
+            }, 3000);
         }
     };
 
@@ -292,39 +301,99 @@ export const DhcpReconnectModal: FC<Props> = ({
                             </div>
                         </div>
 
-                        {/* Metode 3: Quick Re-Auth Profiling (Micro-Cut Serentak) */}
-                        {onQuickReauth && (
-                            <div className="p-4 rounded-xl bg-gradient-to-r from-cyan-500/[0.06] to-blue-500/[0.02] border border-cyan-500/20 hover:border-cyan-500/40 transition-all flex flex-col sm:flex-row items-center justify-between gap-4">
-                                <div className="space-y-1.5 min-w-0">
-                                    <div className="flex items-center gap-2">
-                                        <div className="size-6 rounded-lg bg-cyan-500/10 flex items-center justify-center text-cyan-400">
-                                            <Zap size={13} />
+                        {/* Metode 3: Profiling Identitas Pasif Otomatis */}
+                        {onProfileRefresh && (
+                            <div className="p-4 rounded-xl bg-gradient-to-r from-cyan-500/[0.06] to-blue-500/[0.02] border border-cyan-500/20 transition-all space-y-3">
+                                <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+                                    <div className="space-y-1.5 min-w-0">
+                                        <div className="flex items-center gap-2">
+                                            <div className="size-6 rounded-lg bg-cyan-500/10 flex items-center justify-center text-cyan-400">
+                                                <ShieldCheck size={13} />
+                                            </div>
+                                            <h3 className="text-xs font-semibold text-white">Metode 3: Profiling Identitas Pasif Otomatis</h3>
+                                            <span className="px-1.5 py-0.5 rounded-full text-[9px] font-mono bg-emerald-500/15 text-emerald-300 border border-emerald-500/25">Tanpa Memutus Koneksi</span>
                                         </div>
-                                        <h3 className="text-xs font-semibold text-white">Metode 3: Quick Re-Auth Profiling (Otomatis)</h3>
-                                        <span className="px-1.5 py-0.5 rounded-full text-[9px] font-mono bg-cyan-500/15 text-cyan-300 border border-cyan-500/25">Micro-Cut Serentak</span>
+                                        <p className="text-[11px] text-zinc-400 leading-relaxed">
+                                            Membangun profil perangkat dari bukti yang perangkat itu sendiri paparkan (OUI, mDNS, DHCP, hostname). <strong>Tidak ada perangkat yang diputus.</strong> Nama & vendor bisa tetap tak tersedia di jaringan terisolasi; keyakinan tinggi mengutamakan kebenaran di atas mengisi setiap baris.
+                                        </p>
                                     </div>
-                                    <p className="text-[11px] text-zinc-400 leading-relaxed">
-                                        Memutus akses ~1,5 detik lalu memulihkannya <strong>serentak</strong> ke semua perangkat yang masih Unknown untuk <strong>memancing</strong> DHCP REQUEST baru. Gateway, perangkat ini, dan perangkat yang sedang diblokir tidak terganggu.
-                                    </p>
+
+                                    <button
+                                        type="button"
+                                        onClick={handleProfileRefresh}
+                                        disabled={isProfiling}
+                                        className={cn(
+                                            "shrink-0 py-2.5 px-4 rounded-xl text-xs font-semibold flex items-center justify-center gap-2 transition-all border outline-none",
+                                            isProfiling
+                                                ? "bg-cyan-500/20 text-cyan-300 border-cyan-500/40 cursor-wait animate-pulse"
+                                                : "bg-cyan-500 hover:bg-cyan-400 text-black border-cyan-400 shadow-lg shadow-cyan-500/20"
+                                        )}
+                                        title="Kumpulkan bukti identitas pasif untuk perangkat yang terlihat"
+                                    >
+                                        <Sparkles size={13} className={cn(isProfiling && "animate-pulse")} />
+                                        <span>{isProfiling ? 'Memprofil…' : 'Jalankan Profiling Identitas'}</span>
+                                    </button>
                                 </div>
 
-                                <button
-                                    type="button"
-                                    onClick={handleQuickReauth}
-                                    disabled={isReauthing || unknownCount === 0}
-                                    className={cn(
-                                        "shrink-0 py-2.5 px-4 rounded-xl text-xs font-semibold flex items-center justify-center gap-2 transition-all border outline-none",
-                                        isReauthing
-                                            ? "bg-cyan-500/20 text-cyan-300 border-cyan-500/40 cursor-wait animate-pulse"
-                                            : unknownCount === 0
-                                                ? "bg-white/[0.03] text-zinc-600 border-white/[0.06] cursor-not-allowed opacity-50"
-                                                : "bg-cyan-500 hover:bg-cyan-400 text-black border-cyan-400 shadow-lg shadow-cyan-500/20"
-                                    )}
-                                    title={unknownCount === 0 ? 'Semua perangkat sudah ter-profiling' : `Pancing ${unknownCount} perangkat Unknown`}
-                                >
-                                    <Zap size={13} className={cn(isReauthing && "animate-pulse")} />
-                                    <span>{isReauthing ? 'Memancing…' : `⚡ Quick Re-Auth (${unknownCount})`}</span>
-                                </button>
+                                {/* Coverage summary (fresh result if available, else live baseline) */}
+                                {(() => {
+                                    const visible = profileResult?.visible_count ?? identityCoverage.visible;
+                                    const high = profileResult?.high_confidence_count ?? identityCoverage.highConfidence;
+                                    const medium = profileResult?.medium_confidence_count ?? identityCoverage.mediumConfidence;
+                                    const unknown = profileResult?.unknown_count ?? identityCoverage.unknown;
+                                    const hostname = profileResult?.hostname_count ?? identityCoverage.hostnameCount;
+                                    const coverage = profileResult
+                                        ? profileResult.coverage_percentage
+                                        : identityCoverage.coveragePercentage;
+                                    const cells = [
+                                        { label: 'Terlihat', value: visible, tone: 'text-white' },
+                                        { label: 'Keyakinan tinggi', value: high, tone: 'text-emerald-400' },
+                                        { label: 'Sedang', value: medium, tone: 'text-amber-400' },
+                                        { label: 'Belum dikenali', value: unknown, tone: 'text-zinc-400' },
+                                        { label: 'Punya hostname', value: hostname, tone: 'text-cyan-400' },
+                                        { label: 'Cakupan', value: coverage === null ? 'N/A' : `${coverage}%`, tone: 'text-blue-400' }
+                                    ];
+                                    return (
+                                        <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
+                                            {cells.map((c) => (
+                                                <div key={c.label} className="p-2 rounded-lg bg-white/[0.025] border border-white/[0.06] text-center">
+                                                    <div className="text-[9px] text-zinc-500 uppercase tracking-wide">{c.label}</div>
+                                                    <div className={cn("mt-0.5 text-sm font-mono font-semibold", c.tone)}>{c.value}</div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    );
+                                })()}
+
+                                {profileResult && (
+                                    <div className="space-y-2">
+                                        <div className="flex flex-wrap items-center gap-2 text-[10px] font-mono text-zinc-400">
+                                            <span className="px-2 py-0.5 rounded bg-white/[0.03] border border-white/[0.06]">
+                                                Durasi {(profileResult.duration_ms / 1000).toFixed(1)}s
+                                            </span>
+                                            {Object.entries(profileResult.sources || {}).map(([src, count]) => (
+                                                <span key={src} className="px-2 py-0.5 rounded bg-white/[0.03] border border-white/[0.06]">
+                                                    {src}: {count as number}
+                                                </span>
+                                            ))}
+                                            {profileResult.ap_isolation && Object.keys(profileResult.ap_isolation).length > 0 && (
+                                                <span className="px-2 py-0.5 rounded bg-amber-500/10 border border-amber-500/20 text-amber-300">
+                                                    Isolasi AP dapat membatasi cakupan
+                                                </span>
+                                            )}
+                                        </div>
+                                        {profileResult.partial_failures && profileResult.partial_failures.length > 0 && (
+                                            <div className="text-[10px] text-amber-300 font-mono">
+                                                {profileResult.partial_failures.length} sensor gagal sebagian — hasil tetap ditampilkan apa adanya.
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+
+                                <div className="flex items-start gap-1.5 text-[10px] text-zinc-500 leading-relaxed">
+                                    <HelpCircle size={12} className="text-zinc-600 shrink-0 mt-0.5" />
+                                    <span>"Belum dikenali" adalah hasil yang disengaja ketika bukti belum cukup — bukan kegagalan. Perangkat privasi-tinggi memang bisa tak terprofilkan.</span>
+                                </div>
                             </div>
                         )}
 

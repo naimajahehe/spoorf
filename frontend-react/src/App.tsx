@@ -135,7 +135,7 @@ function App() {
         activityLog,
         pushActivity,
         clearActivityLog,
-        quickReauth,
+        profileRefresh,
         authStatus,
         authLogin,
         authLogout,
@@ -1915,8 +1915,7 @@ function App() {
                 isOpen={isDhcpModalOpen}
                 devices={devices}
                 onClose={() => setIsDhcpModalOpen(false)}
-                onTriggerReScan={() => scan()}
-                onQuickReauth={quickReauth}
+                onProfileRefresh={profileRefresh}
             />
 
             {/* In-App Floating Toast Notification Stack (Bottom-Right, Suppressed if Muted or Popover Open) */}

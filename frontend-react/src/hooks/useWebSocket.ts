@@ -757,22 +757,32 @@ export function useWebSocket() {
             }
         });
 
-        newSocket.on('quickReauthStarted', (d: { count?: number }) => {
+        newSocket.on('profileRefreshStarted', (d: { count?: number }) => {
             pushActivity({
-                category: 'device', tool: 'dhcp.reauth',
-                title: 'Quick Re-Auth dimulai',
-                description: `Memancing ${d?.count ?? 0} perangkat Unknown mengirim ulang DHCP (micro-cut serentak)…`,
+                category: 'device', tool: 'identity.profiling',
+                title: 'Profiling identitas dimulai',
+                description: `Mengumpulkan bukti pasif untuk ${d?.count ?? 0} perangkat terlihat — tanpa memutus koneksi.`,
                 status: 'info'
             });
         });
 
-        newSocket.on('quickReauthDone', (d: { count?: number }) => {
+        newSocket.on('profileRefreshDone', (d: { count?: number; high_confidence_count?: number }) => {
             pushActivity({
-                category: 'device', tool: 'dhcp.reauth',
-                title: 'Quick Re-Auth selesai',
-                description: `Selesai memancing ${d?.count ?? 0} perangkat — profil diperbarui via handshake DHCP.`,
+                category: 'device', tool: 'identity.profiling',
+                title: 'Profiling identitas selesai',
+                description: `Selesai memprofil ${d?.count ?? 0} perangkat — ${d?.high_confidence_count ?? 0} teridentifikasi keyakinan tinggi.`,
                 status: 'success'
             });
+        });
+
+        // Legacy compatibility listeners. The backend still mirrors the deprecated
+        // quick-reauth events, but they carry `deprecated: true`; suppress their
+        // duplicate activity entries whenever the operation is a profile refresh.
+        newSocket.on('quickReauthStarted', (d: { operation?: string; deprecated?: boolean }) => {
+            if (d?.deprecated || d?.operation === 'profile_refresh') return;
+        });
+        newSocket.on('quickReauthDone', (d: { operation?: string; deprecated?: boolean }) => {
+            if (d?.deprecated || d?.operation === 'profile_refresh') return;
         });
 
         newSocket.on('gatewayDnsQuery', (data: GatewayDnsLog) => {
@@ -978,17 +988,19 @@ export function useWebSocket() {
         }
     };
 
-    const quickReauth = async () => {
+    // Run one safe, passive identity-profiling pass over the currently visible
+    // devices. Collects fresh evidence only — never disconnects a target.
+    const profileRefresh = async () => {
         try {
-            const res = await apiFetch('/api/network/quick-reauth', {
+            const res = await apiFetch('/api/network/profile-refresh', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' }
             });
-            if (!res.ok) {
-                const data = await res.json().catch(() => ({}));
-                throw new Error(data.error || 'Gagal menjalankan Quick Re-Auth');
+            const payload = await res.json().catch(() => ({}));
+            if (!res.ok || payload.success === false) {
+                throw new Error(payload.error || 'Gagal menjalankan profiling perangkat');
             }
-            return await res.json();
+            return payload.data ?? payload;
         } catch (err: any) {
             setError(err.message);
             throw err;
@@ -1389,7 +1401,7 @@ export function useWebSocket() {
         activityLog,
         pushActivity,
         clearActivityLog,
-        quickReauth,
+        profileRefresh,
         authStatus,
         authLogin,
         authLogout,

@@ -93,7 +93,7 @@ try {
 
     const modalSource = readFileSync('src/components/DhcpReconnectModal.tsx', 'utf8');
     assert.equal(
-        (modalSource.match(/await onQuickReauth\(\)/g) || []).length,
+        (modalSource.match(/await onProfileRefresh\(\)/g) || []).length,
         1,
         'manual profile refresh invokes its endpoint callback exactly once'
     );

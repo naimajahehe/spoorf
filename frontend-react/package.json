@@ -8,6 +8,7 @@
     "build": "tsc && vite build",
     "test:dhcp-profiling": "node scripts/test-dhcp-profiling.mjs",
     "test:refresh-sequencer": "node scripts/test-refresh-sequencer.mjs",
+    "test:profile-coverage": "node scripts/test-profile-coverage.mjs",
     "preview": "vite preview"
   },
   "dependencies": {
