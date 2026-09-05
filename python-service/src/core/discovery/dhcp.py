@@ -85,6 +85,7 @@ class DHCPDiscoveredCache:
 
             if not norm_mac and not clean_ip:
                 return
+            observed_at = float(time.time())
 
             # Ambil entri lama jika ada (berdasarkan MAC sebagai identitas tunggal)
             old_entry = self._cache_by_mac.get(norm_mac, {}) if norm_mac else {}
@@ -109,7 +110,7 @@ class DHCPDiscoveredCache:
                 'is_release': entry.get('is_release') if entry.get('is_release') is not None else old_entry.get('is_release', False),
                 'is_decline': entry.get('is_decline') if entry.get('is_decline') is not None else old_entry.get('is_decline', False),
                 'last_seen': entry.get('last_seen', time.strftime("%Y-%m-%d %H:%M:%S")),
-                'last_seen_ts': entry.get('last_seen_ts') or old_entry.get('last_seen_ts') or time.time()
+                'last_seen_ts': observed_at,
             }
 
             # Simpan ke cache primer MAC

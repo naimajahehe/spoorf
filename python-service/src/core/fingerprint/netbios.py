@@ -6,7 +6,12 @@ import socket
 from typing import Dict, Tuple
 from scapy.all import IP, UDP, DNS, DNSQR, sr1
 
-def query_netbios(ip: str, timeout: float = 0.25) -> Dict[str, str]:
+def query_netbios(
+    ip: str,
+    timeout: float = 0.25,
+    *,
+    strict: bool = False,
+) -> Dict[str, str]:
     """Query NetBIOS Name Service (port 137 UDP) untuk Windows/Samba."""
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
@@ -43,8 +48,9 @@ def query_netbios(ip: str, timeout: float = 0.25) -> Dict[str, str]:
                     user = name
 
             return {'hostname': hostname, 'workgroup': workgroup, 'user': user}
-    except:
-        pass
+    except Exception:
+        if strict:
+            raise
     return {'hostname': '', 'workgroup': '', 'user': ''}
 
 def query_mdns(ip: str, timeout: float = 0.25) -> str:

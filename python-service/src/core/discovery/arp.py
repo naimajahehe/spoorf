@@ -80,7 +80,7 @@ def probe_sleeping_host_via_gateway_arp(
     )
 
 
-def get_mac_from_arp(ip: str) -> str:
+def get_mac_from_arp(ip: str, *, strict: bool = False) -> str:
     """Ambil MAC address untuk IP tertentu dari ARP cache kernel OS."""
     try:
         if sys.platform == 'win32':
@@ -100,10 +100,16 @@ def get_mac_from_arp(ip: str) -> str:
             if matches:
                 return matches[0][1].lower()
         return ""
-    except:
+    except Exception:
+        if strict:
+            raise
         return ""
 
-def collect_from_arp_cache(discovered: Dict[str, str]) -> None:
+def collect_from_arp_cache(
+    discovered: Dict[str, str],
+    *,
+    strict: bool = False,
+) -> None:
     """Kumpulkan IP & MAC dari tabel ARP lokal OS (< 0.05s)."""
     try:
         self_mac = (get_self_mac() or '').lower().replace('-', ':')
@@ -154,6 +160,8 @@ def collect_from_arp_cache(discovered: Dict[str, str]) -> None:
                     discovered[ip] = norm_mac
     except Exception as e:
         logger.debug(f"ARP cache read notice: {e}")
+        if strict:
+            raise
 
 def collect_from_arp_broadcast(discovered: Dict[str, str], timeout: float = 1.0) -> None:
     """Active Layer 2 ARP Request Broadcast ke seluruh subnet via Scapy srp()."""

@@ -4,6 +4,7 @@ Multicast Discovery: SSDP (UPnP) & mDNS (Bonjour)
 
 import socket
 import re
+import time
 import xml.etree.ElementTree as ET
 from urllib.request import urlopen, Request
 import urllib.parse
@@ -16,6 +17,7 @@ _MDNS_DISCOVERED: Dict[str, Dict[str, str]] = {}
 # 512KB = ribuan kali lebih besar dari deskriptor UPnP nyata (~1–50KB), jadi tak ada
 # perangkat sah yang terpotong, tetapi mencegah DoS kehabisan memori dari respons raksasa.
 MAX_SSDP_DESCRIPTOR_BYTES = 512 * 1024
+MAX_IDENTITY_RESPONSES_PER_FAMILY = 64
 
 _IDENTITY_QUERIES = {
     socket.AF_INET: (
@@ -222,6 +224,7 @@ def collect_identity_multicast(timeout: float = 0.8) -> Dict[str, Any]:
     errors = []
     partial_failures = []
     per_run = {"ssdp": {}, "mdns": {}, "llmnr": {}}
+    receive_window = min(max(0.01, float(timeout)), 10.0)
 
     for family in (socket.AF_INET, socket.AF_INET6):
         queries = _IDENTITY_QUERIES[family]
@@ -232,7 +235,7 @@ def collect_identity_multicast(timeout: float = 0.8) -> Dict[str, Any]:
                     sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
                 else:
                     sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_HOPS, 2)
-                sock.settimeout(max(0.01, float(timeout)))
+                sock.settimeout(receive_window)
                 for name, payload, destination in queries:
                     try:
                         sock.sendto(payload, destination)
@@ -242,7 +245,13 @@ def collect_identity_multicast(timeout: float = 0.8) -> Dict[str, Any]:
                         errors.append({"protocol": name, "error": message})
                         partial_failures.append({"sensor": name, "error": message})
 
-                while True:
+                deadline = time.monotonic() + receive_window
+                response_count = 0
+                while response_count < MAX_IDENTITY_RESPONSES_PER_FAMILY:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    sock.settimeout(max(0.001, min(receive_window, remaining)))
                     try:
                         data, address = sock.recvfrom(4096)
                     except socket.timeout:
@@ -255,6 +264,7 @@ def collect_identity_multicast(timeout: float = 0.8) -> Dict[str, Any]:
                         })
                         break
 
+                    response_count += 1
                     ip = str(address[0]).split("%", 1)[0]
                     port = int(address[1]) if len(address) > 1 else 0
                     if data.startswith(b"HTTP/"):

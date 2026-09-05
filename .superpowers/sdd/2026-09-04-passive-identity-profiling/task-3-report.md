@@ -269,3 +269,119 @@ helpers. No live network test was performed.
 - IPv6 multicast delivery can legitimately be reported as a partial failure on
   hosts without a usable IPv6 multicast route. IPv4 evidence remains usable, and
   zero successful identity requests correctly produces HTTP 503.
+
+## Fix Round 1
+
+### Review Findings Addressed
+
+1. Profile assembly now merges current-call SSDP, mDNS, and LLMNR evidence from
+   the target IPv4 address and every IPv6 address validated against the current
+   NDP MAC pairing before invoking `assess_device_profile()`.
+2. Each IPv4/IPv6 multicast receive loop now has a monotonic absolute deadline
+   and a hard cap of 64 responses. The sending socket remains the receiving
+   socket, with exactly one send attempt per protocol and address family.
+3. Zero multicast deliveries are now a recorded partial failure when ARP, NDP,
+   fresh DHCP/DHCPv6, or another live sensor produces usable target evidence.
+   A true zero-evidence result still raises `ProfileCollectorUnavailableError`;
+   static OUI classifier evidence cannot make that request successful.
+   This supersedes the original report's blanket zero-delivery 503 note.
+4. ARP cache, gateway ARP, NDP cache, NetBIOS, reverse DNS, and IPv6 liveness
+   helpers now support opt-in strict error reporting while preserving their
+   existing non-raising default behavior. Profile observation uses strict mode
+   and returns control-character-normalized, length-bounded sensor errors in
+   `partial_failures`.
+5. Every DHCP/DHCPv6 cache update now writes a fresh numeric `last_seen_ts`,
+   including smart merges and renewals, so the five-minute evidence window
+   advances and expires correctly.
+
+### TDD Evidence
+
+The new regression tests were added before the production changes.
+
+RED command:
+
+```powershell
+Set-Location python-service
+& 'D:\spoorf\python-service\venv\Scripts\python.exe' -m unittest `
+  tests.test_unit_profile_observation `
+  tests.test_unit_discovery -q
+```
+
+Observed before implementation:
+
+```text
+Ran 59 tests in 1.663s
+FAILED (failures=8, errors=7)
+```
+
+Failures directly demonstrated missing IPv6 multicast merging, immediate
+zero-delivery rejection despite live evidence, absent strict helper modes,
+unsanitized/non-reportable sensor failures, unbounded multicast receives, and
+stale DHCP renewal timestamps.
+
+GREEN focused command:
+
+```powershell
+Set-Location python-service
+& 'D:\spoorf\python-service\venv\Scripts\python.exe' -m unittest `
+  tests.test_unit_profile_observation `
+  tests.test_unit_discovery `
+  tests.test_api_server `
+  tests.test_unit_spoofer -q
+```
+
+Observed:
+
+```text
+Ran 114 tests in 5.241s
+OK
+```
+
+Coverage includes ARP-only, NDP-only, and fresh-DHCP multicast-failure
+fallbacks; true total failure; static-OUI exclusion; all affected strict sensor
+paths without live I/O; the exact 64-response cap; deadline termination; and
+one socket send per protocol.
+
+### Full Verification
+
+Python:
+
+```text
+Ran 288 tests in 10.821s
+OK
+development: precision=1.000 coverage=0.857 unknown=0.143 (3/21)
+holdout: precision=1.000 coverage=0.889 unknown=0.111 (2/18)
+```
+
+Node:
+
+```text
+TEST RESULTS: 34 PASSED | 0 FAILED | 0.41s
+ALL NODE.JS TESTS PASSED SUCCESSFULLY!
+```
+
+`py_compile`, `git diff --check`, the forbidden active/spoofing call scan, and
+the production `micro_cut_batch` scan all passed. No live-network test was run.
+
+### Self-Review
+
+- Rechecked validation-before-I/O, controller/gateway immunity, RFC 1918 target
+  restrictions, and current-NDP IPv6 pairing.
+- Confirmed multicast evidence remains current-call-only and is joined only by
+  the target's validated addresses.
+- Confirmed receive work is bounded by both monotonic deadline and response cap.
+- Confirmed strict modes are opt-in, so existing scanner callers retain
+  non-raising behavior.
+- Confirmed zero-delivery success requires non-static observed evidence and that
+  the total-failure path remains HTTP 503 through the existing API mapping.
+- Confirmed DHCP timestamp refresh applies to both IPv4 and IPv6 cache updates.
+- Confirmed no scan, spoof, packet-forgery, RA, forwarding, or legacy
+  quick-reauth safety path was introduced.
+- Confirmed `frontend-react/src/lib/theme.ts` remains untracked and unstaged.
+
+### Concerns
+
+- The existing Wireshark manufacturer-database warning and Scapy/Cryptography
+  TripleDES deprecation warnings remain during Python test startup.
+- Multicast collection intentionally stops after 64 responses per address
+  family even if the LAN continues sending responses; this is the safety bound.

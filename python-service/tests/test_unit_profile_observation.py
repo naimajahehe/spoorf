@@ -7,6 +7,8 @@ from src.core.discovery.profile_observation import (
     MAX_PROFILE_WORKERS,
     ProfileCollectorUnavailableError,
     ProfileRefreshValidationError,
+    _fresh_dhcp_snapshot,
+    _reverse_dns,
     collect_profile_refresh,
 )
 
@@ -76,10 +78,10 @@ class TestProfileObservation(unittest.TestCase):
             )
         )
 
-        def fill_arp(result):
+        def fill_arp(result, **_kwargs):
             result.update(arp)
 
-        def fill_ndp(result):
+        def fill_ndp(result, **_kwargs):
             result.update(ndp)
 
         stack.enter_context(
@@ -427,7 +429,163 @@ class TestProfileObservation(unittest.TestCase):
             result["partial_failures"],
         )
 
-    def test_profile_refresh_rejects_total_multicast_failure(self):
+    def test_profile_refresh_uses_validated_ipv6_multicast_evidence(self):
+        captured = {}
+
+        def assess(**kwargs):
+            captured.update(kwargs)
+            return {
+                "vendor": "Unknown",
+                "device_type": "Unknown",
+                "hostname": kwargs["netbios_info"].get("hostname", ""),
+                "os": "Unknown",
+                "vendor_confidence": 0,
+                "type_confidence": 0,
+                "hostname_confidence": 0,
+                "profile_status": "unknown",
+                "profile_evidence": [],
+                "profiled_at": kwargs["observed_at"],
+                "profile_version": 1,
+            }
+
+        multicast = {
+            "delivery": {"attempted": 6, "succeeded": 6, "failed": 0},
+            "ssdp": {
+                "192.168.1.20": {"server": "IPv4 server"},
+                "fe80::20": {"friendly_name": "IPv6 television"},
+            },
+            "mdns": {
+                "192.168.1.20": {"hostname": "Living-Room"},
+                "fe80::20": {"model": "Samsung"},
+            },
+            "llmnr": {"fe80::20": {"hostname": "IPV6-HOST"}},
+            "partial_failures": [],
+        }
+        stack, _ = self._collector_patches(
+            multicast=multicast,
+            assess=assess,
+        )
+        with stack:
+            collect_profile_refresh(
+                [{
+                    "ip": "192.168.1.20",
+                    "mac": "00:07:ab:11:22:33",
+                    "ipv6_addresses": ["fe80::20"],
+                }],
+                observation_seconds=3,
+            )
+
+        self.assertEqual(captured["ssdp_info"]["server"], "IPv4 server")
+        self.assertEqual(
+            captured["ssdp_info"]["friendly_name"],
+            "IPv6 television",
+        )
+        self.assertEqual(captured["mdns_info"]["hostname"], "Living-Room")
+        self.assertEqual(captured["mdns_info"]["model"], "Samsung")
+        self.assertEqual(captured["netbios_info"]["hostname"], "IPV6-HOST")
+
+    def test_profile_refresh_zero_multicast_delivery_uses_live_arp_fallback(self):
+        multicast = {
+            "delivery": {
+                "attempted": 6,
+                "succeeded": 0,
+                "failed": 6,
+                "protocols": {},
+                "errors": [{"protocol": "ssdp_ipv4", "error": "no route"}],
+            },
+            "ssdp": {},
+            "mdns": {},
+            "llmnr": {},
+            "partial_failures": [{
+                "sensor": "ssdp_ipv4",
+                "error": "no route",
+            }],
+        }
+        stack, _ = self._collector_patches(multicast=multicast)
+        with stack:
+            result = collect_profile_refresh(
+                [{
+                    "ip": "192.168.1.20",
+                    "mac": "00:07:ab:11:22:33",
+                    "ipv6_addresses": ["fe80::20"],
+                }],
+                observation_seconds=3,
+            )
+
+        self.assertEqual(result["visible_count"], 1)
+        self.assertIn("ARP", result["devices"][0]["observed_sources"])
+        self.assertIn(
+            {"sensor": "ssdp_ipv4", "error": "no route"},
+            result["partial_failures"],
+        )
+
+    def test_profile_refresh_zero_multicast_delivery_uses_ndp_fallback(self):
+        multicast = {
+            "delivery": {"attempted": 6, "succeeded": 0, "failed": 6},
+            "ssdp": {},
+            "mdns": {},
+            "llmnr": {},
+            "partial_failures": [],
+        }
+        stack, _ = self._collector_patches(
+            arp={"192.168.1.1": "00:aa:bb:cc:dd:ee"},
+            multicast=multicast,
+        )
+        with stack:
+            result = collect_profile_refresh(
+                [{
+                    "ip": "192.168.1.20",
+                    "mac": "00:07:ab:11:22:33",
+                    "ipv6_addresses": ["fe80::20"],
+                }],
+                observation_seconds=3,
+            )
+
+        self.assertEqual(result["visible_count"], 1)
+        self.assertIn("NDP", result["devices"][0]["observed_sources"])
+
+    def test_profile_refresh_zero_multicast_delivery_uses_fresh_dhcp_fallback(self):
+        fresh = {
+            "c2:4e:ca:88:04:2d": {
+                "mac": "c2:4e:ca:88:04:2d",
+                "ip": "192.168.1.20",
+                "hostname": "Galaxy-Renewed",
+                "last_seen_ts": 900.0,
+            }
+        }
+        multicast = {
+            "delivery": {"attempted": 6, "succeeded": 0, "failed": 6},
+            "ssdp": {},
+            "mdns": {},
+            "llmnr": {},
+            "partial_failures": [],
+        }
+        stack, _ = self._collector_patches(
+            arp={"192.168.1.1": "00:aa:bb:cc:dd:ee"},
+            ndp={},
+            dhcp_snapshots=[fresh, fresh],
+            multicast=multicast,
+        )
+        stack.enter_context(
+            patch(
+                "src.core.discovery.profile_observation.time.time",
+                side_effect=[1000.0, 1000.0, 1000.1],
+            )
+        )
+        with stack:
+            result = collect_profile_refresh(
+                [{
+                    "ip": "192.168.1.20",
+                    "mac": "c2:4e:ca:88:04:2d",
+                    "ipv6_addresses": [],
+                }],
+                observation_seconds=3,
+            )
+
+        self.assertEqual(result["visible_count"], 1)
+        self.assertIn("DHCP", result["devices"][0]["observed_sources"])
+
+    def test_profile_refresh_rejects_true_total_collector_failure(self):
         multicast = {
             "delivery": {
                 "attempted": 6,
@@ -441,9 +599,122 @@ class TestProfileObservation(unittest.TestCase):
             "llmnr": {},
             "partial_failures": [],
         }
-        stack, _ = self._collector_patches(multicast=multicast)
+        stack, _ = self._collector_patches(
+            arp={"192.168.1.1": "00:aa:bb:cc:dd:ee"},
+            ndp={},
+            dhcp_snapshots=[{}, {}],
+            multicast=multicast,
+        )
         with stack, self.assertRaises(ProfileCollectorUnavailableError):
             collect_profile_refresh(
+                [{
+                    "ip": "192.168.1.20",
+                    "mac": "00:07:ab:11:22:33",
+                    "ipv6_addresses": [],
+                }],
+                observation_seconds=3,
+            )
+
+    def test_profile_refresh_records_sanitized_arp_cache_failure(self):
+        stack, _ = self._collector_patches()
+        error = OSError("arp\r\ncache\x00 failed")
+        with stack, patch(
+            "src.core.discovery.profile_observation.collect_from_arp_cache",
+            side_effect=error,
+        ) as collect_arp:
+            result = collect_profile_refresh(
+                [{
+                    "ip": "192.168.1.20",
+                    "mac": "00:07:ab:11:22:33",
+                    "ipv6_addresses": [],
+                }],
+                observation_seconds=3,
+            )
+
+        collect_arp.assert_called_once_with({}, strict=True)
+        self.assertIn(
+            {"sensor": "arp_cache", "error": "arp cache failed"},
+            result["partial_failures"],
+        )
+
+    def test_profile_refresh_records_sanitized_ndp_cache_failure(self):
+        stack, _ = self._collector_patches()
+        with stack, patch(
+            "src.core.discovery.profile_observation.collect_from_ndp_cache",
+            side_effect=OSError("ndp\ncache failed"),
+        ) as collect_ndp:
+            result = collect_profile_refresh(
+                [{
+                    "ip": "192.168.1.20",
+                    "mac": "00:07:ab:11:22:33",
+                    "ipv6_addresses": [],
+                }],
+                observation_seconds=3,
+            )
+
+        collect_ndp.assert_called_once_with({}, strict=True)
+        self.assertIn(
+            {"sensor": "ndp_cache", "error": "ndp cache failed"},
+            result["partial_failures"],
+        )
+
+    def test_profile_refresh_records_sanitized_netbios_failure(self):
+        stack, _ = self._collector_patches()
+        with stack, patch(
+            "src.core.discovery.profile_observation.query_netbios",
+            side_effect=OSError("netbios\tfailed"),
+        ) as netbios:
+            result = collect_profile_refresh(
+                [{
+                    "ip": "192.168.1.20",
+                    "mac": "00:07:ab:11:22:33",
+                    "ipv6_addresses": [],
+                }],
+                observation_seconds=3,
+            )
+
+        netbios.assert_called_once_with("192.168.1.20", strict=True)
+        self.assertIn(
+            {
+                "sensor": "netbios",
+                "target": "192.168.1.20",
+                "error": "netbios failed",
+            },
+            result["partial_failures"],
+        )
+
+    def test_profile_refresh_records_sanitized_reverse_dns_failure(self):
+        stack, _ = self._collector_patches()
+        with stack, patch(
+            "src.core.discovery.profile_observation._reverse_dns",
+            side_effect=OSError("dns\r\nfailed"),
+        ) as reverse_dns:
+            result = collect_profile_refresh(
+                [{
+                    "ip": "192.168.1.20",
+                    "mac": "00:07:ab:11:22:33",
+                    "ipv6_addresses": [],
+                }],
+                observation_seconds=3,
+            )
+
+        reverse_dns.assert_called_once_with("192.168.1.20", strict=True)
+        self.assertIn(
+            {
+                "sensor": "reverse_dns",
+                "target": "192.168.1.20",
+                "error": "dns failed",
+            },
+            result["partial_failures"],
+        )
+
+    def test_profile_refresh_records_sanitized_ipv6_liveness_failure(self):
+        stack, _ = self._collector_patches()
+        with stack, patch(
+            "src.core.discovery.profile_observation.verify_ipv6_alive",
+            side_effect=OSError("ndp\r\nprobe failed"),
+        ) as liveness:
+            result = collect_profile_refresh(
                 [{
                     "ip": "192.168.1.20",
                     "mac": "00:07:ab:11:22:33",
@@ -451,6 +722,59 @@ class TestProfileObservation(unittest.TestCase):
                 }],
                 observation_seconds=3,
             )
+
+        liveness.assert_called_once_with(
+            "00:07:ab:11:22:33",
+            "fe80::20",
+            self_mac="00:11:22:33:44:55",
+            timeout=0.35,
+            retries=0,
+            strict=True,
+        )
+        self.assertIn(
+            {
+                "sensor": "ipv6_liveness",
+                "target": "fe80::20",
+                "error": "ndp probe failed",
+            },
+            result["partial_failures"],
+        )
+
+    def test_reverse_dns_strict_mode_preserves_default_compatibility(self):
+        with patch(
+            "src.core.discovery.profile_observation.socket.gethostbyaddr",
+            side_effect=OSError("resolver unavailable"),
+        ):
+            self.assertEqual(_reverse_dns("192.168.1.20"), "")
+            with self.assertRaisesRegex(OSError, "resolver unavailable"):
+                _reverse_dns("192.168.1.20", strict=True)
+
+    def test_dhcp_renewal_advances_freshness_timestamp_and_then_expires(self):
+        from src.core.discovery.dhcp import DHCPDiscoveredCache
+
+        cache = DHCPDiscoveredCache()
+        mac = "02:aa:bb:cc:dd:ee"
+        with patch(
+            "src.core.discovery.dhcp.time.time",
+            side_effect=[100.0, 500.0],
+        ):
+            cache.update(
+                mac,
+                "192.168.1.20",
+                {"hostname": "Renewing-Host"},
+            )
+            first_seen = cache.get(mac)["last_seen_ts"]
+            cache.update(
+                mac,
+                "192.168.1.20",
+                {"hostname": "", "message_type": "RENEW"},
+            )
+
+        renewed = cache.get_unique_snapshot()
+        self.assertEqual(first_seen, 100.0)
+        self.assertEqual(renewed[mac]["last_seen_ts"], 500.0)
+        self.assertIn(mac, _fresh_dhcp_snapshot(renewed, 800.0))
+        self.assertNotIn(mac, _fresh_dhcp_snapshot(renewed, 800.1))
 
     def test_profile_refresh_uses_bounded_worker_pool(self):
         created_worker_counts = []

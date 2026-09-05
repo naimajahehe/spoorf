@@ -716,6 +716,96 @@ class TestCoreDiscovery(unittest.TestCase):
 
         self.assertTrue(all(sock.received_after_send for sock in sockets))
         self.assertEqual(result["delivery"]["attempted"], 6)
+        self.assertTrue(all(len(sock.sent) == 3 for sock in sockets))
+
+    def test_identity_multicast_caps_responses_per_address_family(self):
+        class RepeatingSocket:
+            def __init__(self):
+                self.sent = []
+                self.recv_count = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def setsockopt(self, *_args):
+                return None
+
+            def settimeout(self, _timeout):
+                return None
+
+            def sendto(self, payload, destination):
+                self.sent.append((payload, destination))
+                return len(payload)
+
+            def recvfrom(self, _size):
+                self.recv_count += 1
+                if self.recv_count > 70:
+                    raise socket.timeout()
+                return SSDP_RESPONSE_FIXTURE, ("192.168.1.20", 1900)
+
+        sockets = [RepeatingSocket(), RepeatingSocket()]
+        with patch(
+            "src.core.discovery.multicast.socket.socket",
+            side_effect=sockets,
+        ):
+            collect_identity_multicast(timeout=1.0)
+
+        self.assertEqual([sock.recv_count for sock in sockets], [64, 64])
+        self.assertTrue(all(len(sock.sent) == 3 for sock in sockets))
+
+    def test_identity_multicast_stops_at_absolute_deadline(self):
+        class ResponsiveSocket:
+            def __init__(self):
+                self.sent = []
+                self.recv_count = 0
+                self.timeouts = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def setsockopt(self, *_args):
+                return None
+
+            def settimeout(self, timeout):
+                self.timeouts.append(timeout)
+
+            def sendto(self, payload, destination):
+                self.sent.append((payload, destination))
+                return len(payload)
+
+            def recvfrom(self, _size):
+                self.recv_count += 1
+                if self.recv_count > 5:
+                    raise socket.timeout()
+                return MDNS_RESPONSE_FIXTURE, ("192.168.1.20", 5353)
+
+        clock = [0.0]
+
+        def monotonic():
+            current = clock[0]
+            clock[0] += 0.06
+            return current
+
+        sockets = [ResponsiveSocket(), ResponsiveSocket()]
+        with patch(
+            "src.core.discovery.multicast.socket.socket",
+            side_effect=sockets,
+        ), patch(
+            "src.core.discovery.multicast.time",
+            create=True,
+        ) as fake_time:
+            fake_time.monotonic.side_effect = monotonic
+            collect_identity_multicast(timeout=0.1)
+
+        self.assertTrue(all(0 < sock.recv_count < 6 for sock in sockets))
+        self.assertTrue(all(len(sock.sent) == 3 for sock in sockets))
+        self.assertTrue(all(sock.timeouts for sock in sockets))
 
     def test_identity_multicast_normalizes_current_call_packet_fixtures(self):
         from src.core.discovery import multicast
@@ -876,6 +966,71 @@ class TestCoreDiscovery(unittest.TestCase):
         entry = dhcp_cache.get(mac)
         self.assertIsNotNone(entry)
         self.assertEqual(entry['ip'], '192.168.1.88')
+
+    def test_netbios_query_has_opt_in_strict_error_reporting(self):
+        from src.core.fingerprint.netbios import query_netbios
+
+        with patch(
+            "src.core.fingerprint.netbios.socket.socket",
+            side_effect=OSError("netbios unavailable"),
+        ):
+            self.assertEqual(
+                query_netbios("192.168.1.20"),
+                {"hostname": "", "workgroup": "", "user": ""},
+            )
+            with self.assertRaisesRegex(OSError, "netbios unavailable"):
+                query_netbios("192.168.1.20", strict=True)
+
+    def test_arp_helpers_have_opt_in_strict_error_reporting(self):
+        from src.core.discovery.arp import collect_from_arp_cache, get_mac_from_arp
+
+        with patch(
+            "src.core.discovery.arp.subprocess.check_output",
+            side_effect=OSError("arp unavailable"),
+        ):
+            discovered = {}
+            collect_from_arp_cache(discovered)
+            self.assertEqual(discovered, {})
+            self.assertEqual(get_mac_from_arp("192.168.1.1"), "")
+            with self.assertRaisesRegex(OSError, "arp unavailable"):
+                collect_from_arp_cache({}, strict=True)
+            with self.assertRaisesRegex(OSError, "arp unavailable"):
+                get_mac_from_arp("192.168.1.1", strict=True)
+
+    def test_ndp_cache_has_opt_in_strict_error_reporting(self):
+        from src.core.discovery.ipv6_ndp import collect_from_ndp_cache
+
+        with patch(
+            "src.core.discovery.ipv6_ndp.subprocess.run",
+            side_effect=OSError("ndp unavailable"),
+        ):
+            discovered = {}
+            collect_from_ndp_cache(discovered)
+            self.assertEqual(discovered, {})
+            with self.assertRaisesRegex(OSError, "ndp unavailable"):
+                collect_from_ndp_cache({}, strict=True)
+
+    def test_ipv6_liveness_has_opt_in_strict_error_reporting(self):
+        from src.core.discovery.ipv6_ndp import verify_ipv6_alive
+
+        with patch(
+            "src.core.discovery.ipv6_ndp.srp",
+            side_effect=OSError("probe unavailable"),
+        ):
+            self.assertFalse(
+                verify_ipv6_alive(
+                    "00:07:ab:11:22:33",
+                    "fe80::20",
+                    retries=0,
+                )
+            )
+            with self.assertRaisesRegex(OSError, "probe unavailable"):
+                verify_ipv6_alive(
+                    "00:07:ab:11:22:33",
+                    "fe80::20",
+                    retries=0,
+                    strict=True,
+                )
 
     # ===== 4. SSDP Descriptor Fetch — M1 unbounded-read hardening =====
     def test_ssdp_descriptor_read_is_capped(self):

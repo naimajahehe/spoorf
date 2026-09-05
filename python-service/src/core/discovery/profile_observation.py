@@ -66,11 +66,73 @@ def _fresh_dhcp_snapshot(
     return fresh
 
 
-def _reverse_dns(ip: str) -> str:
+def _sanitize_sensor_error(error: Any) -> str:
+    raw = str(error).strip() or type(error).__name__
+    printable = "".join(character if character.isprintable() else " " for character in raw)
+    return " ".join(printable.split())[:200]
+
+
+def _append_partial_failure(
+    partial_failures: List[Dict[str, str]],
+    sensor: str,
+    error: Any,
+    *,
+    target: str = "",
+) -> None:
+    failure = {
+        "sensor": _sanitize_sensor_error(sensor or "unknown")[:80],
+        "error": _sanitize_sensor_error(error),
+    }
+    if target:
+        failure["target"] = _sanitize_sensor_error(target)[:128]
+    partial_failures.append(failure)
+
+
+def _extend_partial_failures(
+    partial_failures: List[Dict[str, str]],
+    failures: Any,
+) -> None:
+    for failure in failures or []:
+        if not isinstance(failure, dict):
+            continue
+        _append_partial_failure(
+            partial_failures,
+            failure.get("sensor") or "unknown",
+            failure.get("error") or "Unknown sensor failure",
+            target=str(failure.get("target") or ""),
+        )
+
+
+def _reverse_dns(ip: str, *, strict: bool = False) -> str:
     try:
         return str(socket.gethostbyaddr(ip)[0] or "").strip()
     except (OSError, socket.herror, socket.gaierror):
+        if strict:
+            raise
         return ""
+
+
+def _merge_multicast_evidence(
+    observations: Dict[str, Dict[str, Any]],
+    addresses: List[str],
+) -> Dict[str, Any]:
+    merged: Dict[str, Any] = {}
+    for address in addresses:
+        identity = (observations or {}).get(address, {})
+        if not isinstance(identity, dict):
+            continue
+        for key, value in identity.items():
+            if not value:
+                continue
+            if isinstance(value, list):
+                current = merged.setdefault(key, [])
+                if isinstance(current, list):
+                    for item in value:
+                        if item not in current:
+                            current.append(item)
+                continue
+            merged.setdefault(key, value)
+    return merged
 
 
 def _validate_topology() -> tuple[str, str, str, ipaddress.IPv4Network]:
@@ -188,13 +250,13 @@ def _capture_neighbor_snapshots(
     arp_snapshot: Dict[str, str] = {}
     ndp_snapshot: Dict[str, Dict[str, Any]] = {}
     try:
-        collect_from_arp_cache(arp_snapshot)
+        collect_from_arp_cache(arp_snapshot, strict=True)
     except Exception as error:
-        partial_failures.append({"sensor": "arp_cache", "error": str(error)})
+        _append_partial_failure(partial_failures, "arp_cache", error)
     try:
-        collect_from_ndp_cache(ndp_snapshot)
+        collect_from_ndp_cache(ndp_snapshot, strict=True)
     except Exception as error:
-        partial_failures.append({"sensor": "ndp_cache", "error": str(error)})
+        _append_partial_failure(partial_failures, "ndp_cache", error)
 
     return (
         {
@@ -241,7 +303,7 @@ def _capture_fresh_dhcp(
     try:
         return _fresh_dhcp_snapshot(dhcp_cache.get_unique_snapshot(), now)
     except Exception as error:
-        partial_failures.append({"sensor": sensor, "error": str(error)})
+        _append_partial_failure(partial_failures, sensor, error)
         return {}
 
 
@@ -251,23 +313,25 @@ def _collect_target_sensors(
 ) -> Dict[str, Any]:
     failures: List[Dict[str, str]] = []
     try:
-        netbios = query_netbios(target["ip"])
+        netbios = query_netbios(target["ip"], strict=True)
     except Exception as error:
         netbios = {"hostname": "", "workgroup": "", "user": ""}
-        failures.append({
-            "sensor": "netbios",
-            "target": target["ip"],
-            "error": str(error),
-        })
+        _append_partial_failure(
+            failures,
+            "netbios",
+            error,
+            target=target["ip"],
+        )
     try:
-        reverse_dns = _reverse_dns(target["ip"])
+        reverse_dns = _reverse_dns(target["ip"], strict=True)
     except Exception as error:
         reverse_dns = ""
-        failures.append({
-            "sensor": "reverse_dns",
-            "target": target["ip"],
-            "error": str(error),
-        })
+        _append_partial_failure(
+            failures,
+            "reverse_dns",
+            error,
+            target=target["ip"],
+        )
 
     ipv6_alive: Dict[str, bool] = {}
     for address in target["ipv6_addresses"]:
@@ -279,15 +343,17 @@ def _collect_target_sensors(
                     self_mac=controller_mac,
                     timeout=0.35,
                     retries=0,
+                    strict=True,
                 )
             )
         except Exception as error:
             ipv6_alive[address] = False
-            failures.append({
-                "sensor": "ipv6_liveness",
-                "target": address,
-                "error": str(error),
-            })
+            _append_partial_failure(
+                failures,
+                "ipv6_liveness",
+                error,
+                target=address,
+            )
 
     return {
         "netbios": netbios if isinstance(netbios, dict) else {},
@@ -391,9 +457,20 @@ def collect_profile_refresh(
     partial_failures: List[Dict[str, str]] = []
     arp_snapshot, ndp_snapshot = _capture_neighbor_snapshots(partial_failures)
 
-    gateway_mac = arp_snapshot.get(gateway_ip) or _normalize_mac(
-        get_mac_from_arp(gateway_ip)
-    )
+    gateway_mac = arp_snapshot.get(gateway_ip)
+    if not gateway_mac:
+        try:
+            gateway_mac = _normalize_mac(
+                get_mac_from_arp(gateway_ip, strict=True)
+            )
+        except Exception as error:
+            _append_partial_failure(
+                partial_failures,
+                "gateway_arp",
+                error,
+                target=gateway_ip,
+            )
+            gateway_mac = ""
     if not is_valid_mac(gateway_mac):
         raise ProfileRefreshValidationError(
             "MAC gateway aktif tidak dapat diverifikasi"
@@ -416,15 +493,39 @@ def collect_profile_refresh(
     try:
         multicast = collect_identity_multicast()
     except Exception as error:
-        raise ProfileCollectorUnavailableError(
-            "Identity multicast collector tidak tersedia"
-        ) from error
-    delivery = multicast.get("delivery") or {}
-    if int(delivery.get("succeeded") or 0) <= 0:
-        raise ProfileCollectorUnavailableError(
-            "Tidak ada identity multicast request yang berhasil dikirim"
+        _append_partial_failure(
+            partial_failures,
+            "identity_multicast",
+            error,
         )
-    partial_failures.extend(multicast.get("partial_failures") or [])
+        multicast = {
+            "delivery": {
+                "attempted": 6,
+                "succeeded": 0,
+                "failed": 6,
+                "protocols": {},
+                "errors": [],
+            },
+            "ssdp": {},
+            "mdns": {},
+            "llmnr": {},
+            "partial_failures": [],
+        }
+    delivery = multicast.get("delivery") or {}
+    multicast_delivered = int(delivery.get("succeeded") or 0) > 0
+    _extend_partial_failures(
+        partial_failures,
+        multicast.get("partial_failures"),
+    )
+    if not multicast_delivered and not any(
+        failure.get("sensor") == "identity_multicast"
+        for failure in partial_failures
+    ):
+        _append_partial_failure(
+            partial_failures,
+            "identity_multicast",
+            "No identity multicast request was delivered",
+        )
 
     time.sleep(observation_seconds)
     after_time = time.time()
@@ -457,11 +558,12 @@ def collect_profile_refresh(
                     "ipv6_alive": {},
                     "partial_failures": [],
                 }
-                partial_failures.append({
-                    "sensor": "target_observation",
-                    "target": target["ip"],
-                    "error": str(error),
-                })
+                _append_partial_failure(
+                    partial_failures,
+                    "target_observation",
+                    error,
+                    target=target["ip"],
+                )
 
     observed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     devices = []
@@ -474,13 +576,26 @@ def collect_profile_refresh(
         mac = target["mac"]
         ip = target["ip"]
         sensors = sensor_results[mac]
-        partial_failures.extend(sensors["partial_failures"])
+        _extend_partial_failures(
+            partial_failures,
+            sensors["partial_failures"],
+        )
         dhcp_info = dhcp_by_mac.get(mac, {})
         ndp_info = ndp_snapshot.get(mac, {})
         ipv6_info = _dhcpv6_identity(dhcp_info, ndp_info)
-        mdns_info = (multicast.get("mdns") or {}).get(ip, {})
-        ssdp_info = (multicast.get("ssdp") or {}).get(ip, {})
-        llmnr_info = (multicast.get("llmnr") or {}).get(ip, {})
+        multicast_addresses = [ip, *target["ipv6_addresses"]]
+        mdns_info = _merge_multicast_evidence(
+            multicast.get("mdns") or {},
+            multicast_addresses,
+        )
+        ssdp_info = _merge_multicast_evidence(
+            multicast.get("ssdp") or {},
+            multicast_addresses,
+        )
+        llmnr_info = _merge_multicast_evidence(
+            multicast.get("llmnr") or {},
+            multicast_addresses,
+        )
         netbios_info = dict(sensors["netbios"])
         if not netbios_info.get("hostname") and llmnr_info.get("hostname"):
             netbios_info["hostname"] = llmnr_info["hostname"]
@@ -549,6 +664,11 @@ def collect_profile_refresh(
             "ipv6_liveness": sensors["ipv6_alive"],
             **assessment,
         })
+
+    if not multicast_delivered and visible_count == 0:
+        raise ProfileCollectorUnavailableError(
+            "Tidak ada collector yang menghasilkan observasi profile yang dapat digunakan"
+        )
 
     profiled_count = status_counts["high"] + status_counts["medium"]
     coverage_percentage = (

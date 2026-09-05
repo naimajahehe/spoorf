@@ -57,7 +57,15 @@ def categorize_ipv6(addr: str) -> str:
     except:
         return 'unknown'
 
-def verify_ipv6_alive(mac: str, ipv6_addr: str, self_mac: str = "", timeout: float = 0.5, retries: int = 1) -> bool:
+def verify_ipv6_alive(
+    mac: str,
+    ipv6_addr: str,
+    self_mac: str = "",
+    timeout: float = 0.5,
+    retries: int = 1,
+    *,
+    strict: bool = False,
+) -> bool:
     """
     Verifikasi liveness AKTIF sebuah neighbor IPv6 via ICMPv6 Neighbor Solicitation -> Advertisement
     (NUD, RFC 4861). Wajib dijawab host yang hidup, lebih andal daripada Echo (yang bisa difilter).
@@ -90,9 +98,15 @@ def verify_ipv6_alive(mac: str, ipv6_addr: str, self_mac: str = "", timeout: flo
         return False
     except Exception as e:
         logger.debug(f"Notice verifying IPv6 liveness for {clean_addr}: {e}")
+        if strict:
+            raise
         return False
 
-def collect_from_ndp_cache(discovered_ipv6: Dict[str, Dict[str, Any]]) -> None:
+def collect_from_ndp_cache(
+    discovered_ipv6: Dict[str, Dict[str, Any]],
+    *,
+    strict: bool = False,
+) -> None:
     """
     Membaca tabel Neighbor Cache IPv6 dari kernel OS (Windows & Linux).
     Format hasil: discovered_ipv6[norm_mac] = { 'link_local': ..., 'global': ..., 'addresses': [...] }
@@ -171,6 +185,8 @@ def collect_from_ndp_cache(discovered_ipv6: Dict[str, Dict[str, Any]]) -> None:
 
     except Exception as e:
         logger.debug(f"Notice reading NDP cache: {e}")
+        if strict:
+            raise
 
 def send_ipv6_all_nodes_multicast(discovered_ipv6: Dict[str, Dict[str, Any]], timeout: float = 0.35) -> None:
     """
