@@ -102,7 +102,7 @@ def _add_identity_scores(
     hostname_keys: tuple[str, ...],
     observed_at: str,
     evidence: list[ProfileEvidence],
-) -> list[str]:
+) -> tuple[str, bool]:
     manufacturer = next((_text(info.get(key)) for key in manufacturer_keys if _text(info.get(key))), "")
     model = next((_text(info.get(key)) for key in model_keys if _text(info.get(key))), "")
     hostname = next((_text(info.get(key)) for key in hostname_keys if _text(info.get(key))), "")
@@ -134,8 +134,7 @@ def _add_identity_scores(
         )
         hostname_scores.add(hostname, group, hostname_points)
 
-    identity_text = " ".join(value for value in (manufacturer, model) if value)
-    if identity_text:
+    if manufacturer or model:
         vendors = vendor_candidates(manufacturer, model)
         canonical_manufacturer = canonicalize_vendor(manufacturer)
         if (
@@ -147,11 +146,11 @@ def _add_identity_scores(
         for vendor in vendors:
             vendor_scores.add(vendor, group, points)
         for device_type in device_type_candidates(
-            identity_text,
-            vendor=vendors[0] if len(vendors) == 1 else "",
+            model,
+            allow_vendor_tokens=False,
         ):
             type_scores.add(device_type, group, points)
-    return [value for value in (manufacturer, model, hostname) if value]
+    return hostname if not (manufacturer or model) else "", explicit
 
 
 def _add_dhcp_scores(
@@ -266,9 +265,11 @@ def assess_device_profile(
     type_scores = _CandidateScores()
     hostname_scores = _CandidateScores()
     evidence: list[ProfileEvidence] = []
-    identity_values: list[str] = []
+    pattern_names: list[str] = []
+    has_explicit_identity = False
+    randomized_mac = is_randomized_mac(mac)
 
-    if mac and not is_randomized_mac(mac):
+    if mac and not randomized_mac:
         oui_record = get_oui_record(mac)
         if oui_record:
             oui_vendor = canonicalize_vendor(oui_record.organization)
@@ -286,7 +287,7 @@ def assess_device_profile(
             if oui_type:
                 type_scores.add(oui_type, "oui", 25)
 
-    identity_values.extend(_add_dhcp_scores(
+    _add_dhcp_scores(
         vendor_scores=vendor_scores,
         type_scores=type_scores,
         hostname_scores=hostname_scores,
@@ -295,8 +296,8 @@ def assess_device_profile(
         group="dhcp",
         observed_at=observed_at,
         evidence=evidence,
-    ))
-    identity_values.extend(_add_identity_scores(
+    )
+    mdns_hostname, mdns_explicit = _add_identity_scores(
         vendor_scores=vendor_scores,
         type_scores=type_scores,
         hostname_scores=hostname_scores,
@@ -307,8 +308,8 @@ def assess_device_profile(
         hostname_keys=("hostname", "friendly_name"),
         observed_at=observed_at,
         evidence=evidence,
-    ))
-    identity_values.extend(_add_identity_scores(
+    )
+    ssdp_hostname, ssdp_explicit = _add_identity_scores(
         vendor_scores=vendor_scores,
         type_scores=type_scores,
         hostname_scores=hostname_scores,
@@ -319,7 +320,13 @@ def assess_device_profile(
         hostname_keys=("friendly_name", "hostname"),
         observed_at=observed_at,
         evidence=evidence,
-    ))
+    )
+    pattern_names.extend(
+        hostname
+        for hostname in (mdns_hostname, ssdp_hostname)
+        if hostname
+    )
+    has_explicit_identity = mdns_explicit or ssdp_explicit
 
     ipv6_identity = {
         field: ipv6_info.get(field)
@@ -327,7 +334,7 @@ def assess_device_profile(
         if ipv6_info.get(field)
     }
     if ipv6_identity:
-        identity_values.extend(_add_dhcp_scores(
+        _add_dhcp_scores(
             vendor_scores=vendor_scores,
             type_scores=type_scores,
             hostname_scores=hostname_scores,
@@ -336,7 +343,7 @@ def assess_device_profile(
             group="dhcpv6",
             observed_at=observed_at,
             evidence=evidence,
-        ))
+        )
 
     dhcp_duid = _text(dhcp_info.get("client_id"))
     ipv6_duid = _text(ipv6_info.get("duid") or ipv6_info.get("client_id"))
@@ -377,7 +384,6 @@ def assess_device_profile(
         if not value:
             continue
         network_names.append(value)
-        identity_values.append(value)
         _add_evidence(
             evidence,
             source=source,
@@ -409,8 +415,8 @@ def assess_device_profile(
         for candidate in device_type_candidates(services=meaningful_services):
             type_scores.add(candidate, "service_signature", 35)
 
-    pattern_text = " ".join(identity_values)
-    pattern_vendors = vendor_candidates(*identity_values)
+    pattern_text = " ".join(pattern_names)
+    pattern_vendors = vendor_candidates(*pattern_names)
     for candidate in pattern_vendors:
         vendor_scores.add(candidate, "identity_pattern", 35)
     for candidate in device_type_candidates(
@@ -418,17 +424,8 @@ def assess_device_profile(
         vendor=pattern_vendors[0] if len(pattern_vendors) == 1 else "",
     ):
         type_scores.add(candidate, "identity_pattern", 35)
-    for hostname in (
-        _text(dhcp_info.get("hostname")) or _text(dhcp_info.get("fqdn")),
-        _text((mdns_info or {}).get("hostname")),
-        _text((ssdp_info or {}).get("friendly_name")),
-        *network_names,
-    ):
-        if hostname and (
-            vendor_candidates(hostname)
-            or device_type_candidates(hostname)
-        ):
-            hostname_scores.add(hostname, "identity_pattern", 20)
+    for candidate in vendor_candidates(*network_names):
+        vendor_scores.add(candidate, "identity_pattern", 35)
 
     if ttl is not None:
         _add_evidence(
@@ -456,6 +453,10 @@ def assess_device_profile(
     if type_tied:
         device_type = "Unknown"
 
+    if randomized_mac and not has_explicit_identity:
+        vendor = "Unknown"
+        device_type = "Unknown"
+
     if is_gateway:
         device_type = "Router / Gateway"
 
@@ -475,7 +476,7 @@ def assess_device_profile(
     )
     medium = vendor_score >= 60 or type_score >= 60
     profile_status = "high" if high else "medium" if medium else "unknown"
-    if is_gateway:
+    if is_gateway or (randomized_mac and not has_explicit_identity):
         profile_status = "unknown"
 
     os_name = _infer_os(

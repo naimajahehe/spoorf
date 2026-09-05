@@ -207,7 +207,7 @@ class TestCoreFingerprint(unittest.TestCase):
     def test_ensemble_synthesis_dhcp_precedence(self):
         """Verify DHCP hostname and fingerprint override generic values."""
         dhcp_map = {
-            "aa:bb:cc:dd:ee:ff": {
+            "28:bb:b2:dd:ee:ff": {
                 "hostname": "Infinix-HOT-10",
                 "vendor_class": "android-dhcp-9",
                 "dhcp_fingerprint": "Android OS Signature"
@@ -215,7 +215,7 @@ class TestCoreFingerprint(unittest.TestCase):
         }
         host, vendor, os_name, dev_type = synthesize_ensemble_profile(
             ip="192.168.1.50",
-            norm_mac="aa:bb:cc:dd:ee:ff",
+            norm_mac="28:bb:b2:dd:ee:ff",
             is_gateway=False,
             vendor="Generic Device",
             hostname="",
@@ -251,11 +251,12 @@ class TestCoreFingerprint(unittest.TestCase):
         self.assertIsNone(extract_mobile_brand_from_hostname("Galaxy-Book-Laptop"))
         self.assertIsNone(extract_mobile_brand_from_hostname("Work-PC-Desktop"))
 
-    def test_ensemble_synthesis_asus_vivobook_guard(self):
+    @patch("src.core.fingerprint.ensemble.get_oui_record", return_value=None)
+    def test_ensemble_synthesis_asus_vivobook_guard(self, _mock_get_oui_record):
         """Edge Case: Asus Vivobook with port 445 must be classified as Windows PC, never Vivo phone!"""
         host, vendor, os_name, dev_type = synthesize_ensemble_profile(
             ip="192.168.1.110",
-            norm_mac="c2:4e:ca:88:04:2d", # Randomized MAC
+            norm_mac="00:11:22:33:44:55",
             is_gateway=False,
             vendor="Generic Device",
             hostname="DESKTOP-VIVOBOOK",
@@ -275,7 +276,7 @@ class TestCoreFingerprint(unittest.TestCase):
         """Edge Case: Samsung TV must be classified as Smart TV, never Mobile phone!"""
         host, vendor, os_name, dev_type = synthesize_ensemble_profile(
             ip="192.168.1.115",
-            norm_mac="c2:4e:ca:88:04:2e",
+            norm_mac="00:07:ab:88:04:2e",
             is_gateway=False,
             vendor="Generic Device",
             hostname="Samsung-QLED-TV",
@@ -339,8 +340,68 @@ class TestCoreFingerprint(unittest.TestCase):
         self.assertEqual(result["device_type"], "Unknown")
         self.assertEqual(result["profile_status"], "unknown")
 
+    def test_profile_assessment_keeps_randomized_windows_signals_unknown(self):
+        result = self._assess(
+            mac="c2:4e:ca:88:04:2d",
+            dhcp_info={"vendor_class": "MSFT 5.0"},
+            netbios_info={"hostname": "DESKTOP-TEST"},
+            reverse_dns="DESKTOP-TEST",
+            ttl=128,
+            open_ports=[445],
+            services=["SMB"],
+        )
+
+        self.assertEqual(result["vendor"], "Unknown")
+        self.assertEqual(result["device_type"], "Unknown")
+        self.assertEqual(result["profile_status"], "unknown")
+
+    @patch("src.core.fingerprint.ensemble.get_oui_record", return_value=None)
+    def test_profile_assessment_keeps_manufacturer_only_samsung_at_medium(
+        self,
+        _mock_get_oui_record,
+    ):
+        result = self._assess(
+            mac="00:11:22:33:44:55",
+            ssdp_info={"manufacturer": "Samsung Electronics"},
+        )
+
+        self.assertEqual(result["vendor"], "Samsung")
+        self.assertEqual(result["device_type"], "Unknown")
+        self.assertEqual(result["vendor_confidence"], 60)
+        self.assertEqual(result["type_confidence"], 0)
+        self.assertEqual(result["profile_status"], "medium")
+
+    @patch("src.core.fingerprint.ensemble.get_oui_record", return_value=None)
+    def test_profile_assessment_does_not_count_one_dhcp_field_twice(
+        self,
+        _mock_get_oui_record,
+    ):
+        result = self._assess(
+            mac="00:11:22:33:44:55",
+            dhcp_info={"hostname": "Galaxy-A07"},
+        )
+
+        self.assertEqual(result["vendor_confidence"], 45)
+        self.assertEqual(result["type_confidence"], 50)
+        self.assertNotEqual(result["profile_status"], "high")
+
+    def test_profile_assessment_accepts_explicit_samsung_phone_on_randomized_mac(self):
+        result = self._assess(
+            mac="c2:4e:ca:88:04:2d",
+            mdns_info={
+                "manufacturer": "Samsung Electronics",
+                "model": "SM-A055F",
+                "hostname": "Galaxy-A05.local",
+            },
+        )
+
+        self.assertEqual(result["vendor"], "Samsung")
+        self.assertEqual(result["device_type"], "Smartphone / Tablet")
+        self.assertEqual(result["profile_status"], "high")
+
     def test_profile_assessment_does_not_promote_single_mdns_hostname_to_high(self):
         result = self._assess(
+            mac="00:07:ab:88:04:2d",
             mdns_info={"hostname": "Galaxy-Solo.local"},
             ttl=64,
         )
@@ -413,6 +474,7 @@ class TestCoreFingerprint(unittest.TestCase):
 
     def test_profile_assessment_correlates_dhcpv6_duid_without_guessing(self):
         result = self._assess(
+            mac="00:03:93:11:22:33",
             dhcp_info={
                 "hostname": "iPhone-15",
                 "vendor_class": "Apple iOS DHCPv6",
