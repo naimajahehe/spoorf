@@ -3,26 +3,26 @@ import type { FC } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
     X,
-    Zap,
     RefreshCw,
     Wifi,
+    ShieldCheck,
+    HelpCircle,
+    Fingerprint,
+    ChevronDown,
     CheckCircle2,
-    Clock,
     Smartphone,
     Laptop,
     Radio,
-    Cpu,
-    Sparkles,
-    ShieldCheck,
-    HelpCircle
+    Cpu
 } from 'lucide-react';
 import { Device, ProfileRefreshSummary } from '../types';
 import { apiFetch } from '../api/client';
 import {
-    calculateDhcpCoverage,
-    hasDhcpEvidence
-} from '../lib/dhcpProfiling';
-import { calculateProfileCoverage } from '../lib/profileCoverage';
+    calculateProfileCoverage,
+    isHighConfidenceProfile,
+    isIdentifiedVendor
+} from '../lib/profileCoverage';
+import { getResolvedDeviceName } from '../lib/deviceSort';
 import { cn } from '../lib/utils';
 
 interface Props {
@@ -33,17 +33,10 @@ interface Props {
 }
 
 interface DhcpOptimizationResult {
-    delivery?: {
-        attempted?: number;
-        succeeded?: number;
-        failed?: number;
-    };
     dhcpDelta?: {
         new_count?: number;
         updated_count?: number;
     };
-    cached?: boolean;
-    duration_ms?: number;
 }
 
 export const DhcpReconnectModal: FC<Props> = ({
@@ -57,13 +50,10 @@ export const DhcpReconnectModal: FC<Props> = ({
     const [statusMessage, setStatusMessage] = useState<string | null>(null);
     const [lastOptimization, setLastOptimization] = useState<DhcpOptimizationResult | null>(null);
     const [profileResult, setProfileResult] = useState<ProfileRefreshSummary | null>(null);
+    const [showReconnectTip, setShowReconnectTip] = useState(false);
 
-    const profilingStats = useMemo(
-        () => calculateDhcpCoverage(devices),
-        [devices]
-    );
-    // Live client-side identity coverage over the visible devices, so the panel
-    // shows a meaningful baseline before any manual profiling pass is run.
+    // Cakupan identitas atas perangkat terlihat: baseline langsung sebelum profiling,
+    // lalu tergantikan angka hasil profiling terbaru bila ada.
     const identityCoverage = useMemo(
         () => calculateProfileCoverage(devices),
         [devices]
@@ -80,21 +70,34 @@ export const DhcpReconnectModal: FC<Props> = ({
 
     if (!isOpen) return null;
 
+    const cov = profileResult
+        ? {
+            visible: profileResult.visible_count,
+            high: profileResult.high_confidence_count,
+            medium: profileResult.medium_confidence_count,
+            unknown: profileResult.unknown_count,
+            pct: profileResult.coverage_percentage
+        }
+        : {
+            visible: identityCoverage.visible,
+            high: identityCoverage.highConfidence,
+            medium: identityCoverage.mediumConfidence,
+            unknown: identityCoverage.unknown,
+            pct: identityCoverage.coveragePercentage
+        };
+    const pctOf = (n: number) => (cov.visible > 0 ? (n / cov.visible) * 100 : 0);
+
     const handleProfileRefresh = async () => {
         if (!onProfileRefresh || isProfiling) return;
         setIsProfiling(true);
-        setStatusMessage('Mengumpulkan bukti identitas pasif untuk perangkat yang terlihat…');
+        setStatusMessage('Mengumpulkan petunjuk identitas dari perangkat yang terlihat…');
         try {
             const summary = await onProfileRefresh();
             setProfileResult(summary);
-            const high = summary?.high_confidence_count ?? 0;
-            const visible = summary?.visible_count ?? 0;
-            setStatusMessage(`Profiling selesai: ${high} dari ${visible} perangkat teridentifikasi keyakinan tinggi.`);
+            setStatusMessage(`Selesai: ${summary?.high_confidence_count ?? 0} dari ${summary?.visible_count ?? 0} perangkat teridentifikasi dengan keyakinan tinggi.`);
         } catch (e) {
             setStatusMessage(
-                e instanceof Error
-                    ? `Profiling gagal: ${e.message}`
-                    : 'Profiling identitas gagal.'
+                e instanceof Error ? `Profiling gagal: ${e.message}` : 'Profiling gagal.'
             );
         } finally {
             setTimeout(() => {
@@ -107,7 +110,7 @@ export const DhcpReconnectModal: FC<Props> = ({
     const handleTriggerWakeup = async () => {
         setIsOptimizing(true);
         setLastOptimization(null);
-        setStatusMessage('Menjalankan discovery refresh dan mengamati DHCP selama 4 detik...');
+        setStatusMessage('Menyapu ulang jaringan & mengamati sebentar untuk memunculkan perangkat baru…');
         try {
             const res = await apiFetch('/api/network/optimize-dhcp', {
                 method: 'POST',
@@ -115,22 +118,19 @@ export const DhcpReconnectModal: FC<Props> = ({
             });
             const payload = await res.json().catch(() => ({}));
             if (!res.ok) {
-                throw new Error(payload.error || `Discovery Refresh gagal (${res.status})`);
+                throw new Error(payload.error || `Penyapuan gagal (${res.status})`);
             }
             const result = (payload.data || {}) as DhcpOptimizationResult;
             setLastOptimization(result);
-            const newCount = result.dhcpDelta?.new_count || 0;
-            const updatedCount = result.dhcpDelta?.updated_count || 0;
+            const found = (result.dhcpDelta?.new_count || 0) + (result.dhcpDelta?.updated_count || 0);
             setStatusMessage(
-                newCount + updatedCount > 0
-                    ? `Discovery selesai: ${newCount} profil DHCP baru, ${updatedCount} diperbarui.`
-                    : 'Discovery selesai, tetapi tidak ada DHCP handshake baru yang teramati.'
+                found > 0
+                    ? `Penyapuan selesai: ${found} perangkat baru/diperbarui.`
+                    : 'Penyapuan selesai — tak ada perangkat baru saat ini.'
             );
         } catch (e) {
             setStatusMessage(
-                e instanceof Error
-                    ? `Discovery Refresh gagal: ${e.message}`
-                    : 'Discovery Refresh gagal.'
+                e instanceof Error ? `Penyapuan gagal: ${e.message}` : 'Penyapuan gagal.'
             );
         } finally {
             setTimeout(() => {
@@ -162,25 +162,25 @@ export const DhcpReconnectModal: FC<Props> = ({
                     animate={{ opacity: 1, scale: 1, y: 0 }}
                     exit={{ opacity: 0, scale: 0.95, y: 15 }}
                     transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
-                    className="w-full max-w-3xl bg-[#090a0c] border border-white/[0.1] rounded-2xl overflow-hidden shadow-2xl flex flex-col max-h-[85vh]"
+                    className="w-full max-w-2xl bg-[#090a0c] border border-white/[0.1] rounded-2xl overflow-hidden shadow-2xl flex flex-col max-h-[85vh]"
                 >
                     {/* Header */}
                     <div className="px-6 py-4 border-b border-white/[0.08] bg-white/[0.02] flex items-center justify-between gap-4 shrink-0">
-                        <div className="flex items-center gap-3">
-                            <div className="size-9 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-amber-400 shrink-0 shadow-sm shadow-amber-500/10">
-                                <Zap size={18} />
+                        <div className="flex items-center gap-3 min-w-0">
+                            <div className="size-9 rounded-xl bg-cyan-500/10 border border-cyan-500/20 flex items-center justify-center text-cyan-400 shrink-0 shadow-sm shadow-cyan-500/10">
+                                <Fingerprint size={18} />
                             </div>
-                            <div className="flex flex-col">
+                            <div className="flex flex-col min-w-0">
                                 <div className="flex items-center gap-2">
                                     <h2 className="text-sm font-semibold text-white tracking-tight">
-                                        Optimasi Teknik 3B (DHCP Profiling)
+                                        Identifikasi Perangkat
                                     </h2>
-                                    <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-medium bg-amber-500/15 text-amber-300 border border-amber-500/30">
-                                        Measured Passive Evidence
+                                    <span className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-emerald-500/15 text-emerald-300 border border-emerald-500/25">
+                                        Pasif
                                     </span>
                                 </div>
-                                <p className="text-xs text-zinc-400">
-                                    Gabungkan discovery aktif yang aman dengan evidence DHCP yang benar-benar terlihat oleh controller.
+                                <p className="text-xs text-zinc-400 truncate">
+                                    Kenali merek, jenis & nama perangkat di jaringanmu — tanpa memutus koneksi.
                                 </p>
                             </div>
                         </div>
@@ -188,272 +188,186 @@ export const DhcpReconnectModal: FC<Props> = ({
                         <button
                             type="button"
                             onClick={onClose}
-                            className="size-8 rounded-lg bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.08] text-zinc-400 hover:text-white flex items-center justify-center transition-colors outline-none"
-                            title="Tutup Modal"
+                            className="size-8 rounded-lg bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.08] text-zinc-400 hover:text-white flex items-center justify-center transition-colors outline-none shrink-0"
+                            title="Tutup"
                         >
                             <X size={15} />
                         </button>
                     </div>
 
-                    {/* Scrollable Body */}
-                    <div className="flex-1 overflow-y-auto px-6 py-5 space-y-5 overscroll-contain">
-                        {/* Hero Stats Meter */}
-                        <div className="p-4 rounded-xl bg-gradient-to-r from-white/[0.04] to-white/[0.01] border border-white/[0.08] flex flex-col sm:flex-row items-center justify-between gap-4">
-                            <div className="flex flex-col gap-1 text-center sm:text-left">
-                                <span className="text-xs text-zinc-400 font-medium">DHCP Evidence Coverage di Subnet Ini</span>
-                                <div className="flex items-baseline gap-2 justify-center sm:justify-start">
-                                    <span className="text-2xl font-bold text-white font-mono">
-                                        {profilingStats.dhcpProfiled} / {profilingStats.eligible}
-                                    </span>
-                                    <span className="text-xs text-emerald-400 font-medium font-mono">
-                                        ({profilingStats.dhcpPercentage === null ? 'N/A' : `${profilingStats.dhcpPercentage}%`} Evidence DHCP)
-                                    </span>
-                                </div>
-                                <span className="text-[10px] text-zinc-500 font-mono">
-                                    Discovery profile: {profilingStats.discoveryPercentage === null ? 'N/A' : `${profilingStats.discoveryPercentage}%`}
-                                </span>
-                            </div>
-
-                            {/* Progress bar visual */}
-                            <div className="w-full sm:w-64 flex flex-col gap-1.5">
-                                <div className="h-2 w-full bg-white/[0.06] rounded-full overflow-hidden border border-white/[0.04]">
-                                    <motion.div
-                                        initial={{ width: 0 }}
-                                        animate={{ width: `${profilingStats.dhcpPercentage || 0}%` }}
-                                        transition={{ duration: 0.8, ease: "easeOut" }}
-                                        className={cn(
-                                            "h-full rounded-full transition-all",
-                                            (profilingStats.dhcpPercentage || 0) >= 80 ? "bg-gradient-to-r from-emerald-500 to-teal-400" : "bg-gradient-to-r from-amber-500 to-orange-400"
-                                        )}
-                                    />
-                                </div>
-                                <div className="flex justify-between text-[10px] text-zinc-400 font-mono">
-                                    <span>Evidence DHCP unik per MAC</span>
-                                    <span>{profilingStats.dhcpPercentage === null ? 'N/A' : `${profilingStats.dhcpPercentage}%`}</span>
-                                </div>
-                            </div>
-                        </div>
-
-                        {/* Dual Action Cards */}
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            {/* Card 1: Trigger Wakeup from Controller */}
-                            <div className="p-4 rounded-xl bg-white/[0.025] border border-white/[0.08] hover:border-amber-500/30 transition-all flex flex-col justify-between gap-4">
-                                <div className="space-y-2">
-                                    <div className="flex items-center gap-2">
-                                        <div className="size-6 rounded-lg bg-amber-500/10 flex items-center justify-center text-amber-400">
-                                            <Sparkles size={13} />
-                                        </div>
-                                        <h3 className="text-xs font-semibold text-white">Metode 1: Discovery Refresh & DHCP Observation</h3>
+                    {/* Body */}
+                    <div className="flex-1 overflow-y-auto px-6 py-5 space-y-4 overscroll-contain">
+                        {/* Hero: cakupan identitas + aksi utama */}
+                        <div className="p-4 rounded-xl bg-gradient-to-br from-cyan-500/[0.06] to-white/[0.01] border border-white/[0.08] space-y-3.5">
+                            <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-3">
+                                <div className="flex flex-col gap-0.5">
+                                    <span className="text-[11px] text-zinc-400">Perangkat teridentifikasi</span>
+                                    <div className="flex items-baseline gap-2">
+                                        <span className="text-3xl font-bold text-white font-mono tabular-nums">
+                                            {cov.high}<span className="text-zinc-500 text-xl"> / {cov.visible}</span>
+                                        </span>
+                                        <span className="text-xs text-cyan-400 font-mono">
+                                            {cov.pct === null ? '—' : `${cov.pct}%`}
+                                        </span>
                                     </div>
-                                    <p className="text-[11px] text-zinc-400 leading-relaxed">
-                                        Kirim satu burst mDNS/SSDP/LLMNR, amati DHCP alami selama 4 detik, lalu jalankan satu scan. Metode ini <strong>tidak memaksa renewal DHCP</strong>.
-                                    </p>
                                 </div>
 
                                 <button
                                     type="button"
-                                    onClick={handleTriggerWakeup}
-                                    disabled={isOptimizing}
+                                    onClick={handleProfileRefresh}
+                                    disabled={isProfiling || !onProfileRefresh}
                                     className={cn(
-                                        "w-full py-2.5 px-4 rounded-xl text-xs font-semibold flex items-center justify-center gap-2 transition-all border outline-none",
-                                        isOptimizing
-                                            ? "bg-amber-500/20 text-amber-300 border-amber-500/40 cursor-wait animate-pulse"
-                                            : "bg-amber-500 hover:bg-amber-400 text-black border-amber-400 shadow-lg shadow-amber-500/20"
+                                        "shrink-0 py-2.5 px-4 rounded-xl text-xs font-semibold flex items-center justify-center gap-2 transition-all border outline-none",
+                                        isProfiling
+                                            ? "bg-cyan-500/20 text-cyan-300 border-cyan-500/40 cursor-wait animate-pulse"
+                                            : "bg-cyan-500 hover:bg-cyan-400 text-black border-cyan-400 shadow-lg shadow-cyan-500/20"
                                     )}
                                 >
-                                    <RefreshCw size={13} className={cn(isOptimizing && "animate-spin")} />
-                                    <span>{isOptimizing ? 'Mengamati & Memindai...' : 'Jalankan Discovery Refresh'}</span>
+                                    <Fingerprint size={14} className={cn(isProfiling && "animate-pulse")} />
+                                    <span>{isProfiling ? 'Mengidentifikasi…' : 'Jalankan Profiling Otomatis'}</span>
                                 </button>
                             </div>
 
-                            {/* Card 2: Target Reconnect Guide */}
-                            <div className="p-4 rounded-xl bg-white/[0.025] border border-white/[0.08] hover:border-blue-500/30 transition-all flex flex-col justify-between gap-4">
-                                <div className="space-y-2">
-                                    <div className="flex items-center gap-2">
-                                        <div className="size-6 rounded-lg bg-blue-500/10 flex items-center justify-center text-blue-400">
-                                            <Wifi size={13} />
-                                        </div>
-                                        <h3 className="text-xs font-semibold text-white">Metode 2: Reconnect Perangkat Target</h3>
-                                    </div>
-                                    <p className="text-[11px] text-zinc-400 leading-relaxed">
-                                        Untuk peluang capture DHCP yang lebih tinggi, mintalah pengguna target melakukan reconnect Wi-Fi singkat:
-                                    </p>
-                                    <div className="space-y-1.5 text-[11px] text-zinc-300">
-                                        <div className="flex items-center gap-2">
-                                            <span className="size-4 rounded-full bg-white/[0.06] flex items-center justify-center text-[10px] font-mono text-white">1</span>
-                                            <span>Matikan Wi-Fi di HP/Laptop target.</span>
-                                        </div>
-                                        <div className="flex items-center gap-2">
-                                            <span className="size-4 rounded-full bg-white/[0.06] flex items-center justify-center text-[10px] font-mono text-white">2</span>
-                                            <span>Tunggu <strong>3 detik</strong>, lalu hidupkan kembali.</span>
-                                        </div>
-                                        <div className="flex items-center gap-2">
-                                            <span className="size-4 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center text-[10px] font-mono">3</span>
-                                            <span>Event diproses segera setelah paket DHCP terlihat oleh controller.</span>
-                                        </div>
-                                    </div>
+                            {/* Bar tersegmentasi: tinggi / sedang / belum dikenali */}
+                            <div className="flex flex-col gap-1.5">
+                                <div className="h-2.5 w-full flex rounded-full overflow-hidden bg-white/[0.05] border border-white/[0.04]">
+                                    <motion.div initial={{ width: 0 }} animate={{ width: `${pctOf(cov.high)}%` }} transition={{ duration: 0.7, ease: 'easeOut' }} className="h-full bg-emerald-500" />
+                                    <motion.div initial={{ width: 0 }} animate={{ width: `${pctOf(cov.medium)}%` }} transition={{ duration: 0.7, ease: 'easeOut' }} className="h-full bg-amber-500" />
+                                    <motion.div initial={{ width: 0 }} animate={{ width: `${pctOf(cov.unknown)}%` }} transition={{ duration: 0.7, ease: 'easeOut' }} className="h-full bg-zinc-700" />
                                 </div>
-
-                                <div className="p-2 rounded-lg bg-white/[0.02] border border-white/[0.05] text-[10px] text-zinc-400 flex items-center gap-2">
-                                    <ShieldCheck size={13} className="text-emerald-400 shrink-0" />
-                                    <span>Mengekstrak Option 12 (Hostname) & Option 55 (PRL Signature).</span>
+                                <div className="flex items-center gap-4 text-[10px] text-zinc-400">
+                                    <span className="flex items-center gap-1.5"><span className="size-2 rounded-full bg-emerald-500" />Keyakinan tinggi {cov.high}</span>
+                                    <span className="flex items-center gap-1.5"><span className="size-2 rounded-full bg-amber-500" />Sedang {cov.medium}</span>
+                                    <span className="flex items-center gap-1.5"><span className="size-2 rounded-full bg-zinc-600" />Belum dikenali {cov.unknown}</span>
                                 </div>
                             </div>
+
+                            <p className="text-[11px] text-zinc-500 leading-relaxed">
+                                Membangun profil dari petunjuk yang perangkat pancarkan sendiri (OUI, mDNS, DHCP, hostname). "Belum dikenali" adalah hasil yang wajar untuk perangkat yang menyembunyikan identitasnya — bukan kegagalan.
+                            </p>
                         </div>
 
-                        {/* Metode 3: Profiling Identitas Pasif Otomatis */}
-                        {onProfileRefresh && (
-                            <div className="p-4 rounded-xl bg-gradient-to-r from-cyan-500/[0.06] to-blue-500/[0.02] border border-cyan-500/20 transition-all space-y-3">
-                                <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-                                    <div className="space-y-1.5 min-w-0">
-                                        <div className="flex items-center gap-2">
-                                            <div className="size-6 rounded-lg bg-cyan-500/10 flex items-center justify-center text-cyan-400">
-                                                <ShieldCheck size={13} />
-                                            </div>
-                                            <h3 className="text-xs font-semibold text-white">Metode 3: Profiling Identitas Pasif Otomatis</h3>
-                                            <span className="px-1.5 py-0.5 rounded-full text-[9px] font-mono bg-emerald-500/15 text-emerald-300 border border-emerald-500/25">Tanpa Memutus Koneksi</span>
-                                        </div>
-                                        <p className="text-[11px] text-zinc-400 leading-relaxed">
-                                            Membangun profil perangkat dari bukti yang perangkat itu sendiri paparkan (OUI, mDNS, DHCP, hostname). <strong>Tidak ada perangkat yang diputus.</strong> Nama & vendor bisa tetap tak tersedia di jaringan terisolasi; keyakinan tinggi mengutamakan kebenaran di atas mengisi setiap baris.
-                                        </p>
-                                    </div>
-
-                                    <button
-                                        type="button"
-                                        onClick={handleProfileRefresh}
-                                        disabled={isProfiling}
-                                        className={cn(
-                                            "shrink-0 py-2.5 px-4 rounded-xl text-xs font-semibold flex items-center justify-center gap-2 transition-all border outline-none",
-                                            isProfiling
-                                                ? "bg-cyan-500/20 text-cyan-300 border-cyan-500/40 cursor-wait animate-pulse"
-                                                : "bg-cyan-500 hover:bg-cyan-400 text-black border-cyan-400 shadow-lg shadow-cyan-500/20"
-                                        )}
-                                        title="Kumpulkan bukti identitas pasif untuk perangkat yang terlihat"
-                                    >
-                                        <Sparkles size={13} className={cn(isProfiling && "animate-pulse")} />
-                                        <span>{isProfiling ? 'Memprofil…' : 'Jalankan Profiling Identitas'}</span>
-                                    </button>
-                                </div>
-
-                                {/* Coverage summary (fresh result if available, else live baseline) */}
-                                {(() => {
-                                    const visible = profileResult?.visible_count ?? identityCoverage.visible;
-                                    const high = profileResult?.high_confidence_count ?? identityCoverage.highConfidence;
-                                    const medium = profileResult?.medium_confidence_count ?? identityCoverage.mediumConfidence;
-                                    const unknown = profileResult?.unknown_count ?? identityCoverage.unknown;
-                                    const hostname = profileResult?.hostname_count ?? identityCoverage.hostnameCount;
-                                    const coverage = profileResult
-                                        ? profileResult.coverage_percentage
-                                        : identityCoverage.coveragePercentage;
-                                    const cells = [
-                                        { label: 'Terlihat', value: visible, tone: 'text-white' },
-                                        { label: 'Keyakinan tinggi', value: high, tone: 'text-emerald-400' },
-                                        { label: 'Sedang', value: medium, tone: 'text-amber-400' },
-                                        { label: 'Belum dikenali', value: unknown, tone: 'text-zinc-400' },
-                                        { label: 'Punya hostname', value: hostname, tone: 'text-cyan-400' },
-                                        { label: 'Cakupan', value: coverage === null ? 'N/A' : `${coverage}%`, tone: 'text-blue-400' }
-                                    ];
-                                    return (
-                                        <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
-                                            {cells.map((c) => (
-                                                <div key={c.label} className="p-2 rounded-lg bg-white/[0.025] border border-white/[0.06] text-center">
-                                                    <div className="text-[9px] text-zinc-500 uppercase tracking-wide">{c.label}</div>
-                                                    <div className={cn("mt-0.5 text-sm font-mono font-semibold", c.tone)}>{c.value}</div>
-                                                </div>
-                                            ))}
-                                        </div>
-                                    );
-                                })()}
-
-                                {profileResult && (
-                                    <div className="space-y-2">
-                                        <div className="flex flex-wrap items-center gap-2 text-[10px] font-mono text-zinc-400">
-                                            <span className="px-2 py-0.5 rounded bg-white/[0.03] border border-white/[0.06]">
-                                                Durasi {(profileResult.duration_ms / 1000).toFixed(1)}s
-                                            </span>
-                                            {Object.entries(profileResult.sources || {}).map(([src, count]) => (
-                                                <span key={src} className="px-2 py-0.5 rounded bg-white/[0.03] border border-white/[0.06]">
-                                                    {src}: {count as number}
-                                                </span>
-                                            ))}
-                                            {profileResult.ap_isolation && Object.keys(profileResult.ap_isolation).length > 0 && (
-                                                <span className="px-2 py-0.5 rounded bg-amber-500/10 border border-amber-500/20 text-amber-300">
-                                                    Isolasi AP dapat membatasi cakupan
-                                                </span>
-                                            )}
-                                        </div>
-                                        {profileResult.partial_failures && profileResult.partial_failures.length > 0 && (
-                                            <div className="text-[10px] text-amber-300 font-mono">
-                                                {profileResult.partial_failures.length} sensor gagal sebagian — hasil tetap ditampilkan apa adanya.
-                                            </div>
-                                        )}
-                                    </div>
+                        {/* Detail hasil profiling terakhir */}
+                        {profileResult && (
+                            <div className="flex flex-wrap items-center gap-2 text-[10px] font-mono text-zinc-400">
+                                <span className="px-2 py-0.5 rounded bg-white/[0.03] border border-white/[0.06]">
+                                    Durasi {(profileResult.duration_ms / 1000).toFixed(1)}s
+                                </span>
+                                <span className="px-2 py-0.5 rounded bg-white/[0.03] border border-white/[0.06]">
+                                    Punya hostname {profileResult.hostname_count}
+                                </span>
+                                {Object.entries(profileResult.sources || {}).map(([src, count]) => (
+                                    <span key={src} className="px-2 py-0.5 rounded bg-white/[0.03] border border-white/[0.06]">
+                                        {src}: {count as number}
+                                    </span>
+                                ))}
+                                {profileResult.ap_isolation && Object.keys(profileResult.ap_isolation).length > 0 && (
+                                    <span className="px-2 py-0.5 rounded bg-amber-500/10 border border-amber-500/20 text-amber-300">
+                                        Isolasi AP membatasi cakupan
+                                    </span>
                                 )}
-
-                                <div className="flex items-start gap-1.5 text-[10px] text-zinc-500 leading-relaxed">
-                                    <HelpCircle size={12} className="text-zinc-600 shrink-0 mt-0.5" />
-                                    <span>"Belum dikenali" adalah hasil yang disengaja ketika bukti belum cukup — bukan kegagalan. Perangkat privasi-tinggi memang bisa tak terprofilkan.</span>
-                                </div>
+                                {profileResult.partial_failures?.length > 0 && (
+                                    <span className="px-2 py-0.5 rounded bg-amber-500/10 border border-amber-500/20 text-amber-300">
+                                        {profileResult.partial_failures.length} sensor gagal sebagian
+                                    </span>
+                                )}
                             </div>
                         )}
 
+                        {/* Status transien */}
                         {statusMessage && (
                             <motion.div
                                 initial={{ opacity: 0, y: -5 }}
                                 animate={{ opacity: 1, y: 0 }}
-                                className="p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-300 text-xs font-mono text-center"
+                                className="p-2.5 rounded-lg bg-cyan-500/10 border border-cyan-500/20 text-cyan-200 text-xs text-center"
                             >
                                 {statusMessage}
                             </motion.div>
                         )}
 
-                        {lastOptimization && (
-                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                                <div className="p-2.5 rounded-lg bg-white/[0.025] border border-white/[0.06]">
-                                    <div className="text-[9px] text-zinc-500 uppercase">Datagram terkirim</div>
-                                    <div className="mt-1 text-sm font-mono text-emerald-400">
-                                        {lastOptimization.delivery?.succeeded || 0}
-                                    </div>
-                                </div>
-                                <div className="p-2.5 rounded-lg bg-white/[0.025] border border-white/[0.06]">
-                                    <div className="text-[9px] text-zinc-500 uppercase">Datagram gagal</div>
-                                    <div className="mt-1 text-sm font-mono text-amber-400">
-                                        {lastOptimization.delivery?.failed || 0}
-                                    </div>
-                                </div>
-                                <div className="p-2.5 rounded-lg bg-white/[0.025] border border-white/[0.06]">
-                                    <div className="text-[9px] text-zinc-500 uppercase">DHCP baru</div>
-                                    <div className="mt-1 text-sm font-mono text-cyan-400">
-                                        {lastOptimization.dhcpDelta?.new_count || 0}
-                                    </div>
-                                </div>
-                                <div className="p-2.5 rounded-lg bg-white/[0.025] border border-white/[0.06]">
-                                    <div className="text-[9px] text-zinc-500 uppercase">DHCP diperbarui</div>
-                                    <div className="mt-1 text-sm font-mono text-blue-400">
-                                        {lastOptimization.dhcpDelta?.updated_count || 0}
-                                    </div>
-                                </div>
-                            </div>
-                        )}
+                        {/* Pembantu (sekunder) */}
+                        <div className="space-y-2.5">
+                            <div className="text-[10px] font-medium uppercase tracking-wider text-zinc-600">Bila masih banyak yang belum dikenali</div>
 
-                        {/* Device List Status Breakdown */}
-                        <div className="space-y-2.5 pt-2">
+                            <div className="flex items-center justify-between gap-3 p-3 rounded-xl bg-white/[0.02] border border-white/[0.07]">
+                                <div className="flex items-center gap-2.5 min-w-0">
+                                    <div className="size-7 rounded-lg bg-white/[0.04] border border-white/[0.06] flex items-center justify-center text-zinc-300 shrink-0">
+                                        <RefreshCw size={13} className={cn(isOptimizing && "animate-spin")} />
+                                    </div>
+                                    <div className="flex flex-col min-w-0">
+                                        <span className="text-xs font-medium text-zinc-200">Segarkan penemuan</span>
+                                        <span className="text-[10px] text-zinc-500 truncate">Sapu ulang jaringan & amati sebentar untuk memunculkan perangkat baru.</span>
+                                    </div>
+                                </div>
+                                <button
+                                    type="button"
+                                    onClick={handleTriggerWakeup}
+                                    disabled={isOptimizing}
+                                    className={cn(
+                                        "shrink-0 py-1.5 px-3 rounded-lg text-[11px] font-medium border transition-all outline-none",
+                                        isOptimizing
+                                            ? "bg-white/[0.03] text-zinc-500 border-white/[0.06] cursor-wait"
+                                            : "bg-white/[0.05] hover:bg-white/[0.08] text-zinc-200 border-white/[0.08]"
+                                    )}
+                                >
+                                    {isOptimizing ? 'Menyapu…' : 'Segarkan'}
+                                </button>
+                            </div>
+
+                            {lastOptimization && (
+                                <div className="text-[10px] text-zinc-500 font-mono px-1">
+                                    Penyapuan terakhir: {(lastOptimization.dhcpDelta?.new_count || 0) + (lastOptimization.dhcpDelta?.updated_count || 0)} perangkat baru/diperbarui.
+                                </div>
+                            )}
+
+                            <div className="rounded-xl bg-white/[0.02] border border-white/[0.07] overflow-hidden">
+                                <button
+                                    type="button"
+                                    onClick={() => setShowReconnectTip(v => !v)}
+                                    className="w-full flex items-center justify-between gap-3 p-3 outline-none"
+                                >
+                                    <div className="flex items-center gap-2.5">
+                                        <div className="size-7 rounded-lg bg-white/[0.04] border border-white/[0.06] flex items-center justify-center text-zinc-300">
+                                            <Wifi size={13} />
+                                        </div>
+                                        <span className="text-xs font-medium text-zinc-200">Minta perangkat menyambung ulang</span>
+                                    </div>
+                                    <ChevronDown size={14} className={cn("text-zinc-500 transition-transform", showReconnectTip && "rotate-180")} />
+                                </button>
+                                <AnimatePresence>
+                                    {showReconnectTip && (
+                                        <motion.div
+                                            initial={{ height: 0, opacity: 0 }}
+                                            animate={{ height: 'auto', opacity: 1 }}
+                                            exit={{ height: 0, opacity: 0 }}
+                                            transition={{ duration: 0.18 }}
+                                            className="overflow-hidden"
+                                        >
+                                            <div className="px-3 pb-3 pt-0 space-y-1.5 text-[11px] text-zinc-400">
+                                                <p className="text-zinc-500">Perangkat paling mudah dikenali saat baru menyambung ke Wi-Fi. Minta pemiliknya:</p>
+                                                <div className="flex items-center gap-2"><span className="size-4 rounded-full bg-white/[0.06] flex items-center justify-center text-[10px] font-mono text-zinc-300">1</span><span>Matikan Wi-Fi di perangkat.</span></div>
+                                                <div className="flex items-center gap-2"><span className="size-4 rounded-full bg-white/[0.06] flex items-center justify-center text-[10px] font-mono text-zinc-300">2</span><span>Tunggu 3 detik, lalu nyalakan lagi.</span></div>
+                                                <div className="flex items-center gap-2"><span className="size-4 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center text-[10px] font-mono">3</span><span>Profil diperbarui otomatis begitu perangkat menyambung.</span></div>
+                                            </div>
+                                        </motion.div>
+                                    )}
+                                </AnimatePresence>
+                            </div>
+                        </div>
+
+                        {/* Daftar perangkat + status identitas */}
+                        <div className="space-y-2 pt-1">
                             <div className="flex items-center justify-between">
-                                <h4 className="text-xs font-semibold text-zinc-300 uppercase tracking-wider">
-                                    Daftar Status Perangkat di Subnet
-                                </h4>
-                                <span className="text-[11px] text-zinc-500 font-mono">
-                                    {eligibleDevices.length} Perangkat Online
-                                </span>
+                                <h4 className="text-xs font-semibold text-zinc-300">Perangkat di jaringan</h4>
+                                <span className="text-[11px] text-zinc-500 font-mono">{eligibleDevices.length} online</span>
                             </div>
 
                             <div className="rounded-xl border border-white/[0.06] overflow-hidden divide-y divide-white/[0.04] bg-white/[0.01]">
                                 {eligibleDevices.map((dev) => {
-                                    const hasDhcp = hasDhcpEvidence(dev);
-                                    const devName = dev.alias && dev.alias.trim() !== ''
-                                        ? dev.alias.trim()
-                                        : (dev.hostname && dev.hostname.trim() !== '' ? dev.hostname : dev.ip);
-
+                                    const identified = isHighConfidenceProfile(dev) || isIdentifiedVendor(dev);
+                                    const typeLabel = dev.device_type && !dev.device_type.toLowerCase().includes('generic') && dev.device_type.toLowerCase() !== 'unknown'
+                                        ? dev.device_type
+                                        : null;
                                     return (
                                         <div key={dev.ip} className="px-3.5 py-2.5 flex items-center justify-between gap-3 text-xs">
                                             <div className="flex items-center gap-2.5 min-w-0">
@@ -462,29 +376,27 @@ export const DhcpReconnectModal: FC<Props> = ({
                                                 </div>
                                                 <div className="flex flex-col min-w-0">
                                                     <div className="flex items-center gap-1.5">
-                                                        <span className="font-semibold text-white truncate max-w-[180px]">
-                                                            {devName}
-                                                        </span>
-                                                        <span className="text-[10px] font-mono text-zinc-400">
-                                                            {dev.ip}
-                                                        </span>
+                                                        <span className="font-semibold text-white truncate max-w-[180px]">{getResolvedDeviceName(dev)}</span>
+                                                        <span className="text-[10px] font-mono text-zinc-500">{dev.ip}</span>
                                                     </div>
-                                                    <span className="text-[10px] text-zinc-400 font-mono truncate">
-                                                        {dev.dhcp_vendor_class || dev.dhcp_fingerprint || dev.vendor || 'Generic Device'}
+                                                    <span className="text-[10px] text-zinc-500 truncate">
+                                                        {identified
+                                                            ? [dev.vendor, typeLabel].filter(Boolean).join(' · ')
+                                                            : 'Identitas belum terkumpul'}
                                                     </span>
                                                 </div>
                                             </div>
 
                                             <div className="shrink-0">
-                                                {hasDhcp ? (
-                                                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
+                                                {identified ? (
+                                                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-emerald-500/15 text-emerald-400 border border-emerald-500/25">
                                                         <CheckCircle2 size={11} />
-                                                        <span>Ter-profiling 3B</span>
+                                                        <span>Teridentifikasi</span>
                                                     </span>
                                                 ) : (
-                                                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-amber-500/10 text-amber-300 border border-amber-500/20">
-                                                        <Clock size={11} />
-                                                        <span>Menunggu Reconnect</span>
+                                                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-white/[0.04] text-zinc-400 border border-white/[0.08]">
+                                                        <HelpCircle size={11} />
+                                                        <span>Belum dikenali</span>
                                                     </span>
                                                 )}
                                             </div>
@@ -497,11 +409,10 @@ export const DhcpReconnectModal: FC<Props> = ({
 
                     {/* Footer */}
                     <div className="px-6 py-3.5 border-t border-white/[0.08] bg-white/[0.02] flex items-center justify-between gap-3 shrink-0">
-                        <div className="flex items-center gap-1.5 text-[11px] text-zinc-400">
-                            <HelpCircle size={13} className="text-zinc-500" />
-                            <span>Teknik 3B berjalan otomatis secara pasif di latar belakang.</span>
+                        <div className="flex items-center gap-1.5 text-[11px] text-zinc-500">
+                            <ShieldCheck size={13} className="text-emerald-400/70" />
+                            <span>Berjalan otomatis di latar; tombol ini menjalankannya sekali lagi sekarang.</span>
                         </div>
-
                         <button
                             type="button"
                             onClick={onClose}
