@@ -299,6 +299,16 @@ function hasStoredValue(value: unknown): boolean {
         && (typeof value !== 'string' || value.trim() !== '');
 }
 
+function normalizeStoredSpeedLimit(value: unknown): number {
+    if (value === null || value === undefined) return 100;
+    const numericValue = typeof value === 'string' && value.trim() === ''
+        ? Number.NaN
+        : Number(value);
+    return Number.isFinite(numericValue) && numericValue >= 0 && numericValue <= 100
+        ? numericValue
+        : 100;
+}
+
 function timestampRank(value: unknown): number {
     if (typeof value !== 'string' || value.trim() === '') return Number.NEGATIVE_INFINITY;
     const parsed = Date.parse(value);
@@ -626,12 +636,9 @@ export class DatabaseService {
                     merged.redirect_url = redirectSource ? redirectSource.redirect_url : merged.redirect_url;
                 }
                 if (deviceColumnNames.has('speed_limit')) {
-                    const speedLimits = group
-                        .map(row => Number(row.speed_limit))
-                        .filter(value => Number.isFinite(value));
-                    if (speedLimits.length > 0) {
-                        merged.speed_limit = Math.min(...speedLimits);
-                    }
+                    merged.speed_limit = Math.min(
+                        ...group.map(row => normalizeStoredSpeedLimit(row.speed_limit))
+                    );
                 }
 
                 const assessmentSource = [...ordered].sort((left, right) => {

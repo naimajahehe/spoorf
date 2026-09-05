@@ -1327,7 +1327,7 @@ export async function runDatabaseTests() {
             'prof_legacy_upper',
             'manual_link',
             'session_legacy_upper',
-            25,
+            null,
             'candidate_legacy',
             1,
             1,
@@ -1360,7 +1360,7 @@ export async function runDatabaseTests() {
         assert.strictEqual(repaired[0].alias, 'Legacy Owner');
         assert.strictEqual(repaired[0].is_blocked, 1);
         assert.strictEqual(repaired[0].session_id, 'session_legacy_upper');
-        assert.strictEqual(repaired[0].speed_limit, 25);
+        assert.strictEqual(repaired[0].speed_limit, 100, 'Legacy NULL speed limit must map to unrestricted');
         assert.strictEqual(repaired[0].profile_id, 'prof_legacy_upper');
         assert.strictEqual(repaired[0].matched_by, 'manual_link');
         assert.strictEqual(repaired[0].candidate_profile_id, 'candidate_legacy');
@@ -1398,7 +1398,7 @@ export async function runDatabaseTests() {
         assert.strictEqual(rowsAfterScan[0].alias, 'Legacy Owner');
         assert.strictEqual(rowsAfterScan[0].is_blocked, 1);
         assert.strictEqual(rowsAfterScan[0].session_id, 'session_legacy_upper');
-        assert.strictEqual(rowsAfterScan[0].speed_limit, 25);
+        assert.strictEqual(rowsAfterScan[0].speed_limit, 100);
         assert.strictEqual(rowsAfterScan[0].profile_status, 'high');
 
         await db.close();
@@ -1566,5 +1566,59 @@ export async function runDatabaseTests() {
 
         await db.close();
         console.log('  ✓ Duplicate MAC repair: case variants merge idempotently with intent and newest observations preserved');
+    }
+
+    // Test 24: NULL speed does not override an active valid control limit during duplicate repair.
+    {
+        const { DatabaseService } = await import('../src/services/database');
+        const db = new DatabaseService(':memory:');
+        const rawDb = (db as any).db;
+        createLegacyMacRepairSchema(rawDb);
+
+        const uppercaseMac = '00:07:AB:11:22:A0';
+        const lowercaseMac = uppercaseMac.toLowerCase();
+        const insertDuplicate = rawDb.prepare(`
+            INSERT INTO devices (
+                mac, ip, hostname, vendor, os, device_type, is_online,
+                session_id, speed_limit, first_seen, last_seen
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `);
+        insertDuplicate.run(
+            uppercaseMac,
+            '192.168.1.100',
+            'Controlled-Device',
+            'Samsung',
+            'Android',
+            'Smartphone / Tablet',
+            1,
+            'session_active_throttle',
+            35,
+            '2026-09-01 08:00:00',
+            '2026-09-04 18:00:00'
+        );
+        insertDuplicate.run(
+            lowercaseMac,
+            '192.168.1.101',
+            'Unknown',
+            'Generic Device',
+            'Unknown OS',
+            'Generic Client Device',
+            1,
+            null,
+            null,
+            '2026-09-02 08:00:00',
+            '2026-09-04 18:05:00'
+        );
+
+        await db.init();
+
+        const mergedRows = rawDb.prepare('SELECT * FROM devices WHERE LOWER(mac) = LOWER(?)').all(lowercaseMac);
+        assert.strictEqual(mergedRows.length, 1);
+        assert.strictEqual(mergedRows[0].mac, lowercaseMac);
+        assert.strictEqual(mergedRows[0].session_id, 'session_active_throttle');
+        assert.strictEqual(mergedRows[0].speed_limit, 35, 'NULL must normalize to 100 so the active valid limit wins');
+
+        await db.close();
+        console.log('  ✓ Duplicate MAC repair: NULL speed preserves the active valid control limit');
     }
 }

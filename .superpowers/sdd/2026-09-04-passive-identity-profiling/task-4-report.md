@@ -196,6 +196,101 @@ holdout: precision=1.000 coverage=0.889 unknown=0.111 (2/18)
   `frontend-react/src/lib/theme.ts`; it remains excluded from this change.
 - No product-code concerns remain.
 
+## Fix Round 3
+
+### Review finding addressed
+
+- Legacy MAC repair now maps `NULL`, `undefined`, blank, non-finite, and
+  out-of-range stored speed limits to the established unrestricted value
+  `100`, while preserving valid numeric limits from `0` through `100`.
+- Duplicate-case repair continues to choose the most restrictive valid limit,
+  so a valid active throttle is no longer overwritten by `Number(null) === 0`.
+
+### RED evidence
+
+Focused database command:
+
+```powershell
+Set-Location backend-node
+.\node_modules\.bin\ts-node.cmd -e "import { runDatabaseTests } from './tests/unit_database.test'; runDatabaseTests().catch(error => { console.error(error); process.exit(1); });"
+```
+
+Before the implementation, the uppercase legacy row seeded with
+`speed_limit=NULL` failed during initialization:
+
+```text
+AssertionError [ERR_ASSERTION]: Legacy NULL speed limit must map to unrestricted
+0 !== 100
+```
+
+### GREEN evidence
+
+The same focused database command exited `0`, including:
+
+```text
+✓ Legacy MAC repair: uppercase primary keys canonicalize before lowercase scan upserts
+✓ Duplicate MAC repair: NULL speed preserves the active valid control limit
+```
+
+Full Node verification:
+
+```powershell
+Set-Location backend-node
+npm test
+npm run build
+```
+
+Result:
+
+```text
+TEST RESULTS: 34 PASSED | 0 FAILED | 0.49s
+ALL NODE.JS TESTS PASSED SUCCESSFULLY!
+> netcut-backend@1.0.0 build
+> tsc
+```
+
+Relevant Python regression:
+
+```powershell
+Set-Location python-service
+& "D:\spoorf\python-service\venv\Scripts\python.exe" -m unittest discover -s tests -p "test_*.py" -q
+```
+
+Result:
+
+```text
+Ran 291 tests in 10.498s
+OK
+development: precision=1.000 coverage=0.857 unknown=0.143 (3/21)
+holdout: precision=1.000 coverage=0.889 unknown=0.111 (2/18)
+```
+
+### Regression coverage
+
+- A raw uppercase legacy row with `speed_limit=NULL` is canonicalized to one
+  lowercase row with `speed_limit=100`; identity, profile, control, redirect,
+  archive, observation, assessment, and linked-MAC state remain covered.
+- A case-duplicate pair with one `NULL` limit and one active `35` percent
+  throttle merges to one lowercase row retaining the active session and limit.
+
+### Self-review
+
+- Normalization occurs before the existing minimum-limit merge, preserving
+  valid `0` cut-off, `1..99` throttle, and `100` unrestricted semantics.
+- The implementation explicitly guards nullish and non-finite inputs rather
+  than relying on JavaScript numeric coercion.
+- Existing MAC repair ordering, identity selection, safety flags, session
+  selection, transactions, and linked-MAC repair were not changed.
+- `git diff --check` exited `0` with no output.
+- `frontend-react/src/lib/theme.ts` was neither touched nor staged.
+- No network operations were performed.
+
+### Concerns
+
+- The worktree still contains the pre-existing untracked
+  `frontend-react/src/lib/theme.ts`; it remains excluded from this change.
+- No product-code concerns remain.
+
 ## Fix Round 2
 
 ### Review finding addressed
