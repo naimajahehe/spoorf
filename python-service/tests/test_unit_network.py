@@ -13,6 +13,7 @@ from src.core.network import (
     get_current_gateway,
     get_network_info,
     get_wifi_info,
+    has_ipv6_connectivity,
     is_network_changed
 )
 
@@ -175,6 +176,45 @@ class TestCoreNetwork(unittest.TestCase):
             self.assertFalse(is_network_changed(curr_gw, curr_iface))
             self.assertTrue(is_network_changed("10.99.99.99", curr_iface))
             self.assertTrue(is_network_changed(curr_gw, "Virtual-Adapter-XYZ"))
+
+    # ===== IPv6 capability detection (local, no packets) =====
+    def _fake_addr(self, family, address):
+        class _A:
+            pass
+        a = _A()
+        a.family = family
+        a.address = address
+        return a
+
+    def test_has_ipv6_true_when_global_address_present(self):
+        import socket as _s
+        addrs = {
+            'Wi-Fi': [
+                self._fake_addr(_s.AF_INET, '192.168.1.10'),
+                self._fake_addr(_s.AF_INET6, 'fe80::1%14'),          # link-local → tak dihitung
+                self._fake_addr(_s.AF_INET6, '2404:8000:1024::45e1'), # global → dihitung
+            ]
+        }
+        with patch('psutil.net_if_addrs', return_value=addrs):
+            self.assertTrue(has_ipv6_connectivity())
+
+    def test_has_ipv6_false_when_only_link_local(self):
+        import socket as _s
+        addrs = {
+            'Wi-Fi': [
+                self._fake_addr(_s.AF_INET, '192.168.110.5'),
+                self._fake_addr(_s.AF_INET6, 'fe80::770f:1975:aee2:cec%14'),  # hanya link-local
+            ]
+        }
+        with patch('psutil.net_if_addrs', return_value=addrs):
+            self.assertFalse(has_ipv6_connectivity())
+
+    def test_has_ipv6_false_when_no_ipv6(self):
+        import socket as _s
+        addrs = {'Wi-Fi': [self._fake_addr(_s.AF_INET, '10.80.45.139')]}
+        with patch('psutil.net_if_addrs', return_value=addrs):
+            self.assertFalse(has_ipv6_connectivity())
+
 
 if __name__ == '__main__':
     unittest.main()

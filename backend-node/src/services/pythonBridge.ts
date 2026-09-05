@@ -342,7 +342,8 @@ export class PythonBridge extends EventEmitter {
                     ssid: event.data.ssid || '',
                     signal: event.data.signal || '',
                     interface_type: event.data.interface_type || 'wifi',
-                    state: event.data.connected ? 'connected' : 'disconnected'
+                    state: event.data.connected ? 'connected' : 'disconnected',
+                    has_ipv6: Boolean(event.data.has_ipv6)
                 };
             }
             this.emit('telemetry', event.data);
@@ -627,16 +628,16 @@ export class PythonBridge extends EventEmitter {
         }
     }
 
-    async getWifiInfo(): Promise<{ connected: boolean; ssid: string; signal: string; state: string; interface_type?: string }> {
+    async getWifiInfo(): Promise<{ connected: boolean; ssid: string; signal: string; state: string; interface_type?: string; has_ipv6?: boolean }> {
         if (this.latestWifiInfo) return this.latestWifiInfo;
         try {
             const res = await this.fetchWithTimeout(`${this.baseUrl}/api/wifi`);
             if (!res.ok) throw new Error('Failed to get wifi info');
             const data: any = await res.json();
-            this.latestWifiInfo = data.wifi || { connected: false, ssid: '', signal: '', state: 'disconnected', interface_type: 'unknown' };
+            this.latestWifiInfo = data.wifi || { connected: false, ssid: '', signal: '', state: 'disconnected', interface_type: 'unknown', has_ipv6: false };
             return this.latestWifiInfo;
         } catch {
-            return this.latestWifiInfo || { connected: false, ssid: '', signal: '', state: 'error', interface_type: 'unknown' };
+            return this.latestWifiInfo || { connected: false, ssid: '', signal: '', state: 'error', interface_type: 'unknown', has_ipv6: false };
         }
     }
 

@@ -14,6 +14,7 @@ import ipaddress
 from typing import List, Dict, Any, Optional
 
 from .network import (
+    has_ipv6_connectivity,
     get_wifi_info,
     get_network_info,
     get_current_gateway,
@@ -371,11 +372,14 @@ class NetworkScanner:
 
         def _run_ipv6_discovery():
             try:
+                # GERBANG IPv6: bila jaringan tak menyediakan IPv6 (cek lokal, tanpa paket),
+                # lewati SEMUA kerja IPv6 → tak ada latensi/paket sia-sia di jaringan IPv4-only.
+                if not has_ipv6_connectivity():
+                    return
                 collect_from_ndp_cache(discovered_ipv6)
                 send_ipv6_all_nodes_multicast(discovered_ipv6, timeout=0.80)
                 # Router Solicitation (ff02::2): tangkap alamat link-local gateway IPv6
-                # secara andal agar pemblokiran dual-stack tak bocor lewat IPv6. Self-gating:
-                # jaringan IPv4-only tak membalas RA → tak menambah kandidat (perilaku tetap).
+                # secara andal agar pemblokiran dual-stack tak bocor lewat IPv6.
                 send_ipv6_router_solicitation(discovered_ipv6, self_mac=get_self_mac() or "")
             except Exception as e:
                 logger.debug(f"IPv6 discovery exception: {e}")

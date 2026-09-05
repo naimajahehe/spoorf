@@ -216,6 +216,38 @@ def get_network_info() -> Dict[str, Any]:
         'interface': ''
     }
 
+def has_ipv6_connectivity() -> bool:
+    """
+    Deteksi LOKAL (tanpa mengirim paket) apakah jaringan aktif menyediakan IPv6.
+    True bila ada alamat IPv6 GLOBAL/ULA pada interface aktif — yang hanya muncul
+    (via SLAAC) ketika sebuah router IPv6 mengumumkan prefix. Alamat link-local
+    (fe80::) selalu ada di tiap adapter dan TIDAK dihitung sebagai konektivitas.
+
+    Dipakai sebagai gerbang: bila False, seluruh kerja penemuan/pemblokiran IPv6
+    dilewati (jaringan IPv4-only) sehingga tak ada latensi/paket sia-sia.
+    """
+    try:
+        import psutil
+        for _iface, addr_list in (psutil.net_if_addrs() or {}).items():
+            for a in addr_list:
+                if getattr(a, 'family', None) != socket.AF_INET6:
+                    continue
+                raw = str(getattr(a, 'address', '') or '').split('%')[0].strip()
+                if not raw:
+                    continue
+                try:
+                    obj = ipaddress.IPv6Address(raw)
+                except ValueError:
+                    continue
+                # Hanya alamat yang bisa me-route (global / ULA) yang menandakan IPv6 aktif.
+                if obj.is_link_local or obj.is_loopback or obj.is_unspecified or obj.is_multicast:
+                    continue
+                return True
+    except Exception as e:
+        logger.debug(f"Notice detecting IPv6 connectivity: {e}")
+    return False
+
+
 def get_wifi_info() -> Dict[str, Any]:
     """
     Universal Network Resolver:
@@ -237,9 +269,11 @@ def get_wifi_info() -> Dict[str, Any]:
         'channel': '',
         'interface': 'Wi-Fi',
         'interface_type': 'wifi',
-        'state': 'disconnected'
+        'state': 'disconnected',
+        'has_ipv6': False
     }
     if sys.platform != 'win32':
+        wifi_info['has_ipv6'] = has_ipv6_connectivity()
         return wifi_info
 
     # 1. Coba deteksi interface Wi-Fi via netsh wlan
@@ -317,6 +351,7 @@ def get_wifi_info() -> Dict[str, Any]:
             logger.debug(f"Notice universal network fallback: {e}")
 
     wifi_info['state'] = 'connected' if wifi_info['connected'] else 'disconnected'
+    wifi_info['has_ipv6'] = has_ipv6_connectivity()
 
     with _WIFI_CACHE_LOCK:
         _WIFI_INFO_CACHE = dict(wifi_info)

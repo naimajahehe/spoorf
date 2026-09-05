@@ -1204,15 +1204,22 @@ function App() {
                                     ) : (
                                         <WifiOff size={13} className="text-zinc-500 shrink-0" />
                                     )}
-                                    <span className={cn(
-                                        "truncate max-w-[160px] font-medium transition-colors",
-                                        apIsolation?.is_isolated ? "text-amber-400 font-semibold" : "text-zinc-300 hover:text-white"
-                                    )}>
-                                        {wifiInfo.state === 'detecting'
-                                            ? (wifiInfo.ssid ? wifiInfo.ssid : 'Mendeteksi Jaringan…')
-                                            : wifiInfo.connected
-                                                ? (wifiInfo.ssid || 'Terhubung')
-                                                : 'Tidak Ada Jaringan'}
+                                    <span className="flex flex-col items-start leading-tight min-w-0">
+                                        <span className={cn(
+                                            "truncate max-w-[160px] font-medium transition-colors",
+                                            apIsolation?.is_isolated ? "text-amber-400 font-semibold" : "text-zinc-300 hover:text-white"
+                                        )}>
+                                            {wifiInfo.state === 'detecting'
+                                                ? (wifiInfo.ssid ? wifiInfo.ssid : 'Mendeteksi Jaringan…')
+                                                : wifiInfo.connected
+                                                    ? (wifiInfo.ssid || 'Terhubung')
+                                                    : 'Tidak Ada Jaringan'}
+                                        </span>
+                                        {wifiInfo.connected && (
+                                            <span className="text-[9px] font-mono tracking-wide text-zinc-500">
+                                                {wifiInfo.has_ipv6 ? 'IPv4 · IPv6' : 'IPv4'}
+                                            </span>
+                                        )}
                                     </span>
 
                                     <ChevronDown size={12} className={cn("transition-transform duration-200 shrink-0", apIsolation?.is_isolated ? "text-amber-400/80" : "text-zinc-400", isWifiPopoverOpen && "rotate-180 text-white")} />

@@ -14,6 +14,8 @@ export interface WifiInfo {
     signal: string;
     state: 'detecting' | 'connected' | 'disconnected';
     interface_type?: 'wifi' | 'ethernet' | 'tethering' | 'unknown';
+    /** True bila jaringan aktif menyediakan IPv6 (ada alamat IPv6 global/ULA). */
+    has_ipv6?: boolean;
 }
 
 const getInitialWifiInfo = (): WifiInfo => {
