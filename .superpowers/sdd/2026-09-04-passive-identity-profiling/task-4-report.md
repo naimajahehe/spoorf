@@ -98,3 +98,100 @@ holdout: precision=1.000 coverage=0.889 unknown=0.111 (2/18)
 - The worktree has a pre-existing untracked
   `frontend-react/src/lib/theme.ts`; it remains untouched and uncommitted.
 - No product-code concerns remain. No network operations were performed.
+
+## Fix Round 1
+
+### Review findings addressed
+
+1. Scan reconciliation now normalizes each incoming MAC once before using it
+   for lookup keys, SQLite inserts/conflicts, returned scan targets, and
+   profile-linked MACs. Uppercase and lowercase sightings therefore reconcile
+   to one canonical lowercase row without splitting alias, control, session,
+   profile-link, or assessment state.
+2. Reconciliation now uses an internal device lookup that includes archived
+   rows. Public `getAllDevices()` semantics remain unchanged. When an archived
+   high-confidence device returns with an Unknown assessment, it is unarchived,
+   retains its last-known vendor/type/hostname/OS labels, and receives the
+   current Unknown status, zero confidence, evidence, timestamp, and version.
+
+### RED evidence
+
+Focused in-memory database regressions failed before the implementation:
+
+```text
+AssertionError: Case-variant scans must reconcile into one SQLite row
+2 !== 1
+```
+
+```text
+AssertionError: Unknown refresh must preserve archived last-known vendor
+actual: 'Generic Device'
+expected: 'Samsung'
+```
+
+### GREEN evidence
+
+Focused database tests:
+
+```powershell
+Set-Location backend-node
+.\node_modules\.bin\ts-node.cmd -e "import { runDatabaseTests } from './tests/unit_database.test'; runDatabaseTests().catch(error => { console.error(error); process.exit(1); });"
+```
+
+Result: exit `0`, including both new reconciliation regressions.
+
+Full Node verification:
+
+```powershell
+npm test
+npm run build
+```
+
+Result:
+
+```text
+TEST RESULTS: 34 PASSED | 0 FAILED
+ALL NODE.JS TESTS PASSED SUCCESSFULLY!
+tsc
+```
+
+Relevant repository-wide Python regression:
+
+```powershell
+& "D:\spoorf\python-service\venv\Scripts\python.exe" -m unittest discover -s tests -p "test_*.py" -q
+```
+
+Result:
+
+```text
+Ran 291 tests in 11.885s
+OK
+development: precision=1.000 coverage=0.857 unknown=0.143 (3/21)
+holdout: precision=1.000 coverage=0.889 unknown=0.111 (2/18)
+```
+
+### Files
+
+- `backend-node/src/services/database.ts`
+  - Added a private archived-inclusive reconciliation read path.
+  - Canonicalized incoming scan MACs before all reconciliation operations.
+  - Reused the canonical MAC during embedded assessment validation.
+- `backend-node/tests/unit_database.test.ts`
+  - Added in-memory case-variant reconciliation coverage.
+  - Added archived high-to-Unknown refresh coverage.
+
+### Preserved constraints
+
+- Public archived-device filtering remains unchanged.
+- Profile persistence remains transactional.
+- PRAGMA-based additive migration and the 32 KiB evidence bound remain intact.
+- Alias, block, redirect, speed-limit, profile-link, session, and last-known
+  identity semantics remain intact.
+- `frontend-react/src/lib/theme.ts` was not touched or staged.
+- No network operations were performed.
+
+### Concerns
+
+- The worktree still contains the pre-existing untracked
+  `frontend-react/src/lib/theme.ts`; it remains excluded from this change.
+- No product-code concerns remain.

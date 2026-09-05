@@ -251,11 +251,14 @@ function serializeProfileEvidence(evidence: unknown): string {
     return serialized;
 }
 
-function validateProfileAssessment(profile: ProfileAssessment): ProfileAssessment & { evidenceJson: string } {
+function validateProfileAssessment(
+    profile: ProfileAssessment,
+    normalizedMac?: string
+): ProfileAssessment & { evidenceJson: string } {
     if (!profile || typeof profile !== 'object') {
         throw new Error('Profile assessment is required');
     }
-    const mac = normalizeMacAddress(profile.mac);
+    const mac = normalizedMac ?? normalizeMacAddress(profile.mac);
     if (typeof profile.ip !== 'string' || profile.ip.trim() === '') {
         throw new Error('Profile IP address is required');
     }
@@ -510,8 +513,11 @@ export class DatabaseService {
         return result.changes;
     }
 
-    async getAllDevices(): Promise<Device[]> {
+    private async getDevices(includeArchived: boolean): Promise<Device[]> {
         await this.init();
+        const archiveFilter = includeArchived
+            ? ''
+            : 'WHERE d.is_archived = 0 OR d.is_archived IS NULL';
         const query = `
             SELECT 
                 d.mac, d.ip, d.last_ip, d.hostname, d.vendor, d.os, d.device_type,
@@ -528,10 +534,14 @@ export class DatabaseService {
                 d.last_seen
             FROM devices d
             LEFT JOIN device_profiles p ON d.profile_id = p.id
-            WHERE d.is_archived = 0 OR d.is_archived IS NULL
+            ${archiveFilter}
             ORDER BY d.is_blocked DESC, d.is_online DESC, d.last_seen DESC
         `;
         const rows = this.db.prepare(query).all() as any[];
+        if (includeArchived) {
+            return rows.map(row => this.rowToDevice(row));
+        }
+
         const seenIps = new Set<string>();
         return rows.map(row => {
             const dev = this.rowToDevice(row);
@@ -545,6 +555,14 @@ export class DatabaseService {
             }
             return dev;
         });
+    }
+
+    async getAllDevices(): Promise<Device[]> {
+        return this.getDevices(false);
+    }
+
+    private async getDevicesForReconciliation(): Promise<Device[]> {
+        return this.getDevices(true);
     }
 
     async getDeviceByMac(mac: string): Promise<Device | null> {
@@ -901,7 +919,7 @@ export class DatabaseService {
     }> {
         await this.init();
 
-        const existingDevices = await this.getAllDevices();
+        const existingDevices = await this.getDevicesForReconciliation();
         const existingMap = new Map<string, Device>();
         for (const dev of existingDevices) {
             existingMap.set(dev.mac.toLowerCase(), dev);
@@ -1033,8 +1051,11 @@ export class DatabaseService {
         // Eksekusi atomik menggunakan db.transaction native better-sqlite3
         const syncTransaction = this.db.transaction(() => {
             // 1. Proses perangkat yang baru saja tertangkap di scan
-            for (const scanned of scannedDevices) {
-                const macKey = scanned.mac.toLowerCase();
+            for (const rawScanned of scannedDevices) {
+                const macKey = normalizeMacAddress(rawScanned.mac);
+                const scanned = rawScanned.mac === macKey
+                    ? rawScanned
+                    : { ...rawScanned, mac: macKey };
                 scannedMacs.add(macKey);
 
                 // Pastikan hanya 1 gateway aktif di jaringan ini
@@ -1071,7 +1092,7 @@ export class DatabaseService {
                         profile_evidence: scanned.profile_evidence as ProfileEvidence[],
                         profiled_at: scanned.profiled_at,
                         profile_version: scanned.profile_version as number
-                    });
+                    }, macKey);
                 }
 
                 // Jika perangkat baru / tidak ada di existing, terapkan Multi-Factor Fingerprint Scoring

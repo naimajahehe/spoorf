@@ -1033,4 +1033,168 @@ export async function runDatabaseTests() {
         }
         console.log('  ✓ Profile restart: assessment mapping survives restart and scan reconciliation');
     }
+
+    // Test 20: case-variant scans reconcile to one canonical MAC row without losing state.
+    {
+        const { DatabaseService } = await import('../src/services/database');
+        const db = new DatabaseService(':memory:');
+        await db.init();
+
+        const uppercaseMac = '00:07:AB:11:22:60';
+        const lowercaseMac = uppercaseMac.toLowerCase();
+        const baseScan: Device = {
+            ip: '192.168.1.60',
+            mac: uppercaseMac,
+            hostname: 'Galaxy-Case',
+            vendor: 'Samsung',
+            device_type: 'Smartphone / Tablet',
+            os: 'Android',
+            rtt_ms: 3,
+            open_ports: [],
+            services: [],
+            is_blocked: false,
+            is_online: true,
+            is_gateway: false
+        };
+
+        await db.syncScanResults([baseScan]);
+        await db.setDeviceAlias(uppercaseMac, 'Case Preserved');
+        await db.setDeviceBlocked(uppercaseMac, true, 'session_case_1');
+        await db.setDeviceSpeedLimit(uppercaseMac, 25);
+        await db.updateDeviceProfileAssessment({
+            mac: uppercaseMac,
+            ip: baseScan.ip,
+            vendor: baseScan.vendor,
+            device_type: baseScan.device_type,
+            hostname: baseScan.hostname,
+            os: baseScan.os,
+            vendor_confidence: 94,
+            type_confidence: 96,
+            hostname_confidence: 90,
+            profile_status: 'high',
+            profile_evidence: [{
+                source: 'mdns',
+                group: 'explicit_identity',
+                field: 'model',
+                value: 'SM-A055F',
+                strength: 'explicit',
+                observed_at: '2026-09-04T13:00:00Z'
+            }],
+            profiled_at: '2026-09-04T13:00:05Z',
+            profile_version: 4
+        });
+
+        const before = await db.getDeviceByMac(uppercaseMac) as any;
+        const syncResult = await db.syncScanResults([{
+            ...baseScan,
+            mac: lowercaseMac,
+            rtt_ms: 2
+        }]);
+
+        const rawDb = (db as any).db;
+        const rows = rawDb.prepare('SELECT * FROM devices WHERE LOWER(mac) = LOWER(?)').all(lowercaseMac);
+        const profile = rawDb.prepare('SELECT linked_macs FROM device_profiles WHERE id = ?').get(before.profile_id);
+        const stored = await db.getDeviceByMac(lowercaseMac) as any;
+
+        assert.strictEqual(rows.length, 1, 'Case-variant scans must reconcile into one SQLite row');
+        assert.strictEqual(rows[0].mac, lowercaseMac, 'Persisted and returned MAC must use canonical lowercase');
+        assert.strictEqual(syncResult.allDevices.length, 1);
+        assert.strictEqual(syncResult.allDevices[0].mac, lowercaseMac);
+        assert.strictEqual(stored.alias, 'Case Preserved');
+        assert.strictEqual(stored.is_blocked, true);
+        assert.strictEqual(stored.session_id, 'session_case_1');
+        assert.strictEqual(stored.speed_limit, 25);
+        assert.strictEqual(stored.profile_id, before.profile_id);
+        assert.strictEqual(stored.profile_status, 'high');
+        assert.strictEqual(stored.vendor_confidence, 94);
+        assert.deepStrictEqual(JSON.parse(profile.linked_macs), [lowercaseMac]);
+
+        await db.close();
+        console.log('  ✓ MAC normalization: case-variant scans preserve one canonical row and all control/profile state');
+    }
+
+    // Test 21: archived devices participate in reconciliation while remaining hidden from public lists.
+    {
+        const { DatabaseService } = await import('../src/services/database');
+        const db = new DatabaseService(':memory:');
+        await db.init();
+
+        const mac = '00:07:ab:11:22:70';
+        const knownScan: Device = {
+            ip: '192.168.1.70',
+            mac,
+            hostname: 'Galaxy-Archived',
+            vendor: 'Samsung',
+            device_type: 'Smartphone / Tablet',
+            os: 'Android',
+            rtt_ms: 4,
+            open_ports: [],
+            services: [],
+            is_blocked: false,
+            is_online: true,
+            is_gateway: false
+        };
+
+        await db.syncScanResults([knownScan]);
+        await db.updateDeviceProfileAssessment({
+            mac,
+            ip: knownScan.ip,
+            vendor: knownScan.vendor,
+            device_type: knownScan.device_type,
+            hostname: knownScan.hostname,
+            os: knownScan.os,
+            vendor_confidence: 95,
+            type_confidence: 96,
+            hostname_confidence: 91,
+            profile_status: 'high',
+            profile_evidence: [{
+                source: 'ssdp',
+                group: 'service_behavior',
+                field: 'server',
+                value: 'Samsung UPnP',
+                strength: 'strong',
+                observed_at: '2026-09-04T14:00:00Z'
+            }],
+            profiled_at: '2026-09-04T14:00:05Z',
+            profile_version: 5
+        });
+
+        const rawDb = (db as any).db;
+        rawDb.prepare('UPDATE devices SET is_archived = 1, is_online = 0 WHERE mac = ?').run(mac);
+        assert.strictEqual((await db.getAllDevices()).length, 0, 'Archived rows must remain hidden publicly');
+
+        const refreshedAt = '2026-09-04T15:00:05Z';
+        const syncResult = await db.syncScanResults([{
+            ...knownScan,
+            hostname: 'Unknown',
+            vendor: 'Generic Device',
+            device_type: 'Generic Client Device',
+            os: 'Unknown OS',
+            profile_status: 'unknown',
+            vendor_confidence: 0,
+            type_confidence: 0,
+            hostname_confidence: 0,
+            profile_evidence: [],
+            profiled_at: refreshedAt,
+            profile_version: 6
+        }]);
+
+        const stored = await db.getDeviceByMac(mac) as any;
+        assert.strictEqual(syncResult.allDevices.length, 1, 'Returning archived device must be visible again');
+        assert.strictEqual(stored.is_archived, false);
+        assert.strictEqual(stored.vendor, 'Samsung', 'Unknown refresh must preserve archived last-known vendor');
+        assert.strictEqual(stored.device_type, 'Smartphone / Tablet', 'Unknown refresh must preserve archived last-known type');
+        assert.strictEqual(stored.hostname, 'Galaxy-Archived', 'Unknown refresh must preserve archived last-known hostname');
+        assert.strictEqual(stored.os, 'Android', 'Unknown refresh must preserve archived last-known OS');
+        assert.strictEqual(stored.profile_status, 'unknown');
+        assert.strictEqual(stored.vendor_confidence, 0);
+        assert.strictEqual(stored.type_confidence, 0);
+        assert.strictEqual(stored.hostname_confidence, 0);
+        assert.deepStrictEqual(stored.profile_evidence, []);
+        assert.strictEqual(stored.profiled_at, refreshedAt);
+        assert.strictEqual(stored.profile_version, 6);
+
+        await db.close();
+        console.log('  ✓ Archived reconciliation: last-known labels survive an Unknown refresh and the row is unarchived');
+    }
 }
