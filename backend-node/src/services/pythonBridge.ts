@@ -672,7 +672,9 @@ export class PythonBridge extends EventEmitter {
             ...target,
             ipv6_addresses: normalizeProfileIpv6Addresses(target.ipv6_addresses || [])
         }));
-        const timeoutMs = Math.ceil(observationSeconds * 1000) + 15000;
+        // Marjin di atas jendela observasi harus > SENSOR_BUDGET_SECONDS (20s) Python +
+        // overhead, agar Node tak abort sebelum operasi terbatas itu selesai.
+        const timeoutMs = Math.ceil(observationSeconds * 1000) + 30000;
         const res = await this.fetchWithTimeout(`${this.baseUrl}/api/network/profile-refresh`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },

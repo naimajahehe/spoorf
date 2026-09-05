@@ -25,7 +25,7 @@ from .ipv6_ndp import categorize_ipv6, collect_from_ndp_cache, verify_ipv6_alive
 from .multicast import collect_identity_multicast
 
 MAX_PROFILE_TARGETS = 300
-MAX_PROFILE_WORKERS = 8
+MAX_PROFILE_WORKERS = 16
 MIN_OBSERVATION_SECONDS = 3.0
 MAX_OBSERVATION_SECONDS = 10.0
 DEFAULT_OBSERVATION_SECONDS = 5.0
@@ -37,7 +37,7 @@ REVERSE_DNS_TIMEOUT_SECONDS = 0.4
 # Anggaran waktu-dinding total untuk fase pengumpulan sensor per-perangkat. Menjaga
 # endpoint selalu selesai dalam ~observation + budget (< timeout bridge 20s) BERAPA PUN
 # jumlah perangkat; target yang lewat anggaran → hasil parsial + partial_failures.
-SENSOR_BUDGET_SECONDS = 8.0
+SENSOR_BUDGET_SECONDS = 20.0
 
 # Executor bersama untuk reverse-DNS berbatas waktu (mencegah blocking gethostbyaddr).
 _REVERSE_DNS_EXECUTOR = ThreadPoolExecutor(
