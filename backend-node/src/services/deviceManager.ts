@@ -480,6 +480,18 @@ export class DeviceManager extends EventEmitter {
                     }
                 }
 
+                // TRUST-FRESH BYPASS: bila perangkat baru terverifikasi online sangat baru-baru ini,
+                // kegagalan satu probe jauh lebih mungkin karena contention Npcap/CPU (mis. saat scan/
+                // gaming) ketimbang perangkat benar-benar pergi. Percayai kehadiran segar & lanjutkan
+                // aksi daripada gagal-palsu. Ambang 15s ≈ satu siklus watchdog liveness.
+                const TRUST_FRESH_ONLINE_MS = 15_000;
+                const lastSeenMs = device.last_seen ? new Date(device.last_seen).getTime() : 0;
+                const sinceSeenMs = lastSeenMs > 0 ? Date.now() - lastSeenMs : Infinity;
+                if (sinceSeenMs < TRUST_FRESH_ONLINE_MS) {
+                    console.log(`✅ [Pre-Flight Trust-Fresh] ${device.mac} terakhir online ${Math.round(sinceSeenMs / 1000)}s lalu (< ${TRUST_FRESH_ONLINE_MS / 1000}s) — melewati vonis offline, lanjutkan aksi.`);
+                    return;
+                }
+
                 // Target terbukti offline (tidak membalas Pre-Flight Liveness Probe)
                 const normMac = device.mac.toLowerCase();
                 device.is_online = false;

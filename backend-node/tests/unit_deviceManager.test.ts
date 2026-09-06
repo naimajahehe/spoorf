@@ -1955,4 +1955,50 @@ export async function runDeviceManagerTests() {
         console.log('  ✓ Auto Scan: background watchdog gated by the toggle');
     }
 
+    // ===== Pre-Flight trust-fresh bypass (avoid false "offline" on genuinely active devices) =====
+    {
+        const python: any = new EventEmitter();
+        python.pulseLiveness = async () => ({ '192.168.1.77': { is_alive: false } });
+        const db: any = { setDeviceOnlineStatus: async () => {} };
+        const manager = new DeviceManager(python, db);
+
+        const freshDevice = makeStateRetentionDevice({
+            ip: '192.168.1.77',
+            mac: 'aa:bb:cc:dd:ee:01',
+            last_seen: new Date().toISOString()
+        });
+
+        // Probe reports offline, but the device was verified online just now (< trust window):
+        // pre-flight must TRUST the fresh presence and NOT false-fail the action.
+        await (manager as any)._verifyPreFlightLiveness(freshDevice, '192.168.1.1');
+        assert.strictEqual(freshDevice.is_online, true, 'fresh device must not be forced offline by a single missed probe');
+        console.log('  ✓ Pre-flight: trusts fresh last_seen and does not false-fail an active device');
+    }
+
+    // ===== Pre-Flight still fails a stale device that no longer responds (guardrail) =====
+    {
+        const python: any = new EventEmitter();
+        python.pulseLiveness = async () => ({ '192.168.1.78': { is_alive: false } });
+        let markedOffline = false;
+        const db: any = { setDeviceOnlineStatus: async () => { markedOffline = true; } };
+        const manager = new DeviceManager(python, db);
+
+        const staleDevice = makeStateRetentionDevice({
+            ip: '192.168.1.78',
+            mac: 'aa:bb:cc:dd:ee:02',
+            last_seen: new Date(Date.now() - 60_000).toISOString() // 60s ago → beyond the 15s trust window
+        });
+
+        let threw = false;
+        try {
+            await (manager as any)._verifyPreFlightLiveness(staleDevice, '192.168.1.1');
+        } catch (err: any) {
+            threw = true;
+            assert.ok(err.message.includes('tidak merespons'), 'stale unresponsive device must still be reported');
+        }
+        assert.strictEqual(threw, true, 'device stale beyond trust window + probe-dead must still fail');
+        assert.strictEqual(markedOffline, true, 'stale offline device must be persisted offline');
+        console.log('  ✓ Pre-flight: still fails a stale device that no longer responds');
+    }
+
 }
