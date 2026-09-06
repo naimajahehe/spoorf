@@ -39,6 +39,8 @@ interface SecurityTelemetrySidebarProps {
     onRefresh?: () => Promise<void> | void;
     isRefreshing?: boolean;
     isLoading?: boolean;
+    /** Operasi putus/pulih perangkat LAIN sedang berjalan → tombol di sidebar ini dinonaktifkan. */
+    toggleLockedByOther?: boolean;
     authStatus?: AuthStatusResponse;
     onOpenUpgradeModal?: (reason?: string) => void;
     className?: string;
@@ -56,6 +58,7 @@ export const SecurityTelemetrySidebar: FC<SecurityTelemetrySidebarProps> = ({
     onRefresh,
     isRefreshing = false,
     isLoading = false,
+    toggleLockedByOther = false,
     authStatus,
     onOpenUpgradeModal,
     className
@@ -631,9 +634,11 @@ export const SecurityTelemetrySidebar: FC<SecurityTelemetrySidebarProps> = ({
                         <button
                             type="button"
                             onClick={() => onToggleInternet(device)}
-                            disabled={isLoading}
+                            disabled={isLoading || toggleLockedByOther}
+                            title={toggleLockedByOther ? "Menunggu proses perangkat lain selesai…" : undefined}
                             className={cn(
                                 "w-full flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg text-xs font-mono font-medium transition-all border mt-2",
+                                toggleLockedByOther && "opacity-40 cursor-not-allowed pointer-events-none grayscale",
                                 isThrottled
                                     ? cn("border", throttleTheme.badge, "hover:opacity-90")
                                     : isInternetActive
@@ -755,7 +760,7 @@ export const SecurityTelemetrySidebar: FC<SecurityTelemetrySidebarProps> = ({
                 </div>
             )
         }
-    ], [device, deviceName, ttlValue, ttlDesc, isOnline, isInternetActive, isThrottled, aliasInput, copiedKey, isLoading, onSetSpeedLimit, onUpdateAlias, onToggleInternet, onDeleteDevice, authStatus, onOpenUpgradeModal, bandwidthHistory, telemetry]);
+    ], [device, deviceName, ttlValue, ttlDesc, isOnline, isInternetActive, isThrottled, aliasInput, copiedKey, isLoading, toggleLockedByOther, onSetSpeedLimit, onUpdateAlias, onToggleInternet, onDeleteDevice, authStatus, onOpenUpgradeModal, bandwidthHistory, telemetry]);
 
     return (
         <aside className={cn(

@@ -55,6 +55,8 @@ interface Props {
     onSetSpeedLimit?: (ip: string, limit: number) => void;
     onOpenRedirectModal?: (device: Device) => void;
     loadingIps: Set<string>;
+    /** IP perangkat yang operasinya sedang berjalan; tombol perangkat LAIN dinonaktifkan total. */
+    busyToggleIp?: string | null;
 }
 
 export const DeviceTable: FC<Props> = ({
@@ -70,7 +72,8 @@ export const DeviceTable: FC<Props> = ({
     onDeleteDevice,
     onUpdateAlias,
     onOpenRedirectModal,
-    loadingIps
+    loadingIps,
+    busyToggleIp
 }) => {
     const [expandedIp, setExpandedIp] = useState<string | null>(null);
     const [copiedKey, setCopiedKey] = useState<string | null>(null);
@@ -237,6 +240,8 @@ export const DeviceTable: FC<Props> = ({
                         const isInspecting = activeInspectorIp === device.ip;
                         const isOnline = device.is_self ? true : device.is_online;
                         const isLoading = loadingIps.has(device.ip);
+                        // Kunci total: operasi putus/pulih perangkat LAIN sedang berjalan.
+                        const lockedByOther = busyToggleIp != null && busyToggleIp !== device.ip;
                         const isInternetActive = !device.is_blocked && (device.speed_limit === undefined || device.speed_limit > 0);
                         const isThrottled = (device.speed_limit ?? 100) > 0 && (device.speed_limit ?? 100) < 100;
 
@@ -496,7 +501,9 @@ export const DeviceTable: FC<Props> = ({
                                                             {(() => {
                                                                 const distanceLevel: 'near' | 'medium' | 'far' = (device.is_self || !device.distance_zone || device.distance_zone === 'unknown') ? 'near' : device.distance_zone;
                                                                 const distanceLabel = distanceLevel === 'near' ? 'Dekat' : distanceLevel === 'medium' ? 'Sedang' : 'Jauh';
-                                                                const tooltipText = isLoading
+                                                                const tooltipText = lockedByOther
+                                                                    ? "Menunggu proses perangkat lain selesai…"
+                                                                    : isLoading
                                                                     ? (isInternetActive ? "Memverifikasi denyut & memutus..." : "Sedang memulihkan koneksi...")
                                                                     : !isOnline && !device.is_blocked
                                                                         ? "Perangkat Offline (Tidak terhubung ke Wi-Fi)"
@@ -560,11 +567,12 @@ export const DeviceTable: FC<Props> = ({
                                                                     <Tooltip content={tooltipText}>
                                                                         <button
                                                                             type="button"
-                                                                            disabled={isLoading}
+                                                                            disabled={isLoading || lockedByOther}
                                                                             onClick={() => onToggleInternet(device)}
                                                                             className={cn(
                                                                                 "size-7 rounded-full flex items-center justify-center transition-all duration-150 outline-none group cursor-pointer active:scale-95",
                                                                                 isLoading && "cursor-wait opacity-80",
+                                                                                lockedByOther && "opacity-40 cursor-not-allowed pointer-events-none grayscale",
                                                                                 !isOnline && !device.is_blocked
                                                                                     ? "bg-zinc-800/40 border border-zinc-700/40 hover:bg-zinc-800/70 hover:border-zinc-600/50"
                                                                                     : isInternetActive

@@ -165,6 +165,10 @@ export function useWebSocket() {
     const deviceRef = useRef<Device[]>([]);
     const pendingAliasRef = useRef<Map<string, string | undefined>>(new Map());
     const refreshSequencerRef = useRef(new RefreshSequencer());
+    // Korelasi per-IP untuk operasi block/unblock: block()/unblock() menunggu penyelesaian NYATA
+    // dari backend (settle oleh handler deviceBlocked/blockError/deviceUnblocked/unblockError), dengan
+    // safety-timeout 12s agar tombol tak macet permanen bila engine menggantung.
+    const pendingToggleOpsRef = useRef<Map<string, { resolve: () => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }>>(new Map());
     const refreshAbortControllerRef = useRef<AbortController | null>(null);
     const refreshRequestRef = useRef<(generation?: number) => void>(() => {});
 
@@ -551,6 +555,7 @@ export function useWebSocket() {
         });
 
         newSocket.on('deviceBlocked', (device: Device) => {
+            settleToggleOp(device.ip, true);
             recordLiveStateChange(['devices']);
             pushActivity({
                 category: 'security',
@@ -563,6 +568,7 @@ export function useWebSocket() {
         });
 
         newSocket.on('deviceUnblocked', (device: Device) => {
+            settleToggleOp(device.ip, true);
             recordLiveStateChange(['devices']);
             pushActivity({
                 category: 'security',
@@ -628,11 +634,13 @@ export function useWebSocket() {
 
         newSocket.on('blockError', (data: { error: string; ip?: string }) => {
             console.error('Block error:', data);
+            if (data.ip) settleToggleOp(data.ip, false, data.error);
             setError(`Gagal memblokir ${data.ip || 'perangkat'}: ${data.error}`);
         });
 
         newSocket.on('unblockError', (data: { error: string; ip?: string }) => {
             console.error('Unblock error:', data);
+            if (data.ip) settleToggleOp(data.ip, false, data.error);
             setError(`Gagal membuka blokir ${data.ip || 'perangkat'}: ${data.error}`);
         });
 
@@ -918,22 +926,57 @@ export function useWebSocket() {
         }
     };
 
-    const block = (ip: string, gatewayIp: string) => {
-        if (!socket?.connected) {
-            setError('Tidak dapat memblokir perangkat saat koneksi backend terputus. Tunggu hingga tersambung lalu coba lagi.');
-            return;
-        }
-        setError(null);
-        socket.emit('block', { ip, gatewayIp });
+    // Selesaikan operasi toggle tertunda untuk `ip` (dipanggil dari handler deviceBlocked/blockError/
+    // deviceUnblocked/unblockError). ok=true → resolve; ok=false → reject.
+    const settleToggleOp = (ip: string, ok: boolean, errorMsg?: string) => {
+        const pending = pendingToggleOpsRef.current.get(ip);
+        if (!pending) return;
+        clearTimeout(pending.timer);
+        pendingToggleOpsRef.current.delete(ip);
+        if (ok) pending.resolve();
+        else pending.reject(new Error(errorMsg || 'Operasi gagal'));
     };
 
-    const unblock = (ip: string) => {
+    // Promise yang menunggu penyelesaian NYATA backend untuk sebuah toggle op per-IP. Safety-timeout
+    // 12s menolak (melepas kunci) bila engine menggantung agar tombol tak macet permanen.
+    const awaitToggleCompletion = (ip: string): Promise<void> => {
+        return new Promise<void>((resolve, reject) => {
+            const stale = pendingToggleOpsRef.current.get(ip);
+            if (stale) {
+                clearTimeout(stale.timer);
+                stale.reject(new Error('Dibatalkan oleh permintaan baru'));
+                pendingToggleOpsRef.current.delete(ip);
+            }
+            const timer = setTimeout(() => {
+                pendingToggleOpsRef.current.delete(ip);
+                reject(new Error('Waktu tunggu habis: engine tidak merespons.'));
+            }, 12000);
+            pendingToggleOpsRef.current.set(ip, { resolve, reject, timer });
+        });
+    };
+
+    const block = (ip: string, gatewayIp: string): Promise<void> => {
         if (!socket?.connected) {
-            setError('Tidak dapat membuka blokir saat koneksi backend terputus. Tunggu hingga tersambung lalu coba lagi.');
-            return;
+            const msg = 'Tidak dapat memblokir perangkat saat koneksi backend terputus. Tunggu hingga tersambung lalu coba lagi.';
+            setError(msg);
+            return Promise.reject(new Error(msg));
         }
         setError(null);
+        const done = awaitToggleCompletion(ip);
+        socket.emit('block', { ip, gatewayIp });
+        return done;
+    };
+
+    const unblock = (ip: string): Promise<void> => {
+        if (!socket?.connected) {
+            const msg = 'Tidak dapat membuka blokir saat koneksi backend terputus. Tunggu hingga tersambung lalu coba lagi.';
+            setError(msg);
+            return Promise.reject(new Error(msg));
+        }
+        setError(null);
+        const done = awaitToggleCompletion(ip);
         socket.emit('unblock', { ip });
+        return done;
     };
 
     const deleteDevice = (mac: string) => {

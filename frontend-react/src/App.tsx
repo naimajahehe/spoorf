@@ -167,6 +167,9 @@ function App() {
     const [selectedIps, setSelectedIps] = useState<string[]>([]);
     const [isSelectMode, setIsSelectMode] = useState(false);
     const [loadingIps, setLoadingIps] = useState<Set<string>>(new Set());
+    // Kunci sekuensial GLOBAL untuk putus/pulih internet: saat satu operasi berjalan, tombol
+    // perangkat lain NONAKTIF TOTAL sampai selesai (bukan antre). null = tak ada yang berjalan.
+    const [busyToggleIp, setBusyToggleIp] = useState<string | null>(null);
     const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
     const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
         try {
@@ -995,8 +998,10 @@ function App() {
     };
 
     // 2-Second Freeze Toggle Handler
-    const handleToggleInternet = (device: Device) => {
-        if (loadingIps.has(device.ip) || device.is_gateway) return;
+    const handleToggleInternet = async (device: Device) => {
+        // Kunci sekuensial global: abaikan klik bila ADA operasi lain berjalan (tombol lain nonaktif total),
+        // baris ini sendiri sedang loading, atau target gateway.
+        if (busyToggleIp !== null || loadingIps.has(device.ip) || device.is_gateway) return;
 
         // Free tier block limit guard
         if (!device.is_blocked && (device.speed_limit === undefined || device.speed_limit >= 100)) {
@@ -1013,21 +1018,26 @@ function App() {
             }
         }
 
+        setBusyToggleIp(device.ip);
         setLoadingIps(prev => new Set(prev).add(device.ip));
-
-        if (device.is_blocked || (device.speed_limit !== undefined && device.speed_limit < 100)) {
-            unblock(device.ip);
-        } else {
-            block(device.ip, gatewayIp);
-        }
-
-        setTimeout(() => {
+        try {
+            // Menunggu penyelesaian NYATA dari backend (loading sampai benar-benar putus/pulih), bukan timer.
+            if (device.is_blocked || (device.speed_limit !== undefined && device.speed_limit < 100)) {
+                await unblock(device.ip);
+            } else {
+                await block(device.ip, gatewayIp);
+            }
+        } catch {
+            // Kegagalan (blockError/unblockError, atau timeout 12s) — pesan backend sudah ditampilkan
+            // handler useWebSocket; timeout hanya melepas kunci agar tombol tak macet.
+        } finally {
             setLoadingIps(prev => {
                 const next = new Set(prev);
                 next.delete(device.ip);
                 return next;
             });
-        }, 2000);
+            setBusyToggleIp(null);
+        }
     };
 
     // Perhitungan cerdas & konsisten untuk perangkat terpilih
@@ -1048,6 +1058,7 @@ function App() {
 
     // Action: Block Selected Devices (Hanya memblokir perangkat yang sedang aktif/tidak terblokir)
     const handleBlockSelected = () => {
+        if (busyToggleIp !== null) return; // kunci sekuensial global
         if (unblockedSelected.length === 0) return;
 
         if (authStatus?.license?.tier === 'free') {
@@ -1062,36 +1073,51 @@ function App() {
             }
         }
 
-        unblockedSelected.forEach(d => {
-            setLoadingIps(prev => new Set(prev).add(d.ip));
-            block(d.ip, gatewayIp);
-        });
-
-        setTimeout(() => {
-            setLoadingIps(prev => {
-                const next = new Set(prev);
-                unblockedSelected.forEach(d => next.delete(d.ip));
-                return next;
-            });
-        }, 2000);
+        // Proses satu-per-satu berurutan: spinner berpindah dari perangkat satu ke berikutnya,
+        // menunggu tiap pemutusan benar-benar selesai (bukan serentak + timer).
+        void (async () => {
+            for (const d of unblockedSelected) {
+                setBusyToggleIp(d.ip);
+                setLoadingIps(prev => new Set(prev).add(d.ip));
+                try {
+                    await block(d.ip, gatewayIp);
+                } catch {
+                    // Kegagalan per-perangkat sudah ditampilkan via toast; lanjut ke berikutnya.
+                } finally {
+                    setLoadingIps(prev => {
+                        const next = new Set(prev);
+                        next.delete(d.ip);
+                        return next;
+                    });
+                }
+            }
+            setBusyToggleIp(null);
+        })();
     };
 
     // Action: Restore Selected Devices (Hanya memulihkan perangkat yang sedang terblokir)
     const handleRestoreSelected = () => {
+        if (busyToggleIp !== null) return; // kunci sekuensial global
         if (blockedSelected.length === 0) return;
 
-        blockedSelected.forEach(d => {
-            setLoadingIps(prev => new Set(prev).add(d.ip));
-            unblock(d.ip);
-        });
-
-        setTimeout(() => {
-            setLoadingIps(prev => {
-                const next = new Set(prev);
-                blockedSelected.forEach(d => next.delete(d.ip));
-                return next;
-            });
-        }, 2000);
+        void (async () => {
+            for (const d of blockedSelected) {
+                setBusyToggleIp(d.ip);
+                setLoadingIps(prev => new Set(prev).add(d.ip));
+                try {
+                    await unblock(d.ip);
+                } catch {
+                    // Kegagalan per-perangkat sudah ditampilkan via toast; lanjut ke berikutnya.
+                } finally {
+                    setLoadingIps(prev => {
+                        const next = new Set(prev);
+                        next.delete(d.ip);
+                        return next;
+                    });
+                }
+            }
+            setBusyToggleIp(null);
+        })();
     };
 
     const handleStartRedirect = async (ip: string, redirectUrl: string, username: string) => {
@@ -1674,10 +1700,10 @@ function App() {
                                                         <button
                                                             type="button"
                                                             onClick={handleBlockSelected}
-                                                            disabled={unblockedSelectedCount === 0 || showScanningUI}
+                                                            disabled={unblockedSelectedCount === 0 || showScanningUI || busyToggleIp !== null}
                                                             className={cn(
                                                                 "px-3.5 py-1.5 rounded-lg text-xs font-medium transition-all border outline-none",
-                                                                unblockedSelectedCount > 0 && !showScanningUI
+                                                                unblockedSelectedCount > 0 && !showScanningUI && busyToggleIp === null
                                                                     ? "bg-rose-500/10 text-rose-400 border-rose-500/30 hover:bg-rose-500/20 hover:border-rose-500/40 shadow-sm shadow-rose-500/10"
                                                                     : "bg-white/[0.02] text-zinc-600 border-white/[0.05] cursor-not-allowed opacity-40"
                                                             )}
@@ -1689,10 +1715,10 @@ function App() {
                                                         <button
                                                             type="button"
                                                             onClick={handleRestoreSelected}
-                                                            disabled={blockedSelectedCount === 0 || showScanningUI}
+                                                            disabled={blockedSelectedCount === 0 || showScanningUI || busyToggleIp !== null}
                                                             className={cn(
                                                                 "px-3.5 py-1.5 rounded-lg text-xs font-medium transition-all border outline-none",
-                                                                blockedSelectedCount > 0 && !showScanningUI
+                                                                blockedSelectedCount > 0 && !showScanningUI && busyToggleIp === null
                                                                     ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/30 hover:bg-emerald-500/20 hover:border-emerald-500/40 shadow-sm shadow-emerald-500/10"
                                                                     : "bg-white/[0.02] text-zinc-600 border-white/[0.05] cursor-not-allowed opacity-40"
                                                             )}
@@ -1932,6 +1958,7 @@ function App() {
                                                 onDeleteDevice={deleteDevice}
                                                 onOpenRedirectModal={setRedirectModalDevice}
                                                 loadingIps={loadingIps}
+                                                busyToggleIp={busyToggleIp}
                                                 authStatus={authStatus}
                                             />
                                         </motion.div>
@@ -1961,6 +1988,7 @@ function App() {
                                             onRefresh={scan}
                                             isRefreshing={showScanningUI}
                                             isLoading={loadingIps.has(inspectorDevice.ip)}
+                                            toggleLockedByOther={busyToggleIp !== null && busyToggleIp !== inspectorDevice.ip}
                                             authStatus={authStatus}
                                             telemetry={telemetry}
                                             onOpenUpgradeModal={(reason) => setUpgradeModalState({ isOpen: true, reason })}
