@@ -235,39 +235,99 @@
 html.light {
   color-scheme: light;
 
-  /* Surfaces (3-step elevation over a cool paper) */
-  --paper: #eef1f6;
-  --surface: #ffffff;
-  --surface-elevated: #ffffff;
-  --surface-sunken: #e7ebf1;
+  --theme-paper: 245 247 251;
+  --theme-surface: 255 255 255;
+  --theme-sunken: 237 242 247;
+  --theme-hover: 224 232 241;
+  --theme-overlay: 15 23 42;
+  --theme-border: 220 227 237;
+  --theme-border-strong: 193 205 221;
+  --theme-border-opacity: 1;
+  --theme-border-strength: 1.5;
 
-  /* Ink scale (desaturated blue-charcoal → technical, not slate-generic) */
-  --ink: #0e1a2b;
-  --ink-strong: #0a1420;
-  --ink-2: #1f2b3d;
-  --ink-3: #3a4a5f;
-  --ink-muted: #5a6b80;
-  --ink-faint: #8493a6;
-  --ink-ghost: #a7b3c2;
+  --theme-ink: 21 34 56;
+  --theme-ink-strong: 17 28 47;
+  --theme-ink-2: 36 52 76;
+  --theme-ink-3: 59 77 102;
+  --theme-ink-muted: 76 94 119;
+  --theme-ink-faint: 88 106 130;
+  --theme-ink-ghost: 93 109 130;
 
-  /* Lines + signal + elevation */
-  --line: #d3dae4;
-  --line-strong: #bcc6d4;
-  --signal: #0891b2;
-  --shadow-md: 0 4px 12px -2px rgba(15, 23, 42, 0.08), 0 1px 3px rgba(15, 23, 42, 0.05);
-  --shadow-lg: 0 16px 40px -8px rgba(15, 23, 42, 0.18);
+  --theme-online: 4 108 78;
+  --theme-danger: 190 18 60;
+  --theme-warn: 146 64 14;
+  --theme-info: 14 100 124;
+  --theme-redir: 168 20 83;
+  --theme-pro: 109 40 217;
+  --theme-blue: 30 64 175;
+  --theme-online-fill: 5 150 105;
+  --theme-danger-fill: 225 29 72;
+  --theme-warn-fill: 217 119 6;
+  --theme-info-fill: 8 145 178;
+  --theme-redir-fill: 219 39 119;
+  --theme-pro-fill: 124 58 237;
+  --theme-blue-fill: 37 99 235;
 
-  /* Semantic status triplets — text / fill / border (all legible on white) */
-  --st-online-text: #047857;  --st-online-fill: rgba(5, 150, 105, 0.10);  --st-online-border: rgba(5, 150, 105, 0.28);
-  --st-danger-text: #e11d48;  --st-danger-fill: rgba(225, 29, 72, 0.10);  --st-danger-border: rgba(225, 29, 72, 0.28);
-  --st-warn-text: #b45309;    --st-warn-fill: rgba(217, 119, 6, 0.12);    --st-warn-border: rgba(217, 119, 6, 0.30);
-  --st-info-text: #0e7490;    --st-info-fill: rgba(8, 145, 178, 0.10);    --st-info-border: rgba(8, 145, 178, 0.28);
-  --st-redir-text: #be185d;   --st-redir-fill: rgba(219, 39, 119, 0.10);  --st-redir-border: rgba(219, 39, 119, 0.26);
-  --st-pro-text: #7c3aed;     --st-pro-fill: rgba(124, 58, 237, 0.10);    --st-pro-border: rgba(124, 58, 237, 0.26);
-  --st-blue-text: #1d4ed8;    --st-blue-fill: rgba(37, 99, 235, 0.10);    --st-blue-border: rgba(37, 99, 235, 0.26);
+  --paper: rgb(var(--theme-paper));
+  --surface: rgb(var(--theme-surface));
+  --surface-elevated: var(--surface);
+  --surface-sunken: rgb(var(--theme-sunken));
+  --ink: rgb(var(--theme-ink));
+  --ink-strong: rgb(var(--theme-ink-strong));
+  --ink-2: rgb(var(--theme-ink-2));
+  --ink-3: rgb(var(--theme-ink-3));
+  --ink-muted: rgb(var(--theme-ink-muted));
+  --ink-faint: rgb(var(--theme-ink-faint));
+  --ink-ghost: rgb(var(--theme-ink-ghost));
+  --line: rgb(var(--theme-border));
+  --line-strong: rgb(var(--theme-border-strong));
+  --signal: #0e7490;
+  --shadow-md: 0 2px 8px -4px rgba(15, 23, 42, 0.12), 0 1px 2px rgba(15, 23, 42, 0.04);
+  --shadow-lg: 0 16px 40px -16px rgba(15, 23, 42, 0.16), 0 4px 12px -6px rgba(15, 23, 42, 0.08);
+
+  --st-online-text: rgb(var(--theme-online)); --st-online-fill: rgb(var(--theme-online-fill) / 0.10);
+  --st-danger-text: rgb(var(--theme-danger)); --st-danger-fill: rgb(var(--theme-danger-fill) / 0.10);
+  --st-warn-text: rgb(var(--theme-warn)); --st-warn-fill: rgb(var(--theme-warn-fill) / 0.12);
+  --st-info-text: rgb(var(--theme-info)); --st-info-fill: rgb(var(--theme-info-fill) / 0.10);
+  --st-redir-text: rgb(var(--theme-redir)); --st-redir-fill: rgb(var(--theme-redir-fill) / 0.10);
+  --st-pro-text: rgb(var(--theme-pro)); --st-pro-fill: rgb(var(--theme-pro-fill) / 0.10);
+  --st-blue-text: rgb(var(--theme-blue)); --st-blue-fill: rgb(var(--theme-blue-fill) / 0.10);
+
+  /* Semantic hairlines — same channels as the fills, raised opacity. Used by
+     the ported utility-coverage layer below so translucent brand borders
+     (border-emerald-500/…, border-cyan-500/…) read on white. */
+  --st-online-border: rgb(var(--theme-online-fill) / 0.28);
+  --st-danger-border: rgb(var(--theme-danger-fill) / 0.28);
+  --st-warn-border: rgb(var(--theme-warn-fill) / 0.30);
+  --st-info-border: rgb(var(--theme-info-fill) / 0.28);
+  --st-redir-border: rgb(var(--theme-redir-fill) / 0.26);
+  --st-pro-border: rgb(var(--theme-pro-fill) / 0.26);
+  --st-blue-border: rgb(var(--theme-blue-fill) / 0.26);
+
+  --chart-background: var(--surface);
+  --chart-foreground: var(--ink-3);
+  --chart-foreground-muted: var(--ink-muted);
+  --chart-grid: var(--line);
+  --chart-label: var(--ink-muted);
+  --chart-crosshair: var(--signal);
+  --chart-tooltip-background: var(--surface-elevated);
+  --chart-tooltip-foreground: var(--ink);
+  --chart-tooltip-muted: var(--ink-muted);
+  --bandwidth-download: #047857;
+  --bandwidth-upload: #0e7490;
+  --bandwidth-grid: var(--line);
+  --bandwidth-crosshair: var(--ink-faint);
+  --gaming-signal: var(--st-online-text);
+  --gaming-signal-fill: #b8eed5;
+  --gaming-watch: var(--st-warn-text);
+  --gaming-critical: var(--st-danger-text);
+  --gaming-chart-background: linear-gradient(180deg, var(--surface), #f0f7fa);
+  --gaming-grid: var(--line);
+  --gaming-label: var(--ink-muted);
+  --gaming-crosshair: var(--line-strong);
 }
 
-html.light * {
+:where(html.light) * {
   border-color: var(--line);
 }
 
@@ -276,8 +336,7 @@ html.light body {
   color: var(--ink) !important;
 }
 
-/* ---------- 1. SURFACES ---------- */
-/* App shell / page bases → cool paper */
+/* The application canvas stays separate from white panels and navigation. */
 html.light .bg-\[\#090a0c\],
 html.light .bg-\[\#090a0d\],
 html.light .bg-\[\#0a0b0d\] {
@@ -290,9 +349,29 @@ html.light header.bg-\[\#090a0c\] {
   border-bottom: 1px solid var(--line) !important;
 }
 
+html.light [data-slot="sidebar"],
+html.light [data-slot="sidebar"] .bg-\[\#090a0c\],
+html.light [role="dialog"].bg-background,
+html.light .bg-\[\#090a0c\]:is(.rounded-xl, .rounded-2xl, .rounded-3xl),
+html.light .bg-\[\#0a0b0d\].rounded-xl {
+  background-color: var(--surface) !important;
+}
+
+html.light [data-slot="sidebar-menu-button"][aria-current="page"] {
+  color: var(--st-info-text);
+  background-color: var(--st-info-fill);
+  box-shadow: inset 3px 0 0 var(--signal);
+}
+
+html.light [data-slot="sidebar-menu-button"][aria-current="page"] > .absolute {
+  background-color: transparent;
+}
+
 /* Sticky table header */
 html.light thead.bg-\[\#090a0c\]\/95 {
-  background-color: rgba(238, 241, 246, 0.95) !important;
+  background-color: rgb(var(--theme-sunken) / 0.97) !important;
+  --tw-shadow: 0 1px 0 var(--line);
+  --tw-shadow-colored: 0 1px 0 var(--line);
 }
 
 /* Cards & panels → white surface */
@@ -309,9 +388,13 @@ html.light .bg-\[\#1c1e24\] {
 
 /* Elevated floating surfaces (popover / tooltip / dock / inspector / select) */
 html.light .bg-\[\#121316\],
-html.light .bg-\[\#16171b\] {
+html.light .bg-\[\#121316\]\/90,
+html.light .bg-\[\#121316\]\/95,
+html.light .bg-\[\#121316\]\/98,
+html.light .bg-\[\#16171b\],
+html.light .bg-\[\#14161d\],
+html.light .bg-\[\#090a0c\]\/80 {
   background-color: var(--surface-elevated) !important;
-  box-shadow: var(--shadow-lg);
 }
 
 /* Sunken surfaces (inputs, wells, rows, toasts) */
@@ -319,19 +402,11 @@ html.light .bg-\[\#14151a\],
 html.light .bg-\[\#16171d\],
 html.light .bg-\[\#18191d\],
 html.light .bg-\[\#141720\],
-html.light .bg-\[\#14161b\],
-html.light .bg-\[\#14161d\] {
+html.light .bg-\[\#14161b\] {
   background-color: var(--surface-sunken) !important;
 }
 
-/* Inline-styled dark gradient panels (e.g. Gaming netgraph screen) — reachable
-   only via the style attribute; stylesheet !important beats non-!important inline. */
-html.light [style*="linear-gradient(rgb(13, 16, 22)"] {
-  background: linear-gradient(180deg, var(--surface), var(--paper)) !important;
-  border: 1px solid var(--line);
-}
-
-/* 2. WifiDetailsPopover status-tinted panels → light status tints */
+/* Network status panels */
 html.light .bg-\[\#1e1315\] {
   background-color: var(--st-danger-fill) !important;
 }
@@ -347,14 +422,16 @@ html.light .bg-\[\#181a22\] {
   background-color: var(--surface-sunken) !important;
 }
 
-/* ---------- 3. TRANSLUCENT FILLS ---------- */
-/* Dark scrims: keep subtle tints for surfaces, real dim only for modal backdrops */
+/* Keep modal scrims distinct from translucent content wells. */
 html.light .bg-black\/30,
 html.light .bg-black\/35,
 html.light .bg-black\/40,
 html.light .bg-black\/50,
 html.light .bg-black\/60 {
   background-color: rgba(15, 23, 42, 0.05) !important;
+}
+html.light .fixed.bg-black\/60 {
+  background-color: rgba(15, 23, 42, 0.28) !important;
 }
 html.light .bg-black\/70,
 html.light .bg-black\/75,
@@ -363,6 +440,156 @@ html.light .bg-black\/90 {
   background-color: rgba(15, 23, 42, 0.45) !important;
 }
 
+/* Primary actions retain their white-on-ink contrast. */
+html.light .bg-white.text-black,
+html.light button.bg-white.text-black {
+  background-color: var(--ink-strong) !important;
+  color: #ffffff !important;
+}
+html.light .bg-white.text-black:hover,
+html.light button.bg-white.text-black:hover {
+  background-color: var(--ink) !important;
+  color: #ffffff !important;
+}
+
+html.light .border-\[\#090a0c\] {
+  border-color: var(--line) !important;
+}
+
+/* Neutralize near-black gradient stops so scrims don't become dark blotches.
+   Colored mid-tone brand gradients (from-cyan-500, from-purple-500, …) are
+   left intact — they read fine on light. */
+html.light [class*="from-black"],
+html.light [class*="from-zinc-950"],
+html.light [class*="from-zinc-900"],
+html.light [class*="from-slate-950"],
+html.light [class*="from-slate-900"] {
+  --tw-gradient-from: rgba(15, 23, 42, 0.06) var(--tw-gradient-from-position) !important;
+}
+html.light .to-\[\#0c0d10\],
+html.light [class*="to-black"],
+html.light [class*="to-zinc-950"],
+html.light [class*="to-zinc-900"],
+html.light [class*="to-slate-950"],
+html.light [class*="to-slate-900"] {
+  --tw-gradient-to: var(--surface) var(--tw-gradient-to-position) !important;
+}
+html.light .from-emerald-950\/40 {
+  --tw-gradient-from: var(--st-online-fill) var(--tw-gradient-from-position) !important;
+}
+html.light .from-red-950\/90,
+html.light .from-rose-950\/90 {
+  --tw-gradient-from: var(--st-danger-fill) var(--tw-gradient-from-position) !important;
+}
+
+/* Set shadow variables, not box-shadow, so focus rings remain intact. */
+html.light .shadow-2xl,
+html.light .shadow-xl {
+  --tw-shadow: var(--shadow-lg);
+  --tw-shadow-colored: var(--shadow-lg);
+}
+html.light .shadow-lg,
+html.light .shadow-md,
+html.light .shadow-sm,
+html.light [class^="shadow-["],
+html.light [class*=" shadow-["] {
+  --tw-shadow: var(--shadow-md);
+  --tw-shadow-colored: var(--shadow-md);
+}
+html.light .shadow-inner {
+  --tw-shadow: inset 0 1px 2px rgba(15, 23, 42, 0.05);
+  --tw-shadow-colored: inset 0 1px 2px rgba(15, 23, 42, 0.05);
+}
+
+html.light .gaming-chart {
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow-md);
+}
+
+html.light .gaming-status-badge {
+  color: #ffffff;
+}
+
+html.light :is(button, a, input, textarea, select, [tabindex]):focus-visible {
+  outline: 2px solid var(--signal);
+  outline-offset: 3px;
+}
+
+html.light :is(input, textarea)::placeholder {
+  color: var(--ink-faint);
+  opacity: 1;
+}
+
+html.light ::selection {
+  background-color: rgb(var(--theme-info-fill) / 0.18);
+  color: var(--ink-strong);
+}
+
+/* Scan beams retain a visible leading tip on white. */
+html.light .scanning-card-active::before {
+  background: conic-gradient(
+    from var(--scan-angle, 0deg),
+    rgba(8, 145, 178, 0.04) 0deg,
+    rgba(8, 145, 178, 0.04) 220deg,
+    rgba(8, 145, 178, 0.22) 280deg,
+    rgba(8, 145, 178, 0.55) 320deg,
+    rgba(8, 145, 178, 0.9) 350deg,
+    var(--ink) 358deg,
+    rgba(8, 145, 178, 0.04) 360deg
+  );
+}
+html.light .auto-scan-beam-active::before {
+  background: conic-gradient(
+    from var(--scan-angle, 0deg),
+    rgba(8, 145, 178, 0.05) 0deg,
+    rgba(8, 145, 178, 0.05) 220deg,
+    rgba(8, 145, 178, 0.28) 280deg,
+    rgba(8, 145, 178, 0.62) 320deg,
+    rgba(8, 145, 178, 0.95) 355deg,
+    var(--ink) 358deg,
+    rgba(8, 145, 178, 0.05) 360deg
+  );
+}
+html.light .super-scan-beam-active::before {
+  background: conic-gradient(
+    from var(--scan-angle, 0deg),
+    rgba(217, 119, 6, 0.05) 0deg,
+    rgba(217, 119, 6, 0.05) 200deg,
+    rgba(124, 58, 237, 0.3) 260deg,
+    rgba(217, 119, 6, 0.7) 310deg,
+    rgba(180, 83, 9, 1) 355deg,
+    var(--ink) 358deg,
+    rgba(217, 119, 6, 0.05) 360deg
+  );
+}
+
+/* ---------- Chrome: scrollbars & autofill ---------- */
+html.light ::-webkit-scrollbar-thumb {
+  background: rgba(15, 23, 42, 0.15) !important;
+}
+html.light ::-webkit-scrollbar-thumb:hover {
+  background: rgba(15, 23, 42, 0.3) !important;
+}
+html.light input:-webkit-autofill,
+html.light input:-webkit-autofill:hover,
+html.light input:-webkit-autofill:focus,
+html.light input:-webkit-autofill:active,
+html.light textarea:-webkit-autofill,
+html.light select:-webkit-autofill {
+  -webkit-box-shadow: 0 0 0 1000px var(--surface) inset !important;
+  -webkit-text-fill-color: var(--ink) !important;
+  caret-color: var(--ink) !important;
+  border-color: var(--line-strong) !important;
+}
+
+/* ========================================================================= */
+/* Raw-utility coverage (ported from the previous light theme).               */
+/* The token palette above is the branch's cleaner "cool daylight" system;    */
+/* these rules map the RAW Tailwind utilities the components actually emit     */
+/* (text-white, bg-white/x, border-white, text-zinc-*, semantic -500/x) onto   */
+/* that palette, so text-white headings and stat numbers stay legible on the   */
+/* light paper instead of rendering white-on-white.                            */
+/* ========================================================================= */
 /* White translucent surfaces → graduated slate tints (bracket + slash forms) */
 html.light .bg-white\/\[0\.01\],
 html.light .bg-white\/\[0\.015\],
@@ -560,110 +787,3 @@ html.light [class*="border-violet-500/"] {
   border-color: var(--st-pro-border) !important;
 }
 
-/* ---------- 7. GRADIENTS ---------- */
-/* Neutralize near-black gradient stops so scrims don't become dark blotches.
-   Colored mid-tone brand gradients (from-cyan-500, from-purple-500, …) are
-   left intact — they read fine on light. */
-html.light [class*="from-black"],
-html.light [class*="from-zinc-950"],
-html.light [class*="from-zinc-900"],
-html.light [class*="from-slate-950"],
-html.light [class*="from-slate-900"] {
-  --tw-gradient-from: rgba(15, 23, 42, 0.06) var(--tw-gradient-from-position) !important;
-}
-html.light .to-\[\#0c0d10\],
-html.light [class*="to-black"],
-html.light [class*="to-zinc-950"],
-html.light [class*="to-zinc-900"],
-html.light [class*="to-slate-950"],
-html.light [class*="to-slate-900"] {
-  --tw-gradient-to: var(--surface) var(--tw-gradient-to-position) !important;
-}
-html.light .from-emerald-950\/40 {
-  --tw-gradient-from: var(--st-online-fill) var(--tw-gradient-from-position) !important;
-}
-html.light .from-red-950\/90,
-html.light .from-rose-950\/90 {
-  --tw-gradient-from: var(--st-danger-fill) var(--tw-gradient-from-position) !important;
-}
-
-/* ---------- 8. SHADOWS & GLOWS ---------- */
-html.light .shadow-2xl,
-html.light .shadow-xl {
-  box-shadow: var(--shadow-lg) !important;
-}
-html.light .shadow-lg,
-html.light .shadow-md,
-html.light [class*="shadow-black"],
-html.light [class*="shadow-["],
-html.light [class*="shadow-emerald"],
-html.light [class*="shadow-cyan"],
-html.light [class*="shadow-amber"],
-html.light [class*="shadow-rose"],
-html.light [class*="shadow-red"],
-html.light [class*="shadow-purple"],
-html.light [class*="shadow-pink"],
-html.light [class*="shadow-sky"],
-html.light [class*="shadow-blue"] {
-  box-shadow: var(--shadow-md) !important;
-}
-html.light .shadow-inner {
-  box-shadow: inset 0 1px 2px rgba(15, 23, 42, 0.05) !important;
-}
-
-/* ---------- 9. SCAN-BEAM effects (dark leading tip visible on white) ---------- */
-html.light .scanning-card-active::before {
-  background: conic-gradient(
-    from var(--scan-angle, 0deg),
-    rgba(8, 145, 178, 0.04) 0deg,
-    rgba(8, 145, 178, 0.04) 220deg,
-    rgba(8, 145, 178, 0.22) 280deg,
-    rgba(8, 145, 178, 0.55) 320deg,
-    rgba(8, 145, 178, 0.9) 350deg,
-    var(--ink) 358deg,
-    rgba(8, 145, 178, 0.04) 360deg
-  );
-}
-html.light .auto-scan-beam-active::before {
-  background: conic-gradient(
-    from var(--scan-angle, 0deg),
-    rgba(8, 145, 178, 0.05) 0deg,
-    rgba(8, 145, 178, 0.05) 220deg,
-    rgba(8, 145, 178, 0.28) 280deg,
-    rgba(8, 145, 178, 0.62) 320deg,
-    rgba(8, 145, 178, 0.95) 355deg,
-    var(--ink) 358deg,
-    rgba(8, 145, 178, 0.05) 360deg
-  );
-}
-html.light .super-scan-beam-active::before {
-  background: conic-gradient(
-    from var(--scan-angle, 0deg),
-    rgba(217, 119, 6, 0.05) 0deg,
-    rgba(217, 119, 6, 0.05) 200deg,
-    rgba(124, 58, 237, 0.3) 260deg,
-    rgba(217, 119, 6, 0.7) 310deg,
-    rgba(180, 83, 9, 1) 355deg,
-    var(--ink) 358deg,
-    rgba(217, 119, 6, 0.05) 360deg
-  );
-}
-
-/* ---------- Chrome: scrollbars & autofill ---------- */
-html.light ::-webkit-scrollbar-thumb {
-  background: rgba(15, 23, 42, 0.15) !important;
-}
-html.light ::-webkit-scrollbar-thumb:hover {
-  background: rgba(15, 23, 42, 0.3) !important;
-}
-html.light input:-webkit-autofill,
-html.light input:-webkit-autofill:hover,
-html.light input:-webkit-autofill:focus,
-html.light input:-webkit-autofill:active,
-html.light textarea:-webkit-autofill,
-html.light select:-webkit-autofill {
-  -webkit-box-shadow: 0 0 0 1000px var(--surface) inset !important;
-  -webkit-text-fill-color: var(--ink) !important;
-  caret-color: var(--ink) !important;
-  border-color: var(--line-strong) !important;
-}
