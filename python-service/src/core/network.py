@@ -13,6 +13,7 @@ import re
 import socket
 import netifaces
 import ipaddress
+import psutil  # top-level agar backend platform terpilih sekali di impor nyata (hindari race sys.platform test)
 from typing import Dict, Any, Optional
 from scapy.all import conf, ifaces
 from ..utils.logger import logger
@@ -218,17 +219,27 @@ def get_network_info() -> Dict[str, Any]:
 
 def has_ipv6_connectivity() -> bool:
     """
-    Deteksi LOKAL (tanpa mengirim paket) apakah jaringan aktif menyediakan IPv6.
-    True bila ada alamat IPv6 GLOBAL/ULA pada interface aktif — yang hanya muncul
-    (via SLAAC) ketika sebuah router IPv6 mengumumkan prefix. Alamat link-local
-    (fe80::) selalu ada di tiap adapter dan TIDAK dihitung sebagai konektivitas.
+    Deteksi LOKAL (tanpa mengirim paket) apakah jaringan aktif menyediakan IPv6 yang
+    bisa me-route ke Internet. True HANYA bila ada alamat IPv6 GLOBAL (2000::/3) pada
+    interface yang sedang UP.
+
+    Sengaja MENGECUALIKAN:
+      - link-local (fe80::) — selalu ada di tiap adapter, bukan konektivitas;
+      - ULA (fc00::/7) — dipakai VPN/WSL/Docker/Tailscale, bukan IPv6 internet, dan
+        merupakan sumber utama false-positive yang membuat gerbang IPv6 misfire;
+      - interface yang DOWN (alamat basi).
+    Tradeoff: jaringan IPv6 ULA-saja (langka, tak routable internet) tak memicu gerbang.
 
     Dipakai sebagai gerbang: bila False, seluruh kerja penemuan/pemblokiran IPv6
     dilewati (jaringan IPv4-only) sehingga tak ada latensi/paket sia-sia.
     """
     try:
         import psutil
-        for _iface, addr_list in (psutil.net_if_addrs() or {}).items():
+        stats = psutil.net_if_stats() or {}
+        for iface, addr_list in (psutil.net_if_addrs() or {}).items():
+            st = stats.get(iface)
+            if st is not None and not getattr(st, 'isup', True):
+                continue  # lewati interface yang DOWN
             for a in addr_list:
                 if getattr(a, 'family', None) != socket.AF_INET6:
                     continue
@@ -239,10 +250,9 @@ def has_ipv6_connectivity() -> bool:
                     obj = ipaddress.IPv6Address(raw)
                 except ValueError:
                     continue
-                # Hanya alamat yang bisa me-route (global / ULA) yang menandakan IPv6 aktif.
-                if obj.is_link_local or obj.is_loopback or obj.is_unspecified or obj.is_multicast:
-                    continue
-                return True
+                # Hanya GLOBAL (2000::/3) = IPv6 internet. Kecualikan link-local, ULA, loopback, dst.
+                if obj in ipaddress.IPv6Network('2000::/3'):
+                    return True
     except Exception as e:
         logger.debug(f"Notice detecting IPv6 connectivity: {e}")
     return False

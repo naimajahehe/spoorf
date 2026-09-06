@@ -395,8 +395,10 @@ export class DeviceManager extends EventEmitter {
                     vendor_class: data.vendor_class
                 });
 
-                // Auto-scan saat perangkat baru masuk — HANYA bila Auto Scan aktif. Di mode
-                // "Scan saja", perangkat baru tetap muncul (dari DHCP pasif) tanpa scan aktif susulan.
+                // Auto-scan saat perangkat baru masuk — HANYA bila Auto Scan aktif. Perangkat baru
+                // dimaterialisasi ke daftar melalui scan susulan ini; jadi di mode "Scan saja" perangkat
+                // baru BELUM muncul di tabel sampai scan berikutnya (manual/ganti-jaringan). Toast
+                // "perangkat baru" (dhcpActivity di atas) tetap memberi tahu pengguna untuk memindai.
                 if (isNewDevice && this.autoScanEnabled && !this.inFlightDhcpOptimization) {
                     this.debouncedScan();
                 }

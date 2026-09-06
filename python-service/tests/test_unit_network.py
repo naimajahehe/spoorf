@@ -215,6 +215,31 @@ class TestCoreNetwork(unittest.TestCase):
         with patch('psutil.net_if_addrs', return_value=addrs):
             self.assertFalse(has_ipv6_connectivity())
 
+    def _fake_stats(self, isup):
+        class _S:
+            pass
+        s = _S()
+        s.isup = isup
+        return s
+
+    def test_has_ipv6_false_for_vpn_ula_adapter(self):
+        """VPN/WSL/Docker adapters carry ULA (fd00::/7) — must NOT count as internet IPv6."""
+        import socket as _s
+        addrs = {'Tailscale': [self._fake_addr(_s.AF_INET6, 'fd7a:115c:a1e0::1')]}
+        stats = {'Tailscale': self._fake_stats(True)}
+        with patch('psutil.net_if_addrs', return_value=addrs), \
+             patch('psutil.net_if_stats', return_value=stats):
+            self.assertFalse(has_ipv6_connectivity())
+
+    def test_has_ipv6_false_when_global_on_down_interface(self):
+        """A DOWN interface's stale global IPv6 must NOT count."""
+        import socket as _s
+        addrs = {'Ethernet': [self._fake_addr(_s.AF_INET6, '2404:8000:1024::45e1')]}
+        stats = {'Ethernet': self._fake_stats(False)}
+        with patch('psutil.net_if_addrs', return_value=addrs), \
+             patch('psutil.net_if_stats', return_value=stats):
+            self.assertFalse(has_ipv6_connectivity())
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -194,11 +194,12 @@ export class WebSocketManager {
             });
 
             // Auto Scan toggle: mengaktifkan → scan seketika + watchdog/new-device-scan hidup;
-            // menonaktifkan → mode "Scan saja" (tanpa scan otomatis latar).
+            // menonaktifkan → mode "Scan saja" (tanpa scan otomatis latar). Broadcast 'autoScanChanged'
+            // ditangani oleh bridge deviceManager→io (di atas), jadi TIDAK di-emit ulang di sini
+            // (mencegah pengirim menerima event dobel).
             socket.on('setAutoScan', (data: { enabled?: boolean }) => {
                 try {
-                    const enabled = this.deviceManager.setAutoScan(Boolean(data?.enabled));
-                    socket.emit('autoScanChanged', { enabled });
+                    this.deviceManager.setAutoScan(Boolean(data?.enabled));
                 } catch (error: any) {
                     socket.emit('scanError', { error: error.message });
                 }

@@ -35,8 +35,9 @@ EVIDENCE_MAX_AGE_SECONDS = 300
 # jadi kita jalankan lewat executor terpisah dan tinggalkan bila lewat batas.
 REVERSE_DNS_TIMEOUT_SECONDS = 0.4
 # Anggaran waktu-dinding total untuk fase pengumpulan sensor per-perangkat. Menjaga
-# endpoint selalu selesai dalam ~observation + budget (< timeout bridge 20s) BERAPA PUN
-# jumlah perangkat; target yang lewat anggaran → hasil parsial + partial_failures.
+# endpoint selalu selesai dalam ~observation + budget BERAPA PUN jumlah perangkat
+# (worst-case ~observation≤10s + 20s + overhead ≈ 34s, di bawah timeout bridge Node 35s);
+# target yang lewat anggaran → hasil parsial + partial_failures.
 SENSOR_BUDGET_SECONDS = 20.0
 
 # Executor bersama untuk reverse-DNS berbatas waktu (mencegah blocking gethostbyaddr).

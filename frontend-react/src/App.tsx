@@ -217,6 +217,8 @@ function App() {
     const [isMuted, setIsMuted] = useState<boolean>(() => isNotificationMuted());
     const deviceOnlineStatusRef = useRef<Map<string, boolean>>(new Map());
     const isInitialScanDoneRef = useRef<boolean>(false);
+    // Kunci jaringan terakhir (SSID) untuk mendeteksi pindah jaringan → baseline ulang tracking.
+    const lastNetworkKeyRef = useRef<string | null>(null);
 
     // Synchronize mute state across tabs/windows or custom events
     useEffect(() => {
@@ -561,6 +563,24 @@ function App() {
             setSelectedIps([]);
         }
     }, [showScanningUI]);
+
+    // Pindah jaringan (SSID berubah) → baseline ulang tracking perangkat SECARA SENYAP.
+    // Tanpa ini, semua perangkat jaringan baru dianggap "baru bergabung" → banjir +1/notifikasi/
+    // history + duplikat, dan `deviceOnlineStatusRef` tumbuh tanpa batas lintas jaringan.
+    useEffect(() => {
+        if (!wifiInfo.connected) return;
+        const key = wifiInfo.ssid || '';
+        if (!key) return;
+        if (lastNetworkKeyRef.current === null) {
+            lastNetworkKeyRef.current = key; // baseline pertama, jangan reset
+            return;
+        }
+        if (lastNetworkKeyRef.current !== key) {
+            lastNetworkKeyRef.current = key;
+            deviceOnlineStatusRef.current.clear();
+            isInitialScanDoneRef.current = false; // snapshot berikutnya di-baseline senyap
+        }
+    }, [wifiInfo.ssid, wifiInfo.connected]);
 
     // Detect newly connected devices AND reconnected devices on Wi-Fi and trigger actionable Toast + Desktop Notification + History
     useEffect(() => {

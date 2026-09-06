@@ -1912,10 +1912,16 @@ export async function runDeviceManagerTests() {
             message_type: 'REQUEST'
         };
 
-        // Auto Scan OFF ("Scan saja"): a brand-new device must NOT trigger a follow-up scan.
+        // Auto Scan OFF ("Scan saja"): a brand-new device must NOT trigger a follow-up scan,
+        // and (documented behavior) is NOT passively materialized into the device list — it
+        // surfaces on the next scan. This guards against the false "appears passively" assumption.
         (manager as any).autoScanEnabled = false;
         await (manager as any)._handleDhcpEvent(newDeviceEvent);
         assert.strictEqual(debounced, 0, 'new device does not auto-scan when Auto Scan is off');
+        assert.strictEqual(
+            (manager as any).devices.has(newDeviceEvent.ip), false,
+            'brand-new device is not added to the list in scan-only mode (surfaces on next scan)'
+        );
 
         // Auto Scan ON: a brand-new device triggers a follow-up scan.
         const manager2 = new DeviceManager(python, db);
