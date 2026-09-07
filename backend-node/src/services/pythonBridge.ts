@@ -217,6 +217,10 @@ export class PythonBridge extends EventEmitter {
         if (!this.ws) {
             this.connectWebSocket();
         }
+        // Python (re)connect = engine fresh, TAK ada sesi spoof aktif. Beri tahu DeviceManager
+        // agar membersihkan session_id basi di memori, jika tidak auto-reblock akan mengira sesi
+        // masih hidup & melewatkan perangkat selamanya (SP-2).
+        this.emit('pythonReachable');
     }
 
     private markUnreachable(): void {

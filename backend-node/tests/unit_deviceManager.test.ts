@@ -2124,4 +2124,60 @@ export async function runDeviceManagerTests() {
         console.log('  ✓ BUG-17: offline devices keyed by identity survive init() distinctly');
     }
 
+    // SP-1: a device that is STILL blocked and reappears via DHCP (renew/reconnect, possibly at a
+    // new IP) must be RE-BLOCKED with a fresh spoof session at the new IP — not left free. The
+    // stale session_id points at the old IP, and the DHCP renew refreshed the victim's ARP to the
+    // real gateway, so without a re-poison the phone browses freely while the UI still says Blocked.
+    {
+        const python: any = new EventEmitter();
+        const startSpoofArgs: any[] = [];
+        python.startSpoof = async (...args: any[]) => { startSpoofArgs.push(args); return 'sess-new'; };
+        python.setSpoofLimit = async () => {};
+        python.stopSpoof = async () => {};
+        python.pulseLiveness = async () => ({ '192.168.1.80': { is_alive: true } });
+        const base = {
+            hostname: 'T', vendor: 'V', device_type: 'Mobile', os: 'Android', rtt_ms: 5,
+            open_ports: [], services: [], is_gateway: false, is_self: false
+        };
+        const gateway: any = { ...base, ip: '192.168.1.1', mac: 'gg:gg:gg:gg:gg:01', device_type: 'Router', is_gateway: true, is_online: true, is_blocked: false, speed_limit: 100 };
+        const blocked: any = { ...base, ip: '192.168.1.70', mac: 'a8:3b:76:0c:dc:55', is_online: false, is_blocked: true, speed_limit: 0, session_id: 'stale-old' };
+        const db: any = {
+            updateDeviceDhcpProfile: async () => {}, setDeviceBlocked: async () => {},
+            setDeviceSpeedLimit: async () => {}, setDeviceOnlineStatus: async () => {},
+            getDeviceByMac: async () => undefined
+        };
+        const manager = new DeviceManager(python, db);
+        (manager as any).devices.set(gateway.ip, gateway);
+        (manager as any).devices.set(blocked.ip, blocked);
+
+        // Same MAC returns via DHCP at a NEW IP (.70 -> .80).
+        await (manager as any)._handleDhcpEvent({ mac: 'a8:3b:76:0c:dc:55', ip: '192.168.1.80', message_type: 'REQUEST' });
+
+        assert.ok(startSpoofArgs.length > 0, 'a returning blocked device must be re-blocked (startSpoof called)');
+        assert.strictEqual(startSpoofArgs[0][0], '192.168.1.80', 're-block must target the NEW IP');
+        const dev = Array.from((manager as any).devices.values()).find((d: any) => d.mac === 'a8:3b:76:0c:dc:55') as any;
+        assert.strictEqual(dev.is_blocked, true, 'device must remain blocked after DHCP re-block');
+        console.log('  ✓ SP-1: a returning blocked device is re-blocked with a fresh session at its new IP');
+    }
+
+    // SP-2: when Python (re)connects it is fresh with no spoof sessions, so any session_id we still
+    // hold is stale. It must be cleared, otherwise auto-reblock (which skips devices that already
+    // have a session_id, assuming the session is live) would skip a blocked device forever — the UI
+    // says Blocked while no poison packets are sent.
+    {
+        const python: any = new EventEmitter();
+        const manager = new DeviceManager(python, {} as any);
+        const blocked: any = { ip: '192.168.1.70', mac: 'aa:bb:cc:dd:ee:70', is_blocked: true, speed_limit: 0, session_id: 'stale-from-old-python' };
+        const throttled: any = { ip: '192.168.1.71', mac: 'aa:bb:cc:dd:ee:71', is_blocked: false, speed_limit: 40, session_id: 'stale-throttle' };
+        (manager as any).devices.set(blocked.ip, blocked);
+        (manager as any).devices.set(throttled.ip, throttled);
+
+        python.emit('pythonReachable');
+        await new Promise(resolve => setImmediate(resolve));
+
+        assert.strictEqual(blocked.session_id, undefined, 'stale block session_id must be cleared on Python reconnect');
+        assert.strictEqual(throttled.session_id, undefined, 'stale throttle session_id must be cleared on Python reconnect');
+        console.log('  ✓ SP-2: stale session_ids are cleared on Python reconnect so auto-reblock re-establishes');
+    }
+
 }

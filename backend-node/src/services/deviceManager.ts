@@ -219,6 +219,20 @@ export class DeviceManager extends EventEmitter {
             this.emit('telemetry', data);
         });
 
+        // SP-2: Python (re)connect = engine fresh tanpa sesi spoof. session_id apa pun yang masih
+        // kita pegang (dari DB atau sebelum Python crash/restart) kini BASI. Bersihkan agar
+        // auto-reblock (yang melewati perangkat ber-session_id, mengira sesinya hidup) benar-benar
+        // membangun ulang sesi. is_blocked tetap; sesi baru dibuat saat scan/reblock berikutnya.
+        this.python.on('pythonReachable', () => {
+            let cleared = 0;
+            for (const dev of this.devices.values()) {
+                if (dev.session_id) { dev.session_id = undefined; cleared++; }
+            }
+            if (cleared > 0) {
+                console.log(`♻️ [Python Reconnect] Membersihkan ${cleared} session_id basi agar auto-reblock membangun ulang sesi.`);
+            }
+        });
+
         this.python.on('networkChanged', (data) => {
             this.dhcpOptimizationGeneration++;
             this.lastDhcpOptimization = null;
@@ -409,6 +423,26 @@ export class DeviceManager extends EventEmitter {
                     if (profileChanged) {
                         this.scheduleProfileEnrichment(normMac, PROFILE_ENRICHMENT_DEBOUNCE_MS);
                     }
+
+                    // SP-1: perangkat yang MASIH berstatus diblokir baru saja renew/reconnect via
+                    // DHCP (mungkin di IP baru). Sesi spoof lama menunjuk IP lama (racun basi) dan
+                    // proses DHCP renew menyegarkan cache ARP korban ke router ASLI → tanpa
+                    // re-poison, korban bebas berinternet walau UI masih merah (Blocked). Blokir
+                    // ulang di IP baru: bersihkan session_id lama (memaksa startSpoof fresh;
+                    // dedup-by-MAC IPv4 membersihkan sesi IP lama) lalu blokir lewat jalur
+                    // terverifikasi (_blockDeviceImpl — kita SUDAH di dalam runExclusive).
+                    if (dev.is_blocked && !dev.is_gateway && !dev.is_self) {
+                        const gw = this.findGateway();
+                        if (gw) {
+                            dev.session_id = undefined;
+                            try {
+                                await this._blockDeviceImpl(dev.ip, gw.ip);
+                                console.log(`🔒 [DHCP Re-Block] Blok ditegakkan ulang untuk ${dev.hostname || dev.mac} di ${dev.ip}`);
+                            } catch (e: any) {
+                                console.warn(`Notice re-blocking ${dev.mac} on DHCP:`, e?.message);
+                            }
+                        }
+                    }
                 } else {
                     isNewDevice = true;
                 }
@@ -555,6 +589,9 @@ export class DeviceManager extends EventEmitter {
         // Load in reverse (offline first, online last) so online devices cleanly overwrite any legacy stale IP duplicates
         const sorted = [...storedDevices].sort((a, b) => (a.is_online === b.is_online ? 0 : a.is_online ? 1 : -1));
         for (const device of sorted) {
+            // Python fresh saat boot: session_id dari DB pasti basi (sesi spoof tak dipersistkan).
+            // Bersihkan agar auto-reblock membangun ulang sesi, bukan mengira sesinya hidup (SP-2).
+            if (device.session_id) device.session_id = undefined;
             // Offline devices (ip='') keyed by identity so they don't collapse onto '' (BUG-17).
             this.devices.set(deviceMemKey(device), device);
         }
