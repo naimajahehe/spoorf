@@ -107,11 +107,13 @@ export const DeviceTable: FC<Props> = ({
 
     const selectableDevices = sortedDevices.filter(d => !d.is_gateway && !d.is_self);
     const canSelectAny = selectableDevices.length > 0;
-    const isAllSelected = canSelectAny && selectableDevices.every(d => selectedIps.includes(d.ip));
-    const isSomeSelected = canSelectAny && selectableDevices.some(d => selectedIps.includes(d.ip)) && !isAllSelected;
+    // selectedIps & expandedIp memakai MAC (kunci stabil), bukan IP: perangkat offline ber-ip=''
+    // agar tidak saling co-select / co-expand di kunci kosong (BUG-19).
+    const isAllSelected = canSelectAny && selectableDevices.every(d => selectedIps.includes(d.mac));
+    const isSomeSelected = canSelectAny && selectableDevices.some(d => selectedIps.includes(d.mac)) && !isAllSelected;
 
-    const handleToggleRowDetail = (ip: string) => {
-        setExpandedIp(prev => (prev === ip ? null : ip));
+    const handleToggleRowDetail = (mac: string) => {
+        setExpandedIp(prev => (prev === mac ? null : mac));
     };
 
     const handleCopy = (key: string, text: string, e: React.MouseEvent) => {
@@ -235,8 +237,8 @@ export const DeviceTable: FC<Props> = ({
 
                 <tbody className="divide-y divide-white/[0.04]">
                     {sortedDevices.map((device) => {
-                        const isSelected = selectedIps.includes(device.ip);
-                        const isExpanded = expandedIp === device.ip;
+                        const isSelected = selectedIps.includes(device.mac);
+                        const isExpanded = expandedIp === device.mac;
                         const isInspecting = activeInspectorIp === device.ip;
                         const isOnline = device.is_self ? true : device.is_online;
                         const isLoading = loadingIps.has(device.ip);
@@ -259,7 +261,7 @@ export const DeviceTable: FC<Props> = ({
                         return (
                             <React.Fragment key={device.mac || device.ip}>
                                 <tr
-                                    onClick={() => handleToggleRowDetail(device.ip)}
+                                    onClick={() => handleToggleRowDetail(device.mac)}
                                     className={cn(
                                         "group transition-all duration-150 cursor-pointer select-none h-[56px]",
                                         isSelected ? "bg-white/[0.04]" : isInspecting ? "bg-white/[0.035]" : "hover:bg-white/[0.02]",
@@ -276,7 +278,7 @@ export const DeviceTable: FC<Props> = ({
                                             onClick={(e) => {
                                                 e.stopPropagation();
                                                 if (!device.is_gateway && !device.is_self) {
-                                                    onToggleSelect(device.ip);
+                                                    onToggleSelect(device.mac);
                                                 }
                                             }}
                                         >
@@ -630,7 +632,7 @@ export const DeviceTable: FC<Props> = ({
                                                             <Tooltip content={isExpanded ? "Tutup Informasi" : "Lihat Informasi Detail"}>
                                                                 <button
                                                                     type="button"
-                                                                    onClick={() => handleToggleRowDetail(device.ip)}
+                                                                    onClick={() => handleToggleRowDetail(device.mac)}
                                                                     className={cn(
                                                                         "p-1.5 rounded-md flex items-center justify-center transition-all duration-150 outline-none group cursor-pointer hover:scale-115 active:scale-95",
                                                                         isExpanded

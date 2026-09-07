@@ -2093,4 +2093,35 @@ export async function runDeviceManagerTests() {
         console.log('  ✓ BUG-6: networkChanged clears stale session_ids so cut/limit start fresh sessions');
     }
 
+    // BUG-17 (Plan A Phase 1): offline devices (ip='') must NOT collapse onto the empty-string
+    // key in the in-memory map. Each must survive init() under a distinct identity key
+    // (profile_id || normalized MAC), otherwise only the last offline device remains in memory/UI.
+    {
+        const python: any = new EventEmitter();
+        const mkOffline = (mac: string, pid: string, lastIp: string): any => ({
+            ip: '', mac, profile_id: pid, hostname: 'Guest', vendor: 'Generic', device_type: 'Mobile',
+            os: 'Android', rtt_ms: 0, open_ports: [], services: [], is_blocked: false, is_online: false,
+            is_gateway: false, last_ip: lastIp
+        });
+        const offlineA = mkOffline('aa:bb:cc:dd:ee:01', 'pA', '192.168.1.11');
+        const offlineB = mkOffline('aa:bb:cc:dd:ee:02', 'pB', '192.168.1.12');
+        const db: any = {
+            init: async () => {},
+            getAllDevices: async () => [offlineA, offlineB],
+            archiveStaleDevices: async () => 0,
+        };
+        const manager = new DeviceManager(python, db);
+        await manager.init();
+
+        const mem = (manager as any).devices as Map<string, any>;
+        assert.strictEqual(mem.size, 2, 'both offline devices must survive init() (no empty-key collision)');
+        const macs = new Set(Array.from(mem.values()).map((d: any) => d.mac));
+        assert.ok(
+            macs.has('aa:bb:cc:dd:ee:01') && macs.has('aa:bb:cc:dd:ee:02'),
+            'both offline MACs must be present in memory after init()'
+        );
+        assert.ok(!mem.has(''), 'no device may be keyed by the empty string');
+        console.log('  ✓ BUG-17: offline devices keyed by identity survive init() distinctly');
+    }
+
 }

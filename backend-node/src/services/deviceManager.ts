@@ -39,6 +39,18 @@ function normalizeProfileMac(mac: unknown): string | null {
     return PROFILE_MAC_PATTERN.test(normalized) ? normalized : null;
 }
 
+/**
+ * Kunci memori stabil untuk `this.devices`. Perangkat ONLINE memakai IP (kunci alami untuk
+ * lookup dari API/event). Perangkat OFFLINE ber-`ip=''` memakai IDENTITAS (profile_id →
+ * MAC ternormalisasi) — kalau tidak, SEMUA perangkat offline saling menimpa di kunci ''
+ * sehingga hanya satu yang tersisa di memori & UI (BUG-17). Identitas tak pernah berformat IP,
+ * jadi tak akan bertabrakan dengan kunci perangkat online.
+ */
+function deviceMemKey(d: Device): string {
+    if (d.ip && d.ip.trim() !== '') return d.ip;
+    return d.profile_id || normalizeProfileMac(d.mac) || (typeof d.mac === 'string' ? d.mac.toLowerCase() : '');
+}
+
 function isPrivateIpv4(ip: unknown): ip is string {
     if (typeof ip !== 'string') return false;
     const text = ip.trim();
@@ -543,7 +555,8 @@ export class DeviceManager extends EventEmitter {
         // Load in reverse (offline first, online last) so online devices cleanly overwrite any legacy stale IP duplicates
         const sorted = [...storedDevices].sort((a, b) => (a.is_online === b.is_online ? 0 : a.is_online ? 1 : -1));
         for (const device of sorted) {
-            this.devices.set(device.ip, device);
+            // Offline devices (ip='') keyed by identity so they don't collapse onto '' (BUG-17).
+            this.devices.set(deviceMemKey(device), device);
         }
         console.log(`📦 Loaded ${storedDevices.length} persistent devices from SQLite`);
         this.emit('devicesUpdated', storedDevices);
@@ -817,6 +830,11 @@ export class DeviceManager extends EventEmitter {
                         if (prev.ip) {
                             this.devices.delete(prev.ip);
                         }
+                        // Pertahankan perangkat yang baru offline di memori memakai kunci
+                        // identitas (bukan menghapusnya), agar tetap tampil di tab Offline
+                        // alih-alih hilang dari daftar (BUG-17). Merge utama (bawah) melewati
+                        // perangkat ber-ip kosong, jadi entri ini tidak akan ditimpa.
+                        this.devices.set(deviceMemKey(dev), dev);
                         this.emit('deviceDisconnected', dev);
                     }
                 }

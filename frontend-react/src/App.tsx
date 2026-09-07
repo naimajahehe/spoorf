@@ -164,6 +164,8 @@ function App() {
     const [isSearchFocused, setIsSearchFocused] = useState(false);
     const searchInputRef = useRef<HTMLInputElement>(null);
     const [activeNav, setActiveNav] = useState('dashboard');
+    // Menyimpan MAC perangkat terpilih (bukan IP) sebagai kunci pilihan yang stabil — lihat
+    // handleToggleSelect. Perangkat offline ber-ip='' tetap dapat dipilih individual (BUG-19).
     const [selectedIps, setSelectedIps] = useState<string[]>([]);
     const [isSelectMode, setIsSelectMode] = useState(false);
     const [loadingIps, setLoadingIps] = useState<Set<string>>(new Set());
@@ -965,28 +967,31 @@ function App() {
         ).length;
     }, [dedupedDevices]);
 
-    // Checkbox selection handlers (Gateway tidak dapat dipilih)
-    const handleToggleSelect = (ip: string) => {
-        const target = devices.find(d => d.ip === ip);
+    // Checkbox selection handlers (Gateway tidak dapat dipilih).
+    // NOTE: selectedIps menyimpan MAC (bukan IP) sebagai kunci pilihan — perangkat offline
+    // ber-ip='' semuanya akan bertumpuk di satu kunci kosong bila memakai IP (BUG-19). MAC unik
+    // per perangkat, jadi perangkat offline tetap dapat dipilih satu per satu.
+    const handleToggleSelect = (mac: string) => {
+        const target = devices.find(d => d.mac === mac);
         if (target?.is_gateway) return;
 
         setSelectedIps(prev => {
-            if (prev.includes(ip)) {
-                return prev.filter(item => item !== ip);
+            if (prev.includes(mac)) {
+                return prev.filter(item => item !== mac);
             } else {
-                return [...prev, ip];
+                return [...prev, mac];
             }
         });
     };
 
     const handleToggleSelectAll = () => {
-        const selectableIps = filteredDevices.filter(d => !d.is_gateway).map(d => d.ip);
-        const isAllVisibleSelected = selectableIps.length > 0 && selectableIps.every(ip => selectedIps.includes(ip));
+        const selectableMacs = filteredDevices.filter(d => !d.is_gateway).map(d => d.mac);
+        const isAllVisibleSelected = selectableMacs.length > 0 && selectableMacs.every(mac => selectedIps.includes(mac));
 
         if (isAllVisibleSelected) {
-            setSelectedIps(prev => prev.filter(ip => !selectableIps.includes(ip)));
+            setSelectedIps(prev => prev.filter(mac => !selectableMacs.includes(mac)));
         } else {
-            setSelectedIps(prev => Array.from(new Set([...prev, ...selectableIps])));
+            setSelectedIps(prev => Array.from(new Set([...prev, ...selectableMacs])));
         }
     };
 
@@ -1042,7 +1047,7 @@ function App() {
 
     // Perhitungan cerdas & konsisten untuk perangkat terpilih
     const selectedDevices = useMemo(() => {
-        return devices.filter(d => selectedIps.includes(d.ip) && !d.is_gateway && !d.is_self);
+        return devices.filter(d => selectedIps.includes(d.mac) && !d.is_gateway && !d.is_self);
     }, [devices, selectedIps]);
 
     const unblockedSelected = useMemo(() => {
