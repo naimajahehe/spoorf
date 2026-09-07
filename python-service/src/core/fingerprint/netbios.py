@@ -64,7 +64,10 @@ def query_mdns(ip: str, timeout: float = 0.25) -> str:
             name = ans[DNS].an.rdata
             if isinstance(name, bytes):
                 name = name.decode('utf-8', errors='ignore')
-            return str(name).rstrip('.local.').rstrip('.')
+            # removesuffix() strips the exact '.local.' suffix; rstrip('.local.') would treat
+            # the argument as a CHARACTER SET ({'.','l','o','c','a'}) and eat trailing letters
+            # (e.g. "Nicola.local." -> "Ni").
+            return str(name).removesuffix('.local.').removesuffix('.')
     except:
         pass
     return ""

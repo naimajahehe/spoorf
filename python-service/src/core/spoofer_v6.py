@@ -339,10 +339,17 @@ class NDPSpoofer:
             gateway_mac = session['gateway_mac']
             iface = self._interface
 
-            # Hapus dari daftar sesi aktif
+            # Hapus dari daftar sesi aktif (simpan ref worker untuk di-join di luar lock)
             self._sessions.pop(session_id, None)
-            self._threads.pop(session_id, None)
+            worker = self._threads.pop(session_id, None)
             self._stop_events.pop(session_id, None)
+
+        # Tunggu worker benar-benar berhenti SEBELUM mengirim paket restore. Tanpa join ini,
+        # worker bisa terbangun & menyuntikkan satu burst racun NA setelah paket restore
+        # terkirim, sehingga tabel NDP target tetap teracuni (BUG-7). Join di LUAR lock agar
+        # tidak menahan lock yang mungkin dibutuhkan worker saat berhenti.
+        if worker and worker.is_alive():
+            worker.join(timeout=2.0)
 
         # Lakukan restorasi jaringan DI LUAR LOCK (5 burst packet)
         try:

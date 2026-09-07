@@ -192,5 +192,34 @@ class TestUnitSpooferV6(unittest.TestCase):
         self.spoofer.stop_spoof(sid2)
 
 
+    @patch('src.core.spoofer_v6.time.sleep')
+    @patch('src.core.spoofer_v6.sendp')
+    @patch('src.core.spoofer_v6.threading.Thread')
+    def test_stop_spoof_joins_worker_before_restore(self, mock_thread_cls, mock_sendp, _mock_sleep):
+        """BUG-7: worker thread WAJIB di-join sebelum paket restore dikirim. Kalau tidak,
+        worker bisa menyuntikkan satu burst racun NA SETELAH restore -> tabel NDP target
+        tetap teracuni meski sesi sudah dihentikan."""
+        events = []
+        worker = MagicMock()
+        worker.is_alive.return_value = True
+        worker.join.side_effect = lambda *a, **k: events.append('join')
+        mock_thread_cls.return_value = worker
+        mock_sendp.side_effect = lambda *a, **k: events.append('sendp')
+
+        sid = self.spoofer.start_spoof(
+            victim_ipv6=self.victim_ip,
+            victim_mac=self.victim_mac,
+            gateway_ipv6=self.gateway_ip,
+            gateway_mac=self.gateway_mac,
+            speed_limit=50
+        )
+        self.spoofer.stop_spoof(sid)
+
+        self.assertIn('join', events, "worker harus di-join saat stop_spoof")
+        self.assertIn('sendp', events, "paket restore harus dikirim saat stop_spoof")
+        self.assertLess(events.index('join'), events.index('sendp'),
+                        "join worker harus terjadi SEBELUM sendp paket restore")
+
+
 if __name__ == '__main__':
     unittest.main()

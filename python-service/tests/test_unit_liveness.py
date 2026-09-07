@@ -98,6 +98,37 @@ class TestUnitLiveness(unittest.TestCase):
         self.assertTrue(res['is_alive'], "Neighbor IPv6 hidup gagal terdeteksi (argumen tertukar?)")
         self.assertEqual(res['vector'], 'ipv6_ndp')
 
+    @patch('src.core.discovery.liveness.subprocess.run')
+    @patch('src.core.discovery.liveness.srp')
+    def test_pulse_host_ping_probe_has_subprocess_timeout(self, mock_srp, mock_run):
+        """BUG-12: subprocess ping WAJIB diberi timeout agar proses tak menggantung
+        selamanya (menahan slot worker) saat stack TCP/IP Windows macet."""
+        mock_srp.return_value = ([], [])
+        mock_run.return_value = MagicMock(stdout='', returncode=1)
+
+        pulse_host('192.168.1.77', 'aa:bb:cc:dd:ee:77', timeout=0.25)
+
+        self.assertTrue(mock_run.called, "vektor ICMP ping harus memanggil subprocess.run")
+        _, kwargs = mock_run.call_args
+        self.assertIn('timeout', kwargs, "subprocess.run(ping) harus menyertakan timeout")
+        self.assertGreater(kwargs['timeout'], 0)
+
+    @patch('src.core.discovery.liveness.pulse_host')
+    def test_pulse_batch_preserves_mac_on_failure(self, mock_pulse_host):
+        """BUG-9: bila sebuah probe gagal/timeout, hasil batch harus TETAP membawa MAC
+        target (bukan ''), agar Node tidak membuang event offline yang dijaga oleh MAC."""
+        def boom(ip, mac, *args, **kwargs):
+            raise RuntimeError("probe blew up")
+        mock_pulse_host.side_effect = boom
+
+        targets = [{'ip': '192.168.1.150', 'mac': '00:11:22:33:44:55'}]
+        results = pulse_batch(targets, timeout=0.2)
+
+        self.assertIn('192.168.1.150', results)
+        self.assertFalse(results['192.168.1.150']['is_alive'])
+        self.assertEqual(results['192.168.1.150']['mac'], '00:11:22:33:44:55',
+                         "MAC target harus dipertahankan pada hasil gagal/timeout")
+
     def test_liveness_daemon_lifecycle(self):
         """Uji lifecycle daemon latar belakang (start, update, stop)."""
         events = []

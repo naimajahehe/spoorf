@@ -103,7 +103,7 @@ def pulse_host(
         """Vektor 2: Fast ICMP Ping Fallback (Untuk perangkat mobile dalam Wi-Fi Power Save / Doze)."""
         try:
             t0 = time.time()
-            p = subprocess.run(["ping", "-n", "3", "-w", "800", target_ip], capture_output=True, text=True)
+            p = subprocess.run(["ping", "-n", "3", "-w", "800", target_ip], capture_output=True, text=True, timeout=3.0)
             if "TTL=" in p.stdout or "Reply from" in p.stdout or "Menerima balasan" in p.stdout:
                 return max(0.1, round((time.time() - t0) * 1000, 2))
         except Exception:
@@ -177,7 +177,10 @@ def pulse_batch(
 
     effective_workers = min(max_workers, max(1, len(targets)))
     with concurrent.futures.ThreadPoolExecutor(max_workers=effective_workers) as executor:
-        future_to_ip = {
+        # Map future -> (ip, mac) so a failed/timed-out probe still reports the target's MAC.
+        # Losing the MAC ('') makes Node's liveness handler drop the offline event (it is
+        # keyed by MAC), leaving the device stuck "Online" in the UI (BUG-9).
+        future_to_target = {
             executor.submit(
                 pulse_host,
                 t.get('ip', ''),
@@ -186,20 +189,20 @@ def pulse_batch(
                 t.get('ipv6_link_local') or t.get('ipv6_global'),
                 timeout,
                 True
-            ): t.get('ip', '')
+            ): (t.get('ip', ''), (t.get('mac', '') or '').lower().replace('-', ':'))
             for t in targets if t.get('ip') and t.get('mac')
         }
 
-        done, not_done = concurrent.futures.wait(future_to_ip.keys(), timeout=timeout + 0.35)
+        done, not_done = concurrent.futures.wait(future_to_target.keys(), timeout=timeout + 0.35)
         for fut in done:
-            ip = future_to_ip[fut]
+            ip, mac = future_to_target[fut]
             try:
                 res = fut.result()
                 results[ip] = res
             except Exception as e:
                 results[ip] = {
                     'ip': ip,
-                    'mac': '',
+                    'mac': mac,
                     'is_alive': False,
                     'vector': 'error',
                     'rtt_ms': 0.0,
@@ -208,10 +211,10 @@ def pulse_batch(
 
         # Handle timeout futures
         for fut in not_done:
-            ip = future_to_ip[fut]
+            ip, mac = future_to_target[fut]
             results[ip] = {
                 'ip': ip,
-                'mac': '',
+                'mac': mac,
                 'is_alive': False,
                 'vector': 'timeout',
                 'rtt_ms': timeout * 1000,
