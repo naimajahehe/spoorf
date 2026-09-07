@@ -2166,7 +2166,10 @@ export async function runDeviceManagerTests() {
     // says Blocked while no poison packets are sent.
     {
         const python: any = new EventEmitter();
+        python.getStatus = async () => ({ sessions: {}, active_count: 0 }); // Python fresh: no sessions
         const manager = new DeviceManager(python, {} as any);
+        let scanTriggered = false;
+        (manager as any).scanNetwork = async () => { scanTriggered = true; return []; };
         const blocked: any = { ip: '192.168.1.70', mac: 'aa:bb:cc:dd:ee:70', is_blocked: true, speed_limit: 0, session_id: 'stale-from-old-python' };
         const throttled: any = { ip: '192.168.1.71', mac: 'aa:bb:cc:dd:ee:71', is_blocked: false, speed_limit: 40, session_id: 'stale-throttle' };
         (manager as any).devices.set(blocked.ip, blocked);
@@ -2174,10 +2177,52 @@ export async function runDeviceManagerTests() {
 
         python.emit('pythonReachable');
         await new Promise(resolve => setImmediate(resolve));
+        await new Promise(resolve => setImmediate(resolve));
 
         assert.strictEqual(blocked.session_id, undefined, 'stale block session_id must be cleared on Python reconnect');
         assert.strictEqual(throttled.session_id, undefined, 'stale throttle session_id must be cleared on Python reconnect');
         console.log('  ✓ SP-2: stale session_ids are cleared on Python reconnect so auto-reblock re-establishes');
+    }
+
+    // FASE-1: after a Python engine restart, all in-memory spoof sessions are gone, so a blocked
+    // device gets its internet back. Clearing session_ids (SP-2) is not enough — nothing re-blocks.
+    // On reconnect, reconcile with Python's ACTUAL sessions: if a blocked device is no longer enforced,
+    // trigger a scan so auto-reblock re-establishes the block.
+    {
+        const python: any = new EventEmitter();
+        python.getStatus = async () => ({ sessions: {}, active_count: 0 }); // Python restarted: 0 sessions
+        const manager = new DeviceManager(python, {} as any);
+        let scanTriggered = false;
+        (manager as any).scanNetwork = async () => { scanTriggered = true; return []; };
+        const blocked: any = { ip: '192.168.1.80', mac: 'bb:bb:bb:bb:bb:80', is_blocked: true, speed_limit: 0, session_id: 'stale', is_gateway: false, is_self: false };
+        (manager as any).devices.set(blocked.ip, blocked);
+
+        python.emit('pythonReachable');
+        await new Promise(resolve => setImmediate(resolve));
+        await new Promise(resolve => setImmediate(resolve));
+
+        assert.strictEqual(scanTriggered, true, 'a blocked device unenforced after Python restart must trigger a re-block scan');
+        console.log('  ✓ FASE-1: Python restart with an unenforced blocked device triggers re-block scan');
+    }
+
+    // FASE-1 (idempotent): a transient WS blip where Python did NOT restart (sessions still live) must
+    // NOT trigger a re-block scan — reconcile sees the block is still enforced and does nothing.
+    {
+        const python: any = new EventEmitter();
+        const blockedMac = 'cc:cc:cc:cc:cc:90';
+        python.getStatus = async () => ({ sessions: { 'sess-live': { victim_mac: blockedMac, victim_ip: '192.168.1.90' } }, active_count: 1 });
+        const manager = new DeviceManager(python, {} as any);
+        let scanTriggered = false;
+        (manager as any).scanNetwork = async () => { scanTriggered = true; return []; };
+        const blocked: any = { ip: '192.168.1.90', mac: blockedMac, is_blocked: true, speed_limit: 0, session_id: 'sess-live', is_gateway: false, is_self: false };
+        (manager as any).devices.set(blocked.ip, blocked);
+
+        python.emit('pythonReachable');
+        await new Promise(resolve => setImmediate(resolve));
+        await new Promise(resolve => setImmediate(resolve));
+
+        assert.strictEqual(scanTriggered, false, 'a WS blip with the block still enforced must NOT trigger a re-block scan');
+        console.log('  ✓ FASE-1: WS blip with block still enforced is a no-op (idempotent)');
     }
 
 }

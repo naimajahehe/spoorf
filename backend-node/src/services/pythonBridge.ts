@@ -93,6 +93,7 @@ export class PythonBridge extends EventEmitter {
     private wsUrl: string;
     private ws: WebSocket | null = null;
     private ready: boolean = false;
+    private wsEverConnected: boolean = false; // true setelah WS pertama tersambung; membedakan reconnect (potensi restart Python) dari koneksi awal
     private isInternalSpawn: boolean = false;
 
     constructor() {
@@ -393,6 +394,15 @@ export class PythonBridge extends EventEmitter {
 
             this.ws.on('open', () => {
                 console.log(`🔌 Connected to Python event stream via WebSocket (${this.wsUrl})`);
+                // Keandalan deteksi restart (FASE-1): bila ini RE-connect (pernah terhubung lalu putus),
+                // Python bisa saja baru restart & kehilangan semua sesi spoof. Pancarkan 'pythonReachable'
+                // agar DeviceManager merekonsiliasi blok — walau transisi markReachable terlewat karena
+                // `ready` tak sempat jadi false (Node idle saat Python mati). Rekonsiliasi idempoten:
+                // bila sesi Python masih utuh (blip biasa), ia no-op.
+                if (this.wsEverConnected) {
+                    this.emit('pythonReachable');
+                }
+                this.wsEverConnected = true;
             });
 
             this.ws.on('message', (raw: string | Buffer) => {

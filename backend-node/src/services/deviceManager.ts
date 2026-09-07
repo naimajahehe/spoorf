@@ -224,13 +224,7 @@ export class DeviceManager extends EventEmitter {
         // auto-reblock (yang melewati perangkat ber-session_id, mengira sesinya hidup) benar-benar
         // membangun ulang sesi. is_blocked tetap; sesi baru dibuat saat scan/reblock berikutnya.
         this.python.on('pythonReachable', () => {
-            let cleared = 0;
-            for (const dev of this.devices.values()) {
-                if (dev.session_id) { dev.session_id = undefined; cleared++; }
-            }
-            if (cleared > 0) {
-                console.log(`♻️ [Python Reconnect] Membersihkan ${cleared} session_id basi agar auto-reblock membangun ulang sesi.`);
-            }
+            this.reconcileBlocksWithPython().catch(err => console.warn('Notice reconcile on reconnect:', err?.message));
         });
 
         this.python.on('networkChanged', (data) => {
@@ -307,6 +301,41 @@ export class DeviceManager extends EventEmitter {
             if (this.pendingGamingDisable) return;
             this.emit('gamingStatusChanged', data);
         });
+    }
+
+    /**
+     * FASE-1: setelah Python (re)connect, cocokkan blok yang kita yakini dengan sesi spoof yang
+     * BENAR-BENAR aktif di Python. Sesi Python = in-memory, hilang saat engine restart → perangkat
+     * terblokir dapat internet lagi. Bila ada perangkat is_blocked yang TAK ter-enforce di Python:
+     * bersihkan session_id basi + picu scanNetwork agar auto-reblock membangun ulang sesi.
+     * IDEMPOTEN: bila sesi masih ada (mis. WS blip tanpa restart), tak melakukan apa pun.
+     */
+    private async reconcileBlocksWithPython(): Promise<void> {
+        const blocked = Array.from(this.devices.values()).filter(d => d.is_blocked && !d.is_gateway && !d.is_self);
+        if (blocked.length === 0) return;
+
+        const activeMacs = new Set<string>();
+        try {
+            const status = await this.python.getStatus();
+            const sessions = (status && status.sessions) || {};
+            for (const sid of Object.keys(sessions)) {
+                const vm = sessions[sid] && sessions[sid].victim_mac;
+                if (vm) activeMacs.add(String(vm).toLowerCase());
+            }
+        } catch {
+            // getStatus gagal → anggap tak ada sesi aktif (Python kemungkinan baru restart).
+        }
+
+        const unenforced = blocked.some(d => !activeMacs.has(d.mac.toLowerCase()));
+        if (!unenforced) return; // semua blok masih ter-enforce (WS blip) → no-op
+
+        // Sesi Python hilang → session_id yang kita pegang basi. Bersihkan agar auto-reblock tak skip.
+        let cleared = 0;
+        for (const dev of this.devices.values()) {
+            if (dev.session_id) { dev.session_id = undefined; cleared++; }
+        }
+        console.log(`♻️ [Reconcile] ${blocked.length} perangkat terblokir, sebagian tak ter-enforce di Python (session basi: ${cleared}) → memicu scan re-block.`);
+        this.scanNetwork().catch(err => console.warn('Notice reconcile re-block scan:', err?.message));
     }
 
     private async _handleDhcpEvent(data: any): Promise<void> {
