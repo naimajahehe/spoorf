@@ -429,6 +429,27 @@ export async function runDatabaseTests() {
         console.log('  ✓ DUID-First Priority: Matching Hardware DUID scores 100% instant match bypassing generic checks');
     }
 
+    // Test 9b: TIER-1 GUARD — a placeholder/non-hex client-id (e.g. legacy "DUID_LLT") must NOT
+    // trigger the instant 100% match, otherwise two DIFFERENT devices that both stored the same
+    // placeholder would be falsely fused/blocked as one.
+    {
+        const { calculateProfileMatchScore } = await import('../src/services/database');
+        const profileA = {
+            id: 'prof_A', alias: 'Laptop A', hostname: 'LAPTOP-AAA',
+            is_blocked: true, dhcp_client_id: 'DUID_LLT', linked_macs: []
+        };
+        const scannedB: Device = {
+            ip: '192.168.1.50', mac: 'de:ad:be:ef:00:0b', hostname: 'DESKTOP-BBB',
+            vendor: 'HP', device_type: 'Desktop', os: 'Windows', rtt_ms: 3,
+            open_ports: [], services: [], is_blocked: false, is_online: true, is_gateway: false,
+            dhcp_client_id: 'DUID_LLT'
+        };
+        const result = calculateProfileMatchScore(scannedB, profileA, []);
+        assert.notStrictEqual(result.score, 100, 'placeholder client-id must NOT instant-match (would falsely fuse two devices)');
+        assert.ok(!result.reasons.some(r => r.includes('duid_hardware_instant_match')), 'placeholder must not claim a hardware DUID match');
+        console.log('  ✓ TIER-1 guard: placeholder/non-hex client-id does not trigger false 100% DUID match');
+    }
+
     // Test 10: Profile ID derivation is collision-free (BUG-003)
     {
         const { deriveProfileId } = await import('../src/services/database');

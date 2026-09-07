@@ -35,6 +35,27 @@ _DHCP_PROFILE_FIELDS = (
 )
 
 
+def _serialize_duid(raw_duid) -> str:
+    """Serialize DUID/Client-ID (Opt 61 / DHCPv6) ke colon-hex byte ASLI-nya.
+
+    Objek DUID Scapy (mis. DUID_LLT) di-`str()` menghasilkan LABEL kelas ("DUID_LLT") — bukan
+    identitasnya. Itu membuang byte stabil (type+hwtype+time+LL untuk DUID-LLT) sehingga SEMUA
+    perangkat DUID-LLT kolaps ke satu nilai tak berguna: tak terlacak lintas rotasi MAC, dan
+    ranjau false-fusi (dua perangkat "DUID_LLT" cocok 100%). Kembalikan colon-hex byte penuh
+    agar jadi kunci identitas stabil per-perangkat. Konsisten format dengan jalur DHCPv4."""
+    if not raw_duid:
+        return ''
+    if isinstance(raw_duid, (bytes, bytearray)):
+        return ':'.join(f"{b:02x}" for b in raw_duid) if raw_duid else ''
+    try:
+        b = bytes(raw_duid)  # objek Scapy → byte wire
+        if b:
+            return ':'.join(f"{x:02x}" for x in b)
+    except Exception:
+        pass
+    return str(raw_duid).strip()
+
+
 def diff_dhcp_profiles(
     before: Dict[str, Dict[str, Any]],
     after: Dict[str, Dict[str, Any]],
@@ -245,11 +266,7 @@ def _handle_dhcp6_packet(pkt) -> None:
         client_id = ""
         if pkt.haslayer(DHCP6OptClientId):
             raw_duid = getattr(pkt[DHCP6OptClientId], 'duid', None)
-            if raw_duid:
-                if isinstance(raw_duid, bytes):
-                    client_id = ':'.join(f"{b:02x}" for b in raw_duid)
-                else:
-                    client_id = str(raw_duid).strip()
+            client_id = _serialize_duid(raw_duid)
 
         # Option 16: Vendor Class
         vendor_class = ""

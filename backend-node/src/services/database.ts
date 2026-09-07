@@ -62,6 +62,22 @@ export function isGenericFactoryHostname(hostname: string): boolean {
     return false;
 }
 
+/**
+ * TIER-1 guard: apakah client-id (DUID/Opt61) LAYAK dipakai untuk instant-match 100%.
+ * Hanya colon-hex asli, ≥3 byte, bukan all-zero. Menolak placeholder/label (mis. legacy
+ * "DUID_LLT") & nilai non-hex — kalau tidak, dua perangkat BERBEDA yang menyimpan placeholder
+ * sama akan cocok 100% & di-fusi/blokir keliru sebagai satu.
+ */
+export function isUsableClientId(cid: string | undefined | null): boolean {
+    if (!cid) return false;
+    const c = String(cid).trim().toLowerCase();
+    if (!/^[0-9a-f]{2}(:[0-9a-f]{2})+$/.test(c)) return false;
+    const bytes = c.split(':');
+    if (bytes.length < 3) return false;
+    if (bytes.every(b => b === '00')) return false;
+    return true;
+}
+
 export function calculateProfileMatchScore(
     scanned: Device,
     profile: any,
@@ -74,7 +90,7 @@ export function calculateProfileMatchScore(
     // Jika perangkat memiliki Hardware DUID unik (Option 61) dan cocok dengan profil,
     // maka 100% PASTI mesin fisik yang sama -> bypass faktor lain & langsung 100 Poin!
     // =========================================================================
-    if (sCid && sCid !== '' && !sCid.startsWith('00:00:00:00:00:00')) {
+    if (isUsableClientId(sCid)) {
         let pCid = (profile.dhcp_client_id || '').trim().toLowerCase();
         if (!pCid && existingDevices.length > 0) {
             const linkedDev = existingDevices.find(
@@ -162,8 +178,8 @@ export function calculateProfileMatchScore(
         }
     }
 
-    // 5. Secondary DUID / Partial Match (Bonus 15 Poin)
-    if (sCid && sCid !== '') {
+    // 5. Secondary DUID / Partial Match (Bonus 15 Poin) — hanya client-id yang layak (bukan placeholder)
+    if (isUsableClientId(sCid)) {
         const duidMatch = existingDevices.find(
             d => (d.dhcp_client_id || '').trim().toLowerCase() === sCid && d.profile_id === profile.id
         );
