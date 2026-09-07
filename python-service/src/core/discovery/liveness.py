@@ -164,12 +164,15 @@ def pulse_host(
 def pulse_batch(
     targets: List[Dict[str, Any]],
     gateway_ip: Optional[str] = None,
-    max_workers: int = 8,
+    max_workers: int = 16,
     timeout: float = 3.0
 ) -> Dict[str, Dict[str, Any]]:
     """
     Eksekusi pulse ke sekumpulan perangkat secara paralel (asinkron).
-    Dibatasi max 8 worker untuk mencegah Npcap driver buffer collision di Windows.
+    Worker dibatasi (default 16) untuk menyeimbangkan kecepatan vs. tabrakan buffer Npcap;
+    balapan tri-vektor (ARP+ICMP+UDP) di pulse_host meredam kehilangan satu vektor akibat
+    kontensi. Jendela tunggu batch DISKALAKAN ke jumlah gelombang (bukan flat), agar pada
+    jaringan besar gelombang belakangan tak terpotong & divonis offline palsu.
     """
     results: Dict[str, Dict[str, Any]] = {}
     if not targets:
@@ -193,7 +196,15 @@ def pulse_batch(
             for t in targets if t.get('ip') and t.get('mac')
         }
 
-        done, not_done = concurrent.futures.wait(future_to_target.keys(), timeout=timeout + 0.35)
+        # Jendela tunggu DISKALAKAN ke jumlah gelombang: ceil(target_valid / worker) × anggaran
+        # per-gelombang (timeout + 0.35). Dulu flat (timeout + 0.35) tanpa peduli N → pada
+        # jaringan besar hanya ~1 gelombang selesai, sisanya divonis 'timeout' = offline palsu.
+        # Formula ini identik dengan lama saat 1 gelombang (N ≤ worker), jadi backward-compatible
+        # sekaligus menutup plafon skala untuk berapa pun jumlah perangkat.
+        effective_workers = min(max_workers, max(1, len(future_to_target)))
+        waves = (len(future_to_target) + effective_workers - 1) // effective_workers
+        batch_window = (timeout + 0.35) * max(1, waves)
+        done, not_done = concurrent.futures.wait(future_to_target.keys(), timeout=batch_window)
         for fut in done:
             ip, mac = future_to_target[fut]
             try:

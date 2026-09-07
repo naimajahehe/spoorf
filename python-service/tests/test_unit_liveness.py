@@ -52,6 +52,28 @@ class TestUnitLiveness(unittest.TestCase):
         self.assertEqual(res['vector'], 'none')
 
     @patch('src.core.discovery.liveness.pulse_host')
+    def test_pulse_batch_scales_wait_window_to_waves(self, mock_pulse_host):
+        """Watchdog false-offline flood: jendela tunggu batch dulunya FLAT (timeout+0.35)
+        tanpa peduli jumlah perangkat. Dengan N > worker, gelombang belakangan terpotong &
+        divonis timeout=offline PALSU walau host hidup. Jendela harus diskalakan ke jumlah
+        gelombang: host yang menjawab dalam waktu tak boleh ada yang ter-'timeout'."""
+        def slow_alive(ip, mac, *args, **kwargs):
+            time.sleep(0.4)  # menjawab < timeout(0.5), tapi butuh waktu
+            return {'ip': ip, 'mac': mac, 'is_alive': True, 'vector': 'unicast_arp',
+                    'rtt_ms': 1.0, 'timestamp': time.time()}
+        mock_pulse_host.side_effect = slow_alive
+
+        # 24 host, 4 worker -> 6 gelombang. Jendela lama (0.85s) hanya cukup ~1-2 gelombang.
+        targets = [{'ip': f'192.168.1.{100 + i}', 'mac': f'00:11:22:33:44:{i:02d}'} for i in range(24)]
+        results = pulse_batch(targets, gateway_ip='192.168.1.1', max_workers=4, timeout=0.5)
+
+        self.assertEqual(len(results), 24)
+        false_offline = [ip for ip, r in results.items() if r.get('vector') == 'timeout']
+        self.assertEqual(false_offline, [],
+                         f'host yang hidup & menjawab tak boleh divonis timeout; palsu: {false_offline}')
+        self.assertTrue(all(r['is_alive'] for r in results.values()), 'semua host harus terdeteksi hidup')
+
+    @patch('src.core.discovery.liveness.pulse_host')
     def test_pulse_batch_concurrency(self, mock_pulse_host):
         """Uji batch pulse mengeksekusi banyak host secara paralel."""
         mock_pulse_host.side_effect = lambda ip, mac, *args, **kwargs: {
