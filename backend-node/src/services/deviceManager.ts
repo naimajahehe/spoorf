@@ -1066,9 +1066,14 @@ export class DeviceManager extends EventEmitter {
                         continue;
                     }
 
-                    // Jika sesi sudah aktif berjalan, jangan buat sesi ganda
+                    // Bersihkan sesi lama jika ada (dari sebelum offline / IP lama) sebelum membangun sesi fresh
                     if (currentDev.session_id) {
-                        continue;
+                        try {
+                            await this.python.stopSpoof(currentDev.session_id);
+                        } catch (e) {
+                            // Sesi lama mungkin sudah mati di Python
+                        }
+                        currentDev.session_id = undefined;
                     }
 
                     try {
@@ -1111,8 +1116,14 @@ export class DeviceManager extends EventEmitter {
                         continue;
                     }
 
+                    // Bersihkan sesi lama jika ada (dari sebelum offline / IP lama) sebelum membangun sesi fresh
                     if (currentDev.session_id) {
-                        continue;
+                        try {
+                            await this.python.stopSpoof(currentDev.session_id);
+                        } catch (e) {
+                            // Sesi lama mungkin sudah mati di Python
+                        }
+                        currentDev.session_id = undefined;
                     }
 
                     try {

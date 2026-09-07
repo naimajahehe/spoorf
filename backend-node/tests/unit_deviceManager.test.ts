@@ -2027,8 +2027,9 @@ export async function runDeviceManagerTests() {
     {
         const python: any = new EventEmitter();
         let startSpoofArgs: any = null;
+        let stoppedSessions: string[] = [];
         python.startSpoof = async (...args: any[]) => { startSpoofArgs = args; return 'sess-reblock'; };
-        python.stopSpoof = async () => {};
+        python.stopSpoof = async (sid: string) => { stoppedSessions.push(sid); };
 
         const gateway: any = {
             ip: '192.168.1.1', mac: 'gg:gg:gg:gg:gg:01', hostname: 'Router', vendor: 'MikroTik',
@@ -2040,7 +2041,7 @@ export async function runDeviceManagerTests() {
             ip: '192.168.1.105', mac: 'a8:3b:76:0c:dc:55', hostname: 'Target', vendor: 'Lenovo',
             device_type: 'PC / Laptop', os: 'Windows 11', rtt_ms: 15, open_ports: [], services: [],
             is_blocked: true, is_online: true, is_gateway: false, speed_limit: 0,
-            session_id: undefined,
+            session_id: 'sess-old-stale',
             ipv6_link_local: 'fe80::abcd', ipv6_global: '2404:6800::abcd'
         };
 
@@ -2064,11 +2065,12 @@ export async function runDeviceManagerTests() {
 
         await manager.scanNetwork();
 
+        assert.ok(stoppedSessions.includes('sess-old-stale'), 'stale session must be stopped before starting fresh re-block session');
         assert.ok(startSpoofArgs, 'auto-reblock must call startSpoof for the returning blocked device');
         assert.strictEqual(startSpoofArgs.length >= 7, true, 'startSpoof must receive victim & gateway IPv6 args');
         assert.strictEqual(startSpoofArgs[5], 'fe80::abcd', 'victim IPv6 must be forwarded to startSpoof');
         assert.strictEqual(startSpoofArgs[6], 'fe80::1111', 'gateway IPv6 must be forwarded to startSpoof');
-        console.log('  ✓ BUG-2: auto-reblock forwards IPv6 to startSpoof (no IPv6 leak on reconnect)');
+        console.log('  ✓ BUG-2: auto-reblock cleans stale sessions and forwards IPv6 to startSpoof');
     }
 
     // BUG-6: on a network change Python's watchdog has already run spoofer.stop_all(), so

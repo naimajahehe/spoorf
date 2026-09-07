@@ -178,7 +178,7 @@ export function calculateProfileMatchScore(
         reasons.push('dhcp_vendor_class_match (+15)');
     }
 
-    // 4. Offline Timing Window Continuity (Maks 10 Poin)
+    // 4. Offline Timing Window Continuity (Maks 15 Poin)
     if (Array.isArray(profile.linked_macs) && profile.linked_macs.length > 0) {
         const matchingLinked = existingDevices.find(
             d => profile.linked_macs.map((m: string) => m.toLowerCase()).includes(d.mac.toLowerCase()) && !d.is_online
@@ -187,8 +187,8 @@ export function calculateProfileMatchScore(
             const lastSeenTime = new Date(matchingLinked.last_seen).getTime();
             const now = Date.now();
             if (!isNaN(lastSeenTime) && now - lastSeenTime <= 10 * 60 * 1000) {
-                score += 10;
-                reasons.push('recent_disconnect_continuity (+10)');
+                score += 15;
+                reasons.push('recent_disconnect_continuity (+15)');
             }
         }
     }
@@ -1305,16 +1305,14 @@ export class DatabaseService {
         `);
         const archiveDevicesStmt = this.db.prepare(`
             UPDATE devices
-            SET is_archived = 1, session_id = NULL
+            SET is_archived = 1, is_online = 0, session_id = NULL
             WHERE profile_id = ? 
-              AND LOWER(mac) != LOWER(?) 
-              AND is_online = 0
+              AND LOWER(mac) != LOWER(?)
         `);
         const selectArchivedSessionsStmt = this.db.prepare(`
             SELECT mac, session_id FROM devices
             WHERE profile_id = ? 
               AND LOWER(mac) != LOWER(?) 
-              AND is_online = 0
               AND session_id IS NOT NULL
         `);
 

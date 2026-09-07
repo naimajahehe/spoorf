@@ -304,6 +304,66 @@ export async function runDatabaseTests() {
         console.log('  ✓ Protection: Innocent guest Siti (Galaxy-A14) gets candidate score 50% and is NOT auto-blocked');
     }
 
+    // Test 6b: High Confidence Auto-Link for Generic Factory Model with Offline Timing Continuity
+    {
+        const { calculateProfileMatchScore } = await import('../src/services/database');
+        
+        // Budi's blocked profile with generic factory name and vendor class
+        const budiProfile = {
+            id: 'prof_budi',
+            alias: 'HP Budi',
+            hostname: 'Galaxy-A14',
+            is_blocked: true,
+            dhcp_fingerprint: 'Android OS Signature',
+            dhcp_vendor_class: 'android-dhcp-12',
+            linked_macs: ['c2:4e:ca:88:04:2d']
+        };
+
+        // Budi's previous device entry showing offline within last 2 minutes
+        const existingDevices: any[] = [
+            {
+                ip: '',
+                mac: 'c2:4e:ca:88:04:2d',
+                hostname: 'Galaxy-A14',
+                vendor: 'Samsung',
+                device_type: 'Mobile',
+                os: 'Android',
+                rtt_ms: 10,
+                open_ports: [],
+                services: [],
+                is_blocked: true,
+                is_online: false,
+                is_gateway: false,
+                profile_id: 'prof_budi',
+                last_seen: new Date(Date.now() - 2 * 60 * 1000).toISOString()
+            }
+        ];
+
+        // Budi rotates MAC and reconnects
+        const budiRotatedGeneric: Device = {
+            ip: '192.168.1.89',
+            mac: '3a:11:22:33:44:99',
+            hostname: 'Galaxy-A14',
+            vendor: 'Samsung',
+            device_type: 'Mobile',
+            os: 'Android',
+            rtt_ms: 8,
+            open_ports: [],
+            services: [],
+            is_blocked: false,
+            is_online: true,
+            is_gateway: false,
+            dhcp_fingerprint: 'Android OS Signature',
+            dhcp_vendor_class: 'android-dhcp-12'
+        };
+
+        const result = calculateProfileMatchScore(budiRotatedGeneric, budiProfile, existingDevices);
+        // Score = 20 (generic factory hostname) + 30 (PRL) + 15 (vendor class) + 15 (timing continuity) = 80%
+        assert.strictEqual(result.score, 80, 'Returning target with timing continuity must score 80%');
+        assert.ok(result.score >= 80, 'Score 80% qualifies for high-confidence auto-block');
+        console.log('  ✓ Timing Continuity: Target Budi (Galaxy-A14) with linked offline continuity scores 80% and auto-reblocks');
+    }
+
     // Test 7: High Confidence Auto-Link for Personalized Unique Hostnames
     {
         const { calculateProfileMatchScore } = await import('../src/services/database');

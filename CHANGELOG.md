@@ -2,6 +2,22 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.37.0] - 2026-09-07
+
+### Device Identity Persistence, Auto-Reblock & Zombie Session Remediation
+- **Perbaikan Auto-Reblock Suppression saat IP Berubah — `backend-node/src/services/deviceManager.ts` [CRIT-01]**:
+  - Mengganti pencegahan kaku `if (currentDev.session_id) continue;` pada `_scanNetworkImpl` dengan pembersihan sesi lama (`python.stopSpoof(currentDev.session_id)`) dan inisialisasi sesi fresh `python.startSpoof` ke IP/MAC terkini target.
+  - Memastikan target terblokir yang menyambung ulang dengan IP baru tidak lagi dibiarkan bebas berinternet di IP baru.
+- **Pembersihan Kebocoran Sesi Zombie Python pada Rotasi MAC — `backend-node/src/services/database.ts` [CRIT-02]**:
+  - Menghapus syarat kaku `AND is_online = 0` pada `archiveDevicesStmt` dan `selectArchivedSessionsStmt` di dalam `syncScanResults`.
+  - Mengarsipkan seluruh MAC usang milik profil yang sama (`is_archived = 1, is_online = 0, session_id = NULL`) dan memasukkan `session_id` lama ke dalam `zombieSessionsToStop` agar segera dimatikan di Python, mencegah ghost ARP poisoning pada IP lama.
+- **Kalibrasi Multi-Factor Fingerprint Scoring untuk MAC Acak — `backend-node/src/services/database.ts` [HIGH-01]**:
+  - Menyesuaikan bobot kontinuitas waktu disconnect linked MAC (\(\le 10\) menit) dari +10 poin menjadi +15 poin pada `calculateProfileMatchScore`.
+  - Memungkinkan smartphone dengan model bawaan pabrik (`Galaxy-A52`, dsb.) mencapai ambang batas 80% saat menyambung kembali pasca rotasi MAC, tanpa menimbulkan risiko false positive terhadap perangkat tamu baru.
+- **Pembaruan dan Penambahan Unit Test — `backend-node/tests/` [LOW-01]**:
+  - Memperbarui pengujian `BUG-2` di `unit_deviceManager.test.ts` untuk memverifikasi pembersihan sesi usang secara nyata tanpa bergantung pada mock `session_id: undefined`.
+  - Menambahkan pengujian `Test 6b` di `unit_database.test.ts` untuk memvalidasi kontinuitas waktu pada perangkat bermodel generik.
+
 ## [v2.36.0] - 2026-09-07
 
 ### Security Hardening, Process Lifecycle Safety & Full Audit Remediation
