@@ -423,6 +423,39 @@ class TestCoreDiscovery(unittest.TestCase):
             result_ips = [d['ip'] for d in results]
             self.assertIn('192.168.1.150', result_ips)
 
+    def test_scan_full_l2_discovery_uses_kernel_arp_cache_not_slow_broadcast(self):
+        """PERF: penemuan L2 harus memakai jalur KERNEL (sweep socket + baca tabel ARP OS) yang
+        cepat (~2s pada /24), BUKAN Scapy srp broadcast yang mengirim 254 paket serial (~60s di
+        Windows/Npcap). Bukti: host yang HANYA ada di tabel ARP kernel (collect_from_arp_cache)
+        harus langsung muncul di hasil scan, dan collect_from_arp_broadcast tak boleh dipanggil."""
+        from src.core.scanner import NetworkScanner
+        from unittest.mock import patch
+
+        NetworkScanner._DEVICE_HISTORY.clear()
+
+        def mock_cache(d):
+            # Simulasikan tabel ARP kernel yang sudah berisi satu host setelah sweep.
+            d['192.168.1.77'] = 'aa:bb:cc:dd:ee:77'
+
+        with patch('src.core.scanner.get_current_gateway', return_value='192.168.1.1'), \
+             patch('src.core.scanner.get_network_info', return_value={'ip': '192.168.1.20', 'network': '192.168.1.0/24'}), \
+             patch('src.core.scanner.has_ipv6_connectivity', return_value=False), \
+             patch('src.core.scanner.collect_ssdp_sensors'), \
+             patch('src.core.scanner.collect_mdns_sensors'), \
+             patch('src.core.scanner.send_multicast_wakeup'), \
+             patch('src.core.scanner.sweep_subnet_for_arp'), \
+             patch('src.core.scanner.collect_from_arp_cache', side_effect=mock_cache), \
+             patch('src.core.scanner.collect_from_arp_broadcast') as mock_broadcast, \
+             patch('src.core.scanner.probe_sleeping_host_via_unicast_arp'), \
+             patch('src.core.scanner.get_self_mac', return_value='a8:3b:76:0c:dc:55'), \
+             patch.object(NetworkScanner, '_build_device', side_effect=lambda ip, mac, *_a, **_k: {'ip': ip, 'mac': mac}):
+            results = NetworkScanner.scan_full()
+
+        result_ips = [d['ip'] for d in results]
+        self.assertIn('192.168.1.77', result_ips,
+                      'host dari tabel ARP kernel harus langsung masuk hasil (jalur kernel = sumber discovery)')
+        mock_broadcast.assert_not_called()
+
     def test_scan_full_unresolved_network_skips_every_active_discovery_helper(self):
         """Unresolved topology must return before any packet-capable scanner helper."""
         from src.core.scanner import NetworkScanner

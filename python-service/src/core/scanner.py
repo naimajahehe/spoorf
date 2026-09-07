@@ -386,10 +386,17 @@ class NetworkScanner:
 
         def _run_l2_arp_discovery():
             try:
-                # Active Layer 2 ARP Request Broadcast ke seluruh subnet
-                collect_from_arp_broadcast(discovered, timeout=1.20)
-                # Fast Subnet Sweep untuk memicu kernel OS ARP
+                # PENEMUAN L2 JALUR KERNEL (cepat & andal). Scapy srp() broadcast ke /24
+                # mengirim 254 paket SERIAL lewat Npcap (~0.12s/paket) — puluhan detik & `timeout`
+                # hanya membatasi tunggu balasan, BUKAN waktu kirim; pada jaringan 51-host ini
+                # sendiri ~59s. Jalur kernel (socket sweep memicu resolusi ARP OS + baca tabel
+                # ARP) menyelesaikan hal sama dalam ~2s dan menemukan lebih banyak host:
+                #   1. sweep_subnet_for_arp: soket non-blocking memicu ARP kernel ke seluruh subnet
+                #   2. jeda singkat agar balasan mengisi tabel ARP OS
+                #   3. collect_from_arp_cache: baca tabel ARP OS langsung ke 'discovered'
                 sweep_subnet_for_arp(discovered)
+                time.sleep(1.0)
+                collect_from_arp_cache(discovered)
             except Exception as e:
                 logger.debug(f"Layer 2 ARP discovery exception: {e}")
 
