@@ -328,6 +328,37 @@ export async function runPythonBridgeTests() {
         console.log('  ✓ Resilience: scan() menolak (reject) saat engine mati, tidak menggantung');
     }
 
+    // WS reconnect robustness: after an engine restart Node can end up HTTP-reachable but with a
+    // DEAD WebSocket (no periodic re-arm), so DHCP events stop flowing and real-time re-block never
+    // fires. The health monitor tick must reconnect the WS whenever the engine is reachable and the
+    // WS is down — independent of the `ready` flag.
+    {
+        const b: any = new PythonBridge();
+        let reconnects = 0;
+        b.connectWebSocket = () => { reconnects++; };
+        b.checkHealth = async () => true; // engine reachable
+
+        // Case 1 (the exact production bug): engine already marked ready + WS dead. markReachable()
+        // early-returns on ready, so ONLY the monitor's explicit re-arm can reconnect.
+        b.ready = true;
+        b.ws = null;
+        await b.healthMonitorTick();
+        assert.strictEqual(reconnects, 1, 'reachable engine + dead WS (ready already true) must reconnect the WS');
+
+        // Case 2: WS is healthy (OPEN) -> tick must NOT reconnect (no duplicate socket).
+        b.ws = { readyState: 1 /* WebSocket.OPEN */ };
+        await b.healthMonitorTick();
+        assert.strictEqual(reconnects, 1, 'a healthy WS must not be reconnected (no duplicate)');
+
+        // Case 3: engine unreachable -> tick must NOT reconnect.
+        b.checkHealth = async () => false;
+        b.ws = null;
+        await b.healthMonitorTick();
+        assert.strictEqual(reconnects, 1, 'an unreachable engine must not trigger a WS reconnect');
+
+        console.log('  ✓ WS reconnect: health monitor re-arms a dead WebSocket, skips healthy/unreachable');
+    }
+
     // Bersihkan agar tidak memengaruhi test lain
     delete process.env.PYTHON_SERVICE_URL;
 }

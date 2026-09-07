@@ -283,7 +283,7 @@ export class DeviceManager extends EventEmitter {
         });
 
         this.python.on('deviceLivenessChanged', (data) => {
-            this._handleLivenessEvent(data).catch(console.warn);
+            this.runExclusive(() => this._handleLivenessEvent(data)).catch(console.warn);
         });
 
         this.python.on('shieldStatusChanged', (data) => {
@@ -636,7 +636,7 @@ export class DeviceManager extends EventEmitter {
         await this.db.init();
         // Sembuhkan profil yang namanya generik/'Unknown' dari hostname personal perangkatnya, agar
         // MAC hasil rotasi tak lagi mewarisi nama "Unknown" (idempoten, hanya naik generik→personal).
-        try { await this.db.backfillProfileNames(); } catch (e: any) { console.warn('Notice profile name backfill:', e?.message); }
+        try { if (typeof this.db.backfillProfileNames === "function") await this.db.backfillProfileNames(); } catch (e: any) { console.warn('Notice profile name backfill:', e?.message); }
         const storedDevices = await this.db.getAllDevices();
         this.devices.clear();
         // Load in reverse (offline first, online last) so online devices cleanly overwrite any legacy stale IP duplicates
@@ -836,12 +836,19 @@ export class DeviceManager extends EventEmitter {
             );
 
             // Pastikan Komputer Operator (Perangkat Ini / Controller) selalu ada & Online!
+            const activeGwForFilter = rawScanned.find(d => d.is_gateway) || this.findGateway();
             try {
                 const ifaces = os.networkInterfaces();
                 for (const addrs of Object.values(ifaces)) {
                     if (!addrs) continue;
                     for (const a of addrs) {
                         if (a.family === 'IPv4' && !a.internal && (a.address.startsWith('192.168.') || a.address.startsWith('10.') || a.address.startsWith('172.'))) {
+                            // Filter ketat: Jika gateway aktif diketahui, HANYA daftarkan interface controller yang
+                            // satu subnet dengan gateway. Abaikan adapter virtual (WSL vEthernet, Hyper-V, Docker)
+                            // yang berada di subnet berbeda agar tidak mencemari database dengan duplikasi laptop offline.
+                            if (activeGwForFilter && !isIpInSameSubnet(a.address, activeGwForFilter.ip)) {
+                                continue;
+                            }
                             const selfIdx = rawScanned.findIndex(d => d.ip === a.address || d.mac.toLowerCase() === a.mac.toLowerCase());
                             if (selfIdx >= 0) {
                                 rawScanned[selfIdx].is_self = true;
@@ -884,9 +891,8 @@ export class DeviceManager extends EventEmitter {
             }
 
             // Saring rawScanned: Hanya proses perangkat yang berada dalam satu subnet dengan gateway aktif
-            const activeGwForFilter = rawScanned.find(d => d.is_gateway) || this.findGateway();
             if (activeGwForFilter) {
-                rawScanned = rawScanned.filter(d => d.is_self || isIpInSameSubnet(d.ip, activeGwForFilter.ip));
+                rawScanned = rawScanned.filter(d => isIpInSameSubnet(d.ip, activeGwForFilter.ip));
             }
 
             // Sinkronkan ke SQLite:
@@ -896,7 +902,7 @@ export class DeviceManager extends EventEmitter {
             const { allDevices, autoReblockTargets, autoThrottleTargets, zombieSessionsToStop } = await this.db.syncScanResults(rawScanned);
 
             // Sehatkan nama profil dari hostname personal yang baru dipelajari scan ini (idempoten).
-            try { await this.db.backfillProfileNames(); } catch (e: any) { console.warn('Notice profile name backfill (scan):', e?.message); }
+            try { if (typeof this.db.backfillProfileNames === "function") await this.db.backfillProfileNames(); } catch (e: any) { console.warn('Notice profile name backfill (scan):', e?.message); }
 
             // Bersihkan sesi zombie lama dari MAC yang baru saja diarsipkan
             if (zombieSessionsToStop && zombieSessionsToStop.length > 0) {
@@ -955,6 +961,12 @@ export class DeviceManager extends EventEmitter {
             for (const dev of allDevices) {
                 // Lewati perangkat tanpa IP valid
                 if (!dev.ip || dev.ip.trim() === '') {
+                    continue;
+                }
+
+                // INTEGRITAS CONTROLLER: Komputer operator (is_self) tidak pernah berstatus offline di aplikasinya sendiri.
+                // Jika ada entri lama dari adapter virtual yang mati, abaikan agar tidak muncul duplikat offline.
+                if (dev.is_self && !dev.is_online) {
                     continue;
                 }
 
@@ -1220,14 +1232,31 @@ export class DeviceManager extends EventEmitter {
         return device;
     }
 
-    async unblockDevice(ip: string): Promise<Device> {
-        return this.runExclusive(() => this._unblockDeviceImpl(ip));
+    async unblockDevice(identifier: string): Promise<Device> {
+        return this.runExclusive(() => this._unblockDeviceImpl(identifier));
     }
 
-    private async _unblockDeviceImpl(ip: string): Promise<Device> {
-        const device = this.devices.get(ip);
+    private async _unblockDeviceImpl(identifier: string): Promise<Device> {
+        let device = this.devices.get(identifier);
         if (!device) {
-            throw new Error(`Device ${ip} not found`);
+            const norm = identifier.toLowerCase();
+            for (const d of this.devices.values()) {
+                if (d.ip === identifier || d.mac?.toLowerCase() === norm || d.profile_id === identifier) {
+                    device = d;
+                    break;
+                }
+            }
+        }
+        if (!device) {
+            // Cek SQLite database untuk perangkat offline yang mungkin belum dimuat di memori
+            const dbDev = await this.db.getDeviceByMac(identifier);
+            if (dbDev) {
+                device = dbDev;
+                this.devices.set(deviceMemKey(device), device);
+            }
+        }
+        if (!device) {
+            throw new Error(`Device ${identifier} not found`);
         }
         this._assertNoPendingGamingRecoveryConflict([device]);
 
@@ -1240,13 +1269,17 @@ export class DeviceManager extends EventEmitter {
         device.redirect_url = undefined;
         device.speed_limit = 100;
         device.session_id = undefined;
-        device.is_online = true;
-        this.devices.set(ip, device);
+        if (device.ip && device.ip.trim() !== '') {
+            device.is_online = true;
+        }
+        this.devices.set(deviceMemKey(device), device);
 
         // Hapus status blokir dan pulihkan speed limit ke 100% di SQLite
         await this.db.setDeviceBlocked(device.mac, false, undefined);
         await this.db.setDeviceSpeedLimit(device.mac, 100);
-        await this.db.setDeviceOnlineStatus(device.mac, true);
+        if (device.is_online) {
+            await this.db.setDeviceOnlineStatus(device.mac, true);
+        }
 
         this.emit('deviceUpdated', device);
         this.emit('devicesUpdated', Array.from(this.devices.values()));

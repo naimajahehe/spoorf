@@ -215,13 +215,14 @@ export class WebSocketManager {
                 }
             });
 
-            // Handle unblock request
-            socket.on('unblock', async (data: { ip: string }) => {
+            // Handle unblock request (supports IP or MAC address for offline unblocking)
+            socket.on('unblock', async (data: { ip?: string; mac?: string; identifier?: string }) => {
+                const target = data?.identifier || data?.mac || data?.ip || '';
                 try {
-                    const device = await this.deviceManager.unblockDevice(data.ip);
+                    const device = await this.deviceManager.unblockDevice(target);
                     socket.emit('deviceUnblocked', device);
                 } catch (error: any) {
-                    socket.emit('unblockError', { error: error.message, ip: data?.ip });
+                    socket.emit('unblockError', { error: error.message, ip: data?.ip, mac: data?.mac });
                 }
             });
 

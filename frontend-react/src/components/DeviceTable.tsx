@@ -241,9 +241,10 @@ export const DeviceTable: FC<Props> = ({
                         const isExpanded = expandedIp === device.mac;
                         const isInspecting = activeInspectorIp === device.ip;
                         const isOnline = device.is_self ? true : device.is_online;
-                        const isLoading = loadingIps.has(device.ip);
+                        const isDeviceBusy = (Boolean(device.ip) && busyToggleIp === device.ip) || (Boolean(device.mac) && busyToggleIp === device.mac);
+                        const isLoading = (Boolean(device.ip) && loadingIps.has(device.ip)) || (Boolean(device.mac) && loadingIps.has(device.mac));
                         // Kunci total: operasi putus/pulih perangkat LAIN sedang berjalan.
-                        const lockedByOther = busyToggleIp != null && busyToggleIp !== device.ip;
+                        const lockedByOther = busyToggleIp != null && !isDeviceBusy;
                         const isInternetActive = !device.is_blocked && (device.speed_limit === undefined || device.speed_limit > 0);
                         const isThrottled = (device.speed_limit ?? 100) > 0 && (device.speed_limit ?? 100) < 100;
 

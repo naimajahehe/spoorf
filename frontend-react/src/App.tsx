@@ -1004,9 +1004,11 @@ function App() {
 
     // 2-Second Freeze Toggle Handler
     const handleToggleInternet = async (device: Device) => {
+        const toggleKey = (device.ip && device.ip.trim() !== '') ? device.ip : device.mac;
         // Kunci sekuensial global: abaikan klik bila ADA operasi lain berjalan (tombol lain nonaktif total),
         // baris ini sendiri sedang loading, atau target gateway.
-        if (busyToggleIp !== null || loadingIps.has(device.ip) || device.is_gateway) return;
+        const isSelfLoading = (Boolean(device.ip) && loadingIps.has(device.ip)) || (Boolean(device.mac) && loadingIps.has(device.mac));
+        if (busyToggleIp !== null || isSelfLoading || device.is_gateway) return;
 
         // Free tier block limit guard
         if (!device.is_blocked && (device.speed_limit === undefined || device.speed_limit >= 100)) {
@@ -1023,12 +1025,17 @@ function App() {
             }
         }
 
-        setBusyToggleIp(device.ip);
-        setLoadingIps(prev => new Set(prev).add(device.ip));
+        setBusyToggleIp(toggleKey);
+        setLoadingIps(prev => {
+            const next = new Set(prev);
+            if (device.ip) next.add(device.ip);
+            if (device.mac) next.add(device.mac);
+            return next;
+        });
         try {
             // Menunggu penyelesaian NYATA dari backend (loading sampai benar-benar putus/pulih), bukan timer.
             if (device.is_blocked || (device.speed_limit !== undefined && device.speed_limit < 100)) {
-                await unblock(device.ip);
+                await unblock(device.ip && device.ip.trim() !== '' ? device.ip : device.mac);
             } else {
                 await block(device.ip, gatewayIp);
             }
@@ -1038,7 +1045,8 @@ function App() {
         } finally {
             setLoadingIps(prev => {
                 const next = new Set(prev);
-                next.delete(device.ip);
+                if (device.ip) next.delete(device.ip);
+                if (device.mac) next.delete(device.mac);
                 return next;
             });
             setBusyToggleIp(null);
@@ -1992,8 +2000,8 @@ function App() {
                                             onOpenRedirectModal={setRedirectModalDevice}
                                             onRefresh={scan}
                                             isRefreshing={showScanningUI}
-                                            isLoading={loadingIps.has(inspectorDevice.ip)}
-                                            toggleLockedByOther={busyToggleIp !== null && busyToggleIp !== inspectorDevice.ip}
+                                            isLoading={(Boolean(inspectorDevice.ip) && loadingIps.has(inspectorDevice.ip)) || (Boolean(inspectorDevice.mac) && loadingIps.has(inspectorDevice.mac))}
+                                            toggleLockedByOther={busyToggleIp !== null && busyToggleIp !== inspectorDevice.ip && busyToggleIp !== inspectorDevice.mac}
                                             authStatus={authStatus}
                                             telemetry={telemetry}
                                             onOpenUpgradeModal={(reason) => setUpgradeModalState({ isOpen: true, reason })}

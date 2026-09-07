@@ -51,21 +51,23 @@ def measure_target_proximity(
         psrc=effective_self_ip,
         pdst=target_ip,
         hwsrc=effective_self_mac,
-        hwdst=target_mac
+        hwdst="00:00:00:00:00:00"
     )
 
-    # 3-4x micro burst sampling
-    for _ in range(4):
+    # Adaptive low-overhead burst sampling: early exit on first valid response
+    # to avoid Npcap sniffer contention across concurrent workers
+    for _ in range(2):
         try:
             t_start = time.perf_counter_ns()
-            ans = srp1(pkt, iface=effective_iface, timeout=0.06, verbose=False)
+            ans = srp1(pkt, iface=effective_iface, timeout=0.04, verbose=False)
             t_end = time.perf_counter_ns()
             if ans:
                 rtt_ms = (t_end - t_start) / 1_000_000.0
                 samples_ms.append(rtt_ms)
+                break
         except Exception:
             pass
-        time.sleep(0.003)
+        time.sleep(0.002)
 
     if not samples_ms:
         # Fallback jika target doze/sleep tapi terkonfirmasi online

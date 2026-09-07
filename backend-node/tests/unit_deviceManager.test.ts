@@ -2260,4 +2260,37 @@ export async function runDeviceManagerTests() {
         console.log('  ✓ FASE-3: unmatched new-MAC DHCP does not trigger a re-block scan');
     }
 
+    // AUDIT FIX: unblockDevice accepts MAC address for offline devices and cleans up DB state
+    {
+        const python: any = new EventEmitter();
+        python.stopSpoof = async () => {};
+        let blockedCleared = false;
+        let speedRestored = 0;
+        const db: any = {
+            getDeviceByMac: async (mac: string) => ({
+                ip: '',
+                mac: mac.toLowerCase(),
+                hostname: 'Offline-Phone',
+                is_blocked: true,
+                is_online: false,
+                speed_limit: 0
+            }),
+            setDeviceBlocked: async (mac: string, blocked: boolean) => {
+                if (!blocked) blockedCleared = true;
+            },
+            setDeviceSpeedLimit: async (mac: string, limit: number) => {
+                speedRestored = limit;
+            },
+            setDeviceOnlineStatus: async () => {}
+        };
+        const manager = new DeviceManager(python, db);
+        const result = await manager.unblockDevice('aa:bb:cc:dd:ee:ff');
+        assert.strictEqual(result.mac, 'aa:bb:cc:dd:ee:ff');
+        assert.strictEqual(result.is_blocked, false);
+        assert.strictEqual(blockedCleared, true, 'setDeviceBlocked(false) must be called for MAC unblock');
+        assert.strictEqual(speedRestored, 100, 'speed limit must be restored to 100%');
+        console.log('  ✓ AUDIT FIX: unblockDevice unblocks offline device via MAC address');
+    }
+
 }
+

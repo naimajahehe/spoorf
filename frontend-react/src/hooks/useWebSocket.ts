@@ -568,15 +568,17 @@ export function useWebSocket() {
         });
 
         newSocket.on('deviceUnblocked', (device: Device) => {
-            settleToggleOp(device.ip, true);
+            const key = (device.ip && device.ip.trim() !== '') ? device.ip : device.mac;
+            if (key) settleToggleOp(key, true);
+            if (device.mac) settleToggleOp(device.mac, true);
             recordLiveStateChange(['devices']);
             pushActivity({
                 category: 'security',
                 tool: 'arp.spoofer',
                 title: 'Akses internet dipulihkan',
-                description: `${deviceLabel(device)} (${device.ip}) kembali dapat mengakses internet.`,
+                description: `${deviceLabel(device)} (${device.ip || device.mac}) kembali dapat mengakses internet.`,
                 status: 'success',
-                detail: { Perangkat: deviceLabel(device), 'Alamat IP': device.ip }
+                detail: { Perangkat: deviceLabel(device), 'Alamat IP': device.ip || '-', MAC: device.mac }
             });
         });
 
@@ -638,10 +640,11 @@ export function useWebSocket() {
             setError(`Gagal memblokir ${data.ip || 'perangkat'}: ${data.error}`);
         });
 
-        newSocket.on('unblockError', (data: { error: string; ip?: string }) => {
+        newSocket.on('unblockError', (data: { error: string; ip?: string; mac?: string }) => {
             console.error('Unblock error:', data);
             if (data.ip) settleToggleOp(data.ip, false, data.error);
-            setError(`Gagal membuka blokir ${data.ip || 'perangkat'}: ${data.error}`);
+            if (data.mac) settleToggleOp(data.mac, false, data.error);
+            setError(`Gagal membuka blokir ${data.ip || data.mac || 'perangkat'}: ${data.error}`);
         });
 
         newSocket.on('deleteError', (data: { error: string }) => {
@@ -967,15 +970,16 @@ export function useWebSocket() {
         return done;
     };
 
-    const unblock = (ip: string): Promise<void> => {
+    const unblock = (identifier: string): Promise<void> => {
         if (!socket?.connected) {
             const msg = 'Tidak dapat membuka blokir saat koneksi backend terputus. Tunggu hingga tersambung lalu coba lagi.';
             setError(msg);
             return Promise.reject(new Error(msg));
         }
         setError(null);
-        const done = awaitToggleCompletion(ip);
-        socket.emit('unblock', { ip });
+        const done = awaitToggleCompletion(identifier);
+        const isMac = identifier.includes(':') || identifier.includes('-');
+        socket.emit('unblock', isMac ? { mac: identifier } : { ip: identifier });
         return done;
     };
 

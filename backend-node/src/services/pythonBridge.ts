@@ -94,6 +94,7 @@ export class PythonBridge extends EventEmitter {
     private ws: WebSocket | null = null;
     private ready: boolean = false;
     private wsEverConnected: boolean = false; // true setelah WS pertama tersambung; membedakan reconnect (potensi restart Python) dari koneksi awal
+    private healthTimer: ReturnType<typeof setInterval> | null = null; // monitor periodik: re-arm WS mati
     private isInternalSpawn: boolean = false;
 
     constructor() {
@@ -279,7 +280,10 @@ export class PythonBridge extends EventEmitter {
 
     async start(): Promise<void> {
         console.log(`🔍 Checking Python FastAPI microservice at ${this.baseUrl}...`);
-        
+        // Monitor kesehatan periodik: menjaga WS tetap hidup melintasi restart/blip engine (re-arm
+        // WS mati walau HTTP masih sehat), agar event DHCP & re-block real-time tak berhenti.
+        this.startHealthMonitor();
+
         let attempts = 0;
         const maxAttempts = 20; // 10 detik
         while (attempts < maxAttempts) {
@@ -381,6 +385,39 @@ export class PythonBridge extends EventEmitter {
         } else if (event.event === 'gaming_telemetry') {
             this.emit('gamingTelemetry', event.data);
         }
+    }
+
+    /** WS hidup & siap menerima event? (readyState OPEN). */
+    private isWsHealthy(): boolean {
+        return !!this.ws && this.ws.readyState === WebSocket.OPEN;
+    }
+
+    /**
+     * Satu tick monitor kesehatan. Tanpa ini, setelah engine restart Node bisa berakhir
+     * HTTP-terjangkau tapi WS MATI (tak ada re-arm periodik) → event DHCP berhenti mengalir →
+     * re-block real-time tak pernah fire. checkHealth() memperbarui `ready` (via markReachable/
+     * markUnreachable). Bila engine terjangkau TAPI WS tak sehat, sambung ulang WS — TERLEPAS dari
+     * `ready` (markReachable early-return saat ready sudah true, jadi ia tak akan menyambung sendiri).
+     * Hanya menyambung saat `this.ws` null (bukan CONNECTING) agar tak membuat socket ganda.
+     */
+    private async healthMonitorTick(): Promise<void> {
+        let reachable = false;
+        try { reachable = await this.checkHealth(); } catch { reachable = false; }
+        if (reachable) {
+            this.markReachable();
+            if (!this.isWsHealthy() && this.ws === null) {
+                this.connectWebSocket();
+            }
+        } else {
+            this.markUnreachable();
+        }
+    }
+
+    /** Mulai monitor kesehatan periodik (idempoten). Dipanggil sekali dari start(). */
+    private startHealthMonitor(): void {
+        if (this.healthTimer) return;
+        this.healthTimer = setInterval(() => { this.healthMonitorTick().catch(() => {}); }, 5000);
+        (this.healthTimer as any).unref?.();
     }
 
     private connectWebSocket(): void {

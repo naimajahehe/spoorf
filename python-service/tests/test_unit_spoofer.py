@@ -752,6 +752,10 @@ class TestCoreSpoofer(unittest.TestCase):
         for p in pkts:
             self.assertEqual(p[ARP].hwsrc, "02:aa:bb:cc:dd:ee", "hwsrc setiap paket harus poison_mac")
             self.assertEqual(p[ARP].psrc, "192.168.1.1", "psrc harus IP yang dipalsukan (gateway)")
+            if p[ARP].op == 1:
+                self.assertEqual(p[ARP].hwdst, "00:00:00:00:00:00", "RFC 826: ARP who-has target hardware address harus 00:00:00:00:00:00")
+            elif p[ARP].op == 2:
+                self.assertEqual(p[ARP].hwdst, "00:11:22:33:44:55", "ARP is-at target hardware address harus target_mac")
 
     @patch('src.core.spoofer.sendp')
     def test_stop_all_broadcasts_stop_events_before_per_session_teardown(self, mock_sendp):
