@@ -14,7 +14,7 @@ import subprocess
 import collections
 from typing import Dict, Any, List, Optional, Callable
 from scapy.all import Ether, ARP, sniff, sendp, conf
-from .network import get_current_gateway, get_network_info, get_self_mac, is_valid_mac, is_valid_private_ip
+from .network import get_current_gateway, get_network_info, get_wifi_info, get_self_mac, is_valid_mac, is_valid_private_ip
 from ..exceptions.custom import SpoofError
 from ..utils.logger import logger
 
@@ -314,11 +314,11 @@ class SentinelShield:
             raise SpoofError(f"MAC gateway untuk {gw_ip} tidak dapat divalidasi")
 
         self_mac = get_self_mac()
-        # Alias interface AKTIF (Wi-Fi / Ethernet / tethering) dari get_network_info, bukan
-        # hardcode 'Wi-Fi' — kalau di-hardcode, Set-NetNeighbor -InterfaceAlias 'Wi-Fi' gagal
-        # saat operator memakai kabel LAN atau adapter Wi-Fi kedua, dan Shield melempar
-        # SpoofError (BUG-8).
-        win_alias = info.get('interface') or "Wi-Fi"
+        # Alias interface AKTIF (Wi-Fi / Ethernet / tethering) dari get_wifi_info() — yang
+        # mengembalikan NAMA RAMAH Windows ("Wi-Fi"/"Ethernet"). JANGAN pakai
+        # get_network_info()['interface']: di Windows itu GUID netifaces ('{8EF7...}') yang
+        # DITOLAK PowerShell `Set-NetNeighbor -InterfaceAlias` → Shield gagal aktif total (BUG-8).
+        win_alias = (get_wifi_info() or {}).get('interface') or "Wi-Fi"
         if not self._lock_kernel_neighbor(gw_ip, gw_mac, win_alias):
             raise SpoofError(f"Gagal mengunci neighbor gateway {gw_ip}")
 

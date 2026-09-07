@@ -103,15 +103,19 @@ class TestSentinelShield(unittest.TestCase):
         self.assertTrue(status['is_enabled'])
         self.assertEqual(status['mode'], 'host_lock')
 
+    @patch('src.core.shield.get_wifi_info')
     @patch('src.core.shield.get_network_info')
     @patch('src.core.shield.get_current_gateway')
     @patch('src.core.shield.SentinelShield._resolve_gateway_mac')
     @patch('src.core.shield.SentinelShield._lock_kernel_neighbor')
-    def test_enable_uses_active_interface_alias_not_hardcoded_wifi(self, mock_lock, mock_resolve_mac, mock_gw, mock_info):
-        """BUG-8: alias interface untuk Set-NetNeighbor harus dari adapter AKTIF (mis.
-        'Ethernet' saat pakai kabel LAN), bukan hardcode 'Wi-Fi' yang bikin Sentinel Shield
-        gagal (SpoofError) di jaringan kabel / adapter Wi-Fi kedua."""
-        mock_info.return_value = {'ip': '10.0.0.99', 'interface': 'Ethernet'}
+    def test_enable_uses_friendly_interface_alias_not_guid(self, mock_lock, mock_resolve_mac, mock_gw, mock_info, mock_wifi):
+        """BUG-8 (perbaikan regresi): alias untuk Set-NetNeighbor harus NAMA RAMAH
+        ('Wi-Fi'/'Ethernet'). get_network_info()['interface'] di Windows = GUID netifaces
+        ('{...}') yang DITOLAK PowerShell -InterfaceAlias. Nama ramah harus diambil dari
+        get_wifi_info()['interface']."""
+        # Realitas Windows: get_network_info mengembalikan GUID; get_wifi_info nama ramah.
+        mock_info.return_value = {'ip': '10.0.0.99', 'interface': '{8EF7C4FF-B9C9-4064-969D-C07C649A1D4F}'}
+        mock_wifi.return_value = {'interface': 'Ethernet'}
         mock_gw.return_value = '10.0.0.1'
         mock_resolve_mac.return_value = '98:4a:6b:0f:4a:97'
         mock_lock.return_value = True
@@ -120,7 +124,7 @@ class TestSentinelShield(unittest.TestCase):
 
         self.assertTrue(mock_lock.called, "_lock_kernel_neighbor harus dipanggil")
         self.assertEqual(mock_lock.call_args.args[2], 'Ethernet',
-                         "win_alias harus dari interface aktif, bukan hardcode 'Wi-Fi'")
+                         "win_alias harus nama ramah dari get_wifi_info, bukan GUID dari get_network_info")
 
     @patch('src.core.shield.get_network_info')
     @patch('src.core.shield.get_current_gateway')
