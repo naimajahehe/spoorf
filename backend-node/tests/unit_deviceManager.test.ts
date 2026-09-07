@@ -2001,4 +2001,53 @@ export async function runDeviceManagerTests() {
         console.log('  ✓ Pre-flight: still fails a stale device that no longer responds');
     }
 
+    // BUG-2: Auto-reblock must forward IPv6 addresses to startSpoof (parity with manual block),
+    // otherwise a reconnecting blocked device leaks all IPv6 traffic (only IPv4 gets spoofed).
+    {
+        const python: any = new EventEmitter();
+        let startSpoofArgs: any = null;
+        python.startSpoof = async (...args: any[]) => { startSpoofArgs = args; return 'sess-reblock'; };
+        python.stopSpoof = async () => {};
+
+        const gateway: any = {
+            ip: '192.168.1.1', mac: 'gg:gg:gg:gg:gg:01', hostname: 'Router', vendor: 'MikroTik',
+            device_type: 'Router', os: 'RouterOS', rtt_ms: 2, open_ports: [], services: [],
+            is_blocked: false, is_online: true, is_gateway: true,
+            ipv6_link_local: 'fe80::1111', ipv6_global: undefined
+        };
+        const target: any = {
+            ip: '192.168.1.105', mac: 'a8:3b:76:0c:dc:55', hostname: 'Target', vendor: 'Lenovo',
+            device_type: 'PC / Laptop', os: 'Windows 11', rtt_ms: 15, open_ports: [], services: [],
+            is_blocked: true, is_online: true, is_gateway: false, speed_limit: 0,
+            session_id: undefined,
+            ipv6_link_local: 'fe80::abcd', ipv6_global: '2404:6800::abcd'
+        };
+
+        const db: any = {
+            syncScanResults: async () => ({
+                allDevices: [gateway, target],
+                autoReblockTargets: [target],
+                autoThrottleTargets: [],
+                zombieSessionsToStop: []
+            }),
+            setDeviceBlocked: async () => {},
+            setDeviceSpeedLimit: async () => {},
+            setDeviceOnlineStatus: async () => {},
+            getDeviceByMac: async () => undefined
+        };
+
+        const manager = new DeviceManager(python, db);
+        python.scan = async () => [gateway, target];
+        (manager as any).devices.set(gateway.ip, gateway);
+        (manager as any).devices.set(target.ip, target);
+
+        await manager.scanNetwork();
+
+        assert.ok(startSpoofArgs, 'auto-reblock must call startSpoof for the returning blocked device');
+        assert.strictEqual(startSpoofArgs.length >= 7, true, 'startSpoof must receive victim & gateway IPv6 args');
+        assert.strictEqual(startSpoofArgs[5], 'fe80::abcd', 'victim IPv6 must be forwarded to startSpoof');
+        assert.strictEqual(startSpoofArgs[6], 'fe80::1111', 'gateway IPv6 must be forwarded to startSpoof');
+        console.log('  ✓ BUG-2: auto-reblock forwards IPv6 to startSpoof (no IPv6 leak on reconnect)');
+    }
+
 }

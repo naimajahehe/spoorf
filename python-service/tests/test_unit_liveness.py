@@ -74,6 +74,30 @@ class TestUnitLiveness(unittest.TestCase):
         self.assertTrue(results['192.168.1.101']['is_alive'])
         self.assertFalse(results['192.168.1.102']['is_alive'])
 
+    @patch('src.core.discovery.liveness.subprocess.run')
+    @patch('src.core.discovery.liveness.srp')
+    def test_pulse_host_ipv6_vector_uses_correct_arg_order(self, mock_srp, mock_run):
+        """BUG-1: vektor IPv6 harus memanggil verify_ipv6_alive(mac, ipv6_addr) sesuai
+        signature-nya. Bila argumen tertukar, neighbor IPv6 yang hidup tak pernah terdeteksi.
+        ARP & ICMP dimatikan agar HANYA vektor IPv6 yang bisa memenangkan race."""
+        mock_srp.return_value = ([], [])                       # ARP: tak ada balasan
+        mock_run.return_value = MagicMock(stdout='', returncode=1)  # ICMP ping: gagal
+
+        target_mac = 'aa:bb:cc:dd:ee:11'
+        target_v6 = 'fe80::aaaa'
+
+        def fake_verify(mac, ipv6_addr, *args, **kwargs):
+            # Neighbor IPv6 nyata HANYA menjawab bila di-probe dengan MAC & IPv6
+            # pada slot yang benar-benar diharapkan verify_ipv6_alive.
+            return mac == target_mac and ipv6_addr == target_v6
+
+        with patch('src.core.discovery.liveness.verify_ipv6_alive', side_effect=fake_verify):
+            res = pulse_host('192.168.1.88', target_mac, gateway_ip='192.168.1.1',
+                             target_ipv6=target_v6, timeout=0.25)
+
+        self.assertTrue(res['is_alive'], "Neighbor IPv6 hidup gagal terdeteksi (argumen tertukar?)")
+        self.assertEqual(res['vector'], 'ipv6_ndp')
+
     def test_liveness_daemon_lifecycle(self):
         """Uji lifecycle daemon latar belakang (start, update, stop)."""
         events = []

@@ -941,7 +941,9 @@ export class DeviceManager extends EventEmitter {
                             currentDev.mac,
                             gateway.ip,
                             gateway.mac,
-                            0
+                            0,
+                            currentDev.ipv6_link_local || currentDev.ipv6_global,
+                            gateway.ipv6_link_local || gateway.ipv6_global
                         );
 
                         currentDev.is_blocked = true;
@@ -984,7 +986,9 @@ export class DeviceManager extends EventEmitter {
                             currentDev.mac,
                             gateway.ip,
                             gateway.mac,
-                            limit
+                            limit,
+                            currentDev.ipv6_link_local || currentDev.ipv6_global,
+                            gateway.ipv6_link_local || gateway.ipv6_global
                         );
 
                         currentDev.is_blocked = false;

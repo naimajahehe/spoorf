@@ -126,7 +126,7 @@ def pulse_host(
         if target_ipv6:
             try:
                 t0 = time.time()
-                if verify_ipv6_alive(target_ipv6, norm_mac, timeout=timeout_val):
+                if verify_ipv6_alive(norm_mac, target_ipv6, timeout=timeout_val):
                     t1 = time.time()
                     return max(0.1, round((t1 - t0) * 1000, 2))
             except Exception:
