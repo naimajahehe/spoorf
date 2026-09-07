@@ -446,10 +446,14 @@ class TransparentGatewayManager:
         if victim_ip == gateway_ip:
             raise SpoofError("Router Gateway dilarang menjadi target Transparent Gateway")
 
+        # Replace any existing session for this victim: pop under the lock, but tear it down
+        # OUTSIDE the lock (sniffer.stop() joins a thread whose DNS callback needs the lock).
         with self._lock:
-            if victim_ip in self._sessions:
-                self._stop_session_unlocked(victim_ip)
+            prior_session = self._sessions.pop(victim_ip, None)
+        if prior_session:
+            self._teardown_session(victim_ip, prior_session)
 
+        with self._lock:
             my_ip, my_mac = self._get_controller_ip_and_mac()
             interface = self.spoofer._interface
 
@@ -503,8 +507,12 @@ class TransparentGatewayManager:
                 "started_at": session_data["started_at"]
             }
 
-    def _stop_session_unlocked(self, victim_ip: str):
-        session = self._sessions.pop(victim_ip, None)
+    def _teardown_session(self, victim_ip: str, session):
+        """Stop the sniffer + ARP session for an ALREADY-POPPED session.
+
+        MUST run OUTSIDE self._lock: sniffer.stop() joins the sniffer thread whose DNS
+        callback (_on_dns_query) acquires self._lock, so holding the lock here stalls for
+        the full 2s join timeout every time a DNS packet is in flight during teardown (BUG-16)."""
         if not session:
             return
 
@@ -525,17 +533,21 @@ class TransparentGatewayManager:
         logger.info(f"🏁 [Transparent Gateway] Sesi {victim_ip} dihentikan.")
 
     def stop_gateway(self, victim_ip: str) -> bool:
+        # Pop under the lock, then tear down OUTSIDE the lock (see _teardown_session / BUG-16).
         with self._lock:
             if victim_ip not in self._sessions:
                 logger.warning(f"Sesi Transparent Gateway {victim_ip} tidak ditemukan.")
                 return False
-            self._stop_session_unlocked(victim_ip)
-            return True
+            session = self._sessions.pop(victim_ip, None)
+        self._teardown_session(victim_ip, session)
+        return True
 
     def stop_all(self):
         with self._lock:
-            for ip in list(self._sessions.keys()):
-                self._stop_session_unlocked(ip)
+            sessions = list(self._sessions.items())
+            self._sessions.clear()
+        for ip, session in sessions:
+            self._teardown_session(ip, session)
 
     def get_status(self) -> Dict[str, Any]:
         with self._lock:

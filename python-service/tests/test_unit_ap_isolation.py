@@ -9,6 +9,25 @@ from src.core.discovery.ap_isolation import (
 class TestUnitApIsolation(unittest.TestCase):
     """Test suite unit untuk AP Isolation Detector."""
 
+    @patch('src.core.discovery.ap_isolation.socket.socket')
+    def test_multicast_reflection_joins_group(self, mock_socket_cls):
+        """BUG-18: rx socket WAJIB IP_ADD_MEMBERSHIP ke 224.0.0.1. Tanpa join, di Windows
+        recvfrom selalu timeout -> test selalu return False -> skor isolasi keliru +35
+        (false positive 'AP Isolation' saat pengguna hanya sendirian di jaringan)."""
+        import socket as syssock
+        rx = MagicMock()
+        tx = MagicMock()
+        rx.recvfrom.side_effect = syssock.timeout()
+        mock_socket_cls.side_effect = [rx, tx]
+
+        test_multicast_bssid_reflection(timeout=0.05)
+
+        joined = any(
+            len(c.args) >= 2 and c.args[1] == syssock.IP_ADD_MEMBERSHIP
+            for c in rx.setsockopt.call_args_list
+        )
+        self.assertTrue(joined, "rx socket harus join grup multicast 224.0.0.1 (IP_ADD_MEMBERSHIP)")
+
     @patch('src.core.discovery.ap_isolation.get_current_gateway', return_value='192.168.1.1')
     @patch('src.core.discovery.ap_isolation.get_network_info', return_value={'ip': '192.168.1.100', 'network': '192.168.1.0/24'})
     @patch('src.core.discovery.ap_isolation.get_self_mac', return_value='a8:3b:76:0c:dc:55')

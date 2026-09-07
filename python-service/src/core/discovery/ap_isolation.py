@@ -28,6 +28,14 @@ def test_multicast_bssid_reflection(timeout: float = 0.25) -> bool:
         rx_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         rx_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         rx_sock.bind(('', test_port))
+        # WAJIB (terutama di Windows): daftar keanggotaan grup multicast 224.0.0.1, kalau tidak
+        # soket UDP biasa tak akan pernah menerima datagram multicast -> recvfrom selalu timeout
+        # -> test selalu False -> skor AP-isolation keliru dinaikkan +35 (false positive) (BUG-18).
+        try:
+            mreq = socket.inet_aton('224.0.0.1') + socket.inet_aton('0.0.0.0')
+            rx_sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+        except Exception:
+            pass
         rx_sock.settimeout(timeout)
 
         tx_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)

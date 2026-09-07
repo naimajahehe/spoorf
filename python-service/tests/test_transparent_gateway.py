@@ -26,6 +26,35 @@ class TestTransparentGateway(unittest.TestCase):
 
         self.gateway_mgr = TransparentGatewayManager(self.mock_spoofer)
 
+    def test_stop_gateway_does_not_hold_lock_during_sniffer_stop(self):
+        """BUG-16: stop_gateway tak boleh menahan self._lock saat memanggil sniffer.stop()
+        (yang men-join thread sniffer). Callback DNS di thread sniffer butuh self._lock,
+        jadi menahan lock saat join menyebabkan stall 2 detik (join timeout). Buktikan
+        self._lock SUDAH bebas ketika sniffer.stop() dipanggil."""
+        mgr = self.gateway_mgr
+        observed = {}
+
+        def fake_stop():
+            acquired = mgr._lock.acquire(blocking=False)
+            observed['lock_free'] = acquired
+            if acquired:
+                mgr._lock.release()
+
+        sniffer = MagicMock()
+        sniffer.stop.side_effect = fake_stop
+        mgr._sessions['fe80::victim'] = {
+            'victim_ip': 'fe80::victim',
+            'sniffer': sniffer,
+            'arp_session_id': 'arp_x'
+        }
+
+        result = mgr.stop_gateway('fe80::victim')
+
+        self.assertTrue(result)
+        self.assertTrue(sniffer.stop.called, "sniffer.stop() harus dipanggil")
+        self.assertTrue(observed.get('lock_free'),
+                        "self._lock harus sudah dilepas sebelum sniffer.stop() dipanggil")
+
     def test_sinkhole_domain_matching(self):
         """Uji apakah domain sinkhole cocok dengan domain langsung maupun subdomain."""
         sinkhole_set = {"doubleclick.net", "tiktok.com", "analytics.google.com"}
