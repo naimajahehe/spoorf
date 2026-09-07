@@ -16,6 +16,7 @@ const DHCP_OPTIMIZATION_COOLDOWN_MS = 20_000;
 const PROFILE_REFRESH_COOLDOWN_MS = 20_000;
 const PROFILE_ENRICHMENT_COOLDOWN_MS = 60_000;
 const PROFILE_ENRICHMENT_DEBOUNCE_MS = 1_500;
+const IDENTITY_REBLOCK_MIN_INTERVAL_MS = 8_000; // rate-limit re-block scan saat perangkat me-rotasi MAC agresif
 const PROFILE_MAC_PATTERN = /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/;
 
 interface DhcpOptimizationResult {
@@ -188,6 +189,7 @@ export class DeviceManager extends EventEmitter {
     private profileEnrichmentCooldowns = new Map<string, number>();
     private dhcpScanDebounceTimer: NodeJS.Timeout | null = null;
     private offlineCooldownTimers: Map<string, NodeJS.Timeout> = new Map();
+    private lastIdentityReblockAt: number = 0; // FASE-3: rate-limit re-block scan berbasis identitas
     // Perangkat yang dikelola Gaming Mode, DIKUNCI per-MAC (lowercase) agar tahan ganti-IP.
     // Menyimpan limit sebelumnya (untuk pemulihan tepat) + sessionId aktif (agar sesi bisa
     // dihentikan saat disable/disconnect meski objek device sudah hilang dari daftar).
@@ -474,6 +476,25 @@ export class DeviceManager extends EventEmitter {
                     }
                 } else {
                     isNewDevice = true;
+                    // FASE-3: MAC baru yang identitas STABIL-nya (DUID layak, atau hostname personal
+                    // + fingerprint + vendor) cocok dengan perangkat MASIH-TERBLOKIR = kemungkinan
+                    // besar target yang me-rotasi MAC untuk lolos. Picu re-block SEKETIKA (reuse scan
+                    // + auto-reblock existing, yang juga membersihkan sesi MAC lama via
+                    // zombieSessionsToStop), tanpa menunggu scan terjadwal & tanpa bergantung mode
+                    // Auto Scan. Rate-limited agar rotasi agresif tak memicu badai scan. Unblock-safe:
+                    // pencocokan menuntut is_blocked=1 → perangkat yang di-unblock tak lagi cocok.
+                    try {
+                        if (typeof this.db.hasBlockedIdentityMatch === 'function' && this.db.hasBlockedIdentityMatch(data)) {
+                            const now = Date.now();
+                            if (now - this.lastIdentityReblockAt >= IDENTITY_REBLOCK_MIN_INTERVAL_MS) {
+                                this.lastIdentityReblockAt = now;
+                                console.log(`🔒 [Identity Re-Block] DHCP MAC baru ${normMac} cocok identitas terblokir → picu re-block scan seketika.`);
+                                this.scanNetwork().catch(err => console.warn('Notice identity re-block scan:', err?.message));
+                            }
+                        }
+                    } catch (e: any) {
+                        console.warn('Notice identity re-block check:', e?.message);
+                    }
                 }
 
                 this.emit('dhcpActivity', {

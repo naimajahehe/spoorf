@@ -860,7 +860,7 @@ export class DatabaseService {
     async getDeviceByMac(mac: string): Promise<Device | null> {
         await this.init();
         const query = `
-            SELECT d.*, p.linked_macs 
+            SELECT d.*, p.linked_macs
             FROM devices d
             LEFT JOIN device_profiles p ON d.profile_id = p.id
             WHERE LOWER(d.mac) = LOWER(?)
@@ -868,6 +868,33 @@ export class DatabaseService {
         const row = this.db.prepare(query).get(mac);
         if (!row) return null;
         return this.rowToDevice(row);
+    }
+
+    /**
+     * FASE-3: apakah sinyal identitas DHCP ini cocok dengan perangkat yang MASIH TERBLOKIR
+     * (is_blocked=1) — mengabaikan MAC (yang bisa berotasi). Sinkron (dipakai di hot-path handler).
+     * Cocok bila: (1) DUID/client-id LAYAK & sama persis, ATAU (2) hostname PERSONAL (bukan generik)
+     * + fingerprint(Opt55) + vendor(Opt60) ketiganya sama. Unblock-safe: hanya is_blocked=1.
+     */
+    hasBlockedIdentityMatch(data: { client_id?: string; hostname?: string; dhcp_fingerprint?: string; vendor_class?: string }): boolean {
+        if (!this.db) return false;
+        const cid = (data.client_id || '').trim().toLowerCase();
+        if (isUsableClientId(cid)) {
+            const row = this.db.prepare(
+                `SELECT 1 FROM devices WHERE is_blocked = 1 AND LOWER(dhcp_client_id) = ? LIMIT 1`
+            ).get(cid);
+            if (row) return true;
+        }
+        const host = (data.hostname || '').trim().toLowerCase();
+        const fp = (data.dhcp_fingerprint || '').trim().toLowerCase();
+        const vc = (data.vendor_class || '').trim().toLowerCase();
+        if (host && !isGenericFactoryHostname(host) && fp && vc) {
+            const row = this.db.prepare(
+                `SELECT 1 FROM devices WHERE is_blocked = 1 AND LOWER(hostname) = ? AND LOWER(dhcp_fingerprint) = ? AND LOWER(dhcp_vendor_class) = ? LIMIT 1`
+            ).get(host, fp, vc);
+            if (row) return true;
+        }
+        return false;
     }
 
     async getDeviceByIp(ip: string): Promise<Device | null> {

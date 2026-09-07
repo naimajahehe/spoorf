@@ -2225,4 +2225,39 @@ export async function runDeviceManagerTests() {
         console.log('  ✓ FASE-1: WS blip with block still enforced is a no-op (idempotent)');
     }
 
+    // FASE-3: a new-MAC DHCP event whose STABLE identity (usable DUID, or personalized
+    // hostname+fingerprint+vendor) matches a still-BLOCKED device is almost certainly the target
+    // rotating its MAC to escape. Trigger an immediate re-block scan (reusing auto-reblock +
+    // zombie cleanup) instead of waiting for a scheduled scan — regardless of Auto Scan mode.
+    // Rate-limited so aggressive rotation can't storm. Unblock-safe: the match queries is_blocked=1,
+    // so an unblocked device no longer matches and is not re-blocked.
+    {
+        const python: any = new EventEmitter();
+        const db: any = { hasBlockedIdentityMatch: (d: any) => (d.client_id || '').toLowerCase() === '01:56:e9:8d:38:1c:97' };
+        const manager = new DeviceManager(python, db);
+        let scanCount = 0;
+        (manager as any).scanNetwork = async () => { scanCount++; return []; };
+
+        await (manager as any)._handleDhcpEvent({ mac: 'de:ad:be:ef:99:01', ip: '192.168.1.60', client_id: '01:56:e9:8d:38:1c:97', message_type: 'REQUEST' });
+        assert.strictEqual(scanCount, 1, 'new-MAC DHCP matching a blocked identity must trigger a re-block scan');
+
+        // Rate-limit: an immediate second matching event (different rotated MAC) must NOT re-scan.
+        await (manager as any)._handleDhcpEvent({ mac: 'de:ad:be:ef:99:02', ip: '192.168.1.61', client_id: '01:56:e9:8d:38:1c:97', message_type: 'REQUEST' });
+        assert.strictEqual(scanCount, 1, 'rate-limit: two rapid identity matches trigger only one re-block scan');
+        console.log('  ✓ FASE-3: new-MAC DHCP matching blocked identity triggers one rate-limited re-block scan');
+    }
+
+    // FASE-3 (safety): a new-MAC DHCP with NO blocked-identity match must NOT trigger a re-block scan.
+    {
+        const python: any = new EventEmitter();
+        const db: any = { hasBlockedIdentityMatch: () => false };
+        const manager = new DeviceManager(python, db);
+        let scanCount = 0;
+        (manager as any).scanNetwork = async () => { scanCount++; return []; };
+
+        await (manager as any)._handleDhcpEvent({ mac: 'de:ad:be:ef:aa:01', ip: '192.168.1.62', client_id: '01:aa:bb:cc:dd:ee:ff', message_type: 'REQUEST' });
+        assert.strictEqual(scanCount, 0, 'no blocked-identity match must not trigger a re-block scan');
+        console.log('  ✓ FASE-3: unmatched new-MAC DHCP does not trigger a re-block scan');
+    }
+
 }
