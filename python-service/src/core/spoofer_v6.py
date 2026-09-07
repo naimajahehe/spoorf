@@ -55,9 +55,14 @@ class NDPSpoofer:
                 self._win_interface_name = None
                 self._self_mac = None
 
+                # scapy_obj.ips ber-KUNCI address family integer ({4:[...],6:[...]}), jadi
+                # `my_ip in scapy_obj.ips` mengecek kunci (4/6) & selalu False. Cocokkan lewat
+                # .ip atau .ips.get(4, []) (paritas dengan spoofer.py IPv4).
                 if my_ip:
                     for scapy_name, scapy_obj in ifaces.items():
-                        if hasattr(scapy_obj, 'ips') and my_ip in scapy_obj.ips:
+                        if getattr(scapy_obj, 'ip', None) == my_ip or (
+                            hasattr(scapy_obj, 'ips') and my_ip in scapy_obj.ips.get(4, [])
+                        ):
                             self._interface = scapy_obj
                             self._win_interface_name = getattr(scapy_obj, 'name', 'Wi-Fi')
                             self._self_mac = getattr(scapy_obj, 'mac', None)

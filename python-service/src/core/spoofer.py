@@ -13,6 +13,7 @@ import time
 import threading
 import random
 import uuid
+import concurrent.futures
 import subprocess  # dipakai _ensure_host_gateway_locked (sebelumnya hilang → NameError senyap)
 from typing import Dict, Optional, Any, List, Tuple
 from scapy.all import sendp, ARP, Ether, conf, ifaces
@@ -80,10 +81,15 @@ class ARPSpoofer:
 
                 ignored_keywords = ['bluetooth', 'loopback', 'virtual', 'vethernet', 'wsl', 'tap', 'host-only', 'npcap']
 
-                # 1. Cari berdasarkan IP aktif
+                # 1. Cari berdasarkan IP aktif.
+                # CATATAN: scapy_obj.ips di Windows adalah defaultdict(list) ber-KUNCI address
+                # family integer ({4: ['192.168..'], 6: [...]}), jadi `my_ip in scapy_obj.ips`
+                # mengecek KUNCI (4/6) dan SELALU False. Cocokkan lewat .ip atau .ips.get(4, []).
                 if my_ip:
                     for scapy_name, scapy_obj in ifaces.items():
-                        if hasattr(scapy_obj, 'ips') and my_ip in scapy_obj.ips:
+                        if getattr(scapy_obj, 'ip', None) == my_ip or (
+                            hasattr(scapy_obj, 'ips') and my_ip in scapy_obj.ips.get(4, [])
+                        ):
                             self._interface = scapy_obj
                             self._win_interface_name = getattr(scapy_obj, 'name', 'Wi-Fi')
                             self._self_mac = getattr(scapy_obj, 'mac', None)
@@ -447,9 +453,18 @@ class ARPSpoofer:
         # Kunci tabel ARP gateway pada host controller agar koneksi laptop 100% kebal RTO
         self._ensure_host_gateway_locked(gateway_ip, gateway_mac)
 
-        # Hentikan sesi aktif lama untuk victim_ip yang sama agar tidak terjadi akumulasi zombie thread
+        # Hentikan sesi aktif lama untuk target yang sama agar tidak terjadi akumulasi zombie
+        # thread. Cocokkan by victim_ip ATAU victim_mac: bila target berganti IP (DHCP), sesi
+        # lama ber-IP usang tetap harus dibersihkan (identitas fisik = MAC). (spoofer_v6 sudah
+        # memakai mac; ini menyamakannya untuk IPv4.)
         with self._lock:
-            existing_sids = [sid for sid, s in self._sessions.items() if s.get('victim_ip') == victim_ip and s.get('active')]
+            existing_sids = [
+                sid for sid, s in self._sessions.items()
+                if (
+                    s.get('victim_ip') == victim_ip
+                    or (norm_vic_mac and (s.get('victim_mac') or '').lower().replace('-', ':') == norm_vic_mac)
+                ) and s.get('active')
+            ]
         for old_sid in existing_sids:
             try:
                 self.stop(old_sid)
@@ -649,14 +664,27 @@ class ARPSpoofer:
         logger.info("🛑 Menghentikan semua session...")
         with self._lock:
             session_ids = list(self._sessions.keys())
+            # BROADCAST: set SEMUA stop_event lebih dulu agar seluruh worker keluar dari sleep
+            # bersamaan → join berikutnya nyaris instan (bukan N×2s). Tanpa ini, stop_all
+            # sekuensial bisa melebihi timeout HTTP bridge (~2s) & menyisakan sesi zombie (BUG-E).
+            for sid in session_ids:
+                ev = self._stop_events.get(sid)
+                if ev:
+                    ev.set()
         failures = []
 
-        for sid in session_ids:
-            try:
-                self.stop(sid)
-            except Exception as e:
-                logger.error(f"Gagal stop {sid}: {e}")
-                failures.append((sid, e))
+        # Teardown per-sesi (join + restore) KONKUREN agar total waktu ~1 sesi, bukan N×.
+        if session_ids:
+            max_workers = min(len(session_ids), 8)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_to_sid = {executor.submit(self.stop, sid): sid for sid in session_ids}
+                for future in concurrent.futures.as_completed(future_to_sid):
+                    sid = future_to_sid[future]
+                    try:
+                        future.result()
+                    except Exception as e:
+                        logger.error(f"Gagal stop {sid}: {e}")
+                        failures.append((sid, e))
 
         try:
             ndp_spoofer.stop_all()

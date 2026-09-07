@@ -4,6 +4,8 @@ Covers: Happy Path, Negative Tests, and Edge Cases (Clamping, Non-blocking, Limi
 """
 
 import unittest
+import threading
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 from src.core.spoofer import ARPSpoofer
 from src.exceptions.custom import SpoofError, SessionNotFoundError
@@ -695,6 +697,91 @@ class TestCoreSpoofer(unittest.TestCase):
         )
         self.assertIsNone(self.spoofer._sessions[sid2].get('blackhole_mac'))
         self.spoofer.stop(sid2)
+
+    @patch('src.core.spoofer.sendp')
+    def test_start_dedups_old_session_by_mac_on_ip_change(self, mock_sendp):
+        """BUG-C: saat target berganti IP (DHCP), sesi lama (IP lama, MAC sama) harus
+        dibersihkan agar tak menjadi zombie thread yang terus meracuni IP usang. Dedup harus
+        by victim_mac, bukan hanya victim_ip (spoofer_v6 sudah benar pakai mac)."""
+        mac = "00:11:22:33:44:55"
+        sid_old = self.spoofer.start(
+            victim_ip="192.168.1.55", victim_mac=mac,
+            gateway_ip="192.168.1.1", gateway_mac="00:aa:bb:cc:dd:ee", speed_limit=0
+        )
+        self.assertIn(sid_old, self.spoofer.get_all_sessions())
+
+        # Target pindah IP (DHCP) tapi MAC fisik tetap sama.
+        sid_new = self.spoofer.start(
+            victim_ip="192.168.1.56", victim_mac=mac,
+            gateway_ip="192.168.1.1", gateway_mac="00:aa:bb:cc:dd:ee", speed_limit=0
+        )
+
+        sessions = self.spoofer.get_all_sessions()
+        self.assertIn(sid_new, sessions)
+        self.assertNotIn(sid_old, sessions,
+                         "Sesi lama (IP lama, MAC sama) harus dibersihkan, bukan menjadi zombie")
+        self.spoofer.stop(sid_new)
+
+    @patch('src.core.spoofer.sendp')
+    def test_stop_all_broadcasts_stop_events_before_per_session_teardown(self, mock_sendp):
+        """BUG-E: stop_all harus MENYIARKAN stop_event ke SEMUA sesi lebih dulu (broadcast),
+        baru teardown per-sesi, agar seluruh worker keluar dari sleep bersamaan & total waktu
+        tak tumbuh linear (N×join 2s) melebihi timeout HTTP bridge (2s). Buktikan: saat
+        teardown per-sesi PERTAMA dimulai, SELURUH stop_event sudah ter-set."""
+        macs = ["00:11:22:33:44:01", "00:11:22:33:44:02", "00:11:22:33:44:03"]
+        sids = [
+            self.spoofer.start(
+                victim_ip=f"192.168.1.{60 + i}", victim_mac=m,
+                gateway_ip="192.168.1.1", gateway_mac="00:aa:bb:cc:dd:ee", speed_limit=0
+            )
+            for i, m in enumerate(macs)
+        ]
+        events = [self.spoofer._stop_events[sid] for sid in sids]
+
+        observed = {}
+        real_stop = self.spoofer.stop
+
+        def spy_stop(sid):
+            observed.setdefault('set_at_first_stop', sum(1 for e in events if e.is_set()))
+            return real_stop(sid)
+
+        with patch.object(self.spoofer, 'stop', side_effect=spy_stop):
+            self.spoofer.stop_all()
+
+        self.assertEqual(observed.get('set_at_first_stop'), len(sids),
+                         "stop_all harus broadcast SEMUA stop_event sebelum teardown per-sesi pertama")
+        self.assertEqual(len(self.spoofer.get_all_sessions()), 0, "semua sesi harus terhenti")
+
+
+class TestSpooferInterfaceSelection(unittest.TestCase):
+    """Uji refresh_interface ASLI (tanpa setUp yang mem-mock refresh_interface)."""
+
+    def test_refresh_interface_matches_owner_of_active_ip(self):
+        """BUG-A: Step-1 (pemilihan interface via IP aktif) harus mencocokkan pemilik IP lewat
+        .ips[4]/.ip. `my_ip in scapy_obj.ips` mengecek IP sebagai KUNCI dict (AF int 4/6) →
+        selalu False → Step-1 mati & jatuh ke Step-2 (nama), bisa memilih adapter salah."""
+        MY_IP = '192.168.50.20'
+        # 'Ethernet' akan dipilih Step-2 (berbasis nama); TAPI ia BUKAN pemilik IP aktif.
+        wrong = SimpleNamespace(name='Ethernet', description='', ip='10.0.0.9',
+                                ips={4: ['10.0.0.9'], 6: []}, mac='aa:aa:aa:aa:aa:aa')
+        # Pemilik IP aktif, tapi namanya tak mengandung kata kunci Wi-Fi/Ethernet.
+        right = SimpleNamespace(name='Realtek USB NIC', description='', ip=MY_IP,
+                                ips={4: [MY_IP], 6: []}, mac='bb:bb:bb:bb:bb:bb')
+        fake_ifaces = {'if_wrong': wrong, 'if_right': right}
+
+        with patch('src.core.spoofer.ifaces', fake_ifaces), \
+             patch('src.core.spoofer.get_network_info', return_value={'ip': MY_IP}):
+            spoofer = ARPSpoofer.__new__(ARPSpoofer)
+            spoofer._lock = threading.Lock()
+            spoofer._interface = None
+            spoofer._win_interface_name = None
+            spoofer._self_mac = None
+            ARPSpoofer.refresh_interface(spoofer)
+
+        self.assertEqual(spoofer._self_mac, 'bb:bb:bb:bb:bb:bb',
+                         'Step-1 harus memilih pemilik IP aktif, bukan adapter bernama Ethernet')
+        self.assertEqual(spoofer._win_interface_name, 'Realtek USB NIC')
+
 
 if __name__ == '__main__':
     unittest.main()
