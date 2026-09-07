@@ -453,6 +453,27 @@ export async function runDeviceManagerTests() {
         console.log('  ✓ F-07 Fixed: selectGateway aman (is_gateway > .1/.254 > undefined, tanpa pick acak)');
     }
 
+    // BUG-5: selectGateway must prefer an ONLINE gateway over a stale offline one, so
+    // switching networks (home -> cafe) doesn't pick the previous router and then filter
+    // out every new-subnet device (empty table).
+    {
+        const { selectGateway } = await import('../src/services/deviceManager');
+        const mkGw = (over: Partial<Device>): Device => ({
+            ip: '10.0.0.1', mac: 'aa:aa:aa:aa:aa:aa', hostname: 'GW', vendor: 'V',
+            device_type: 'Router', os: 'RouterOS', rtt_ms: 2, open_ports: [], services: [],
+            is_blocked: false, is_online: true, is_gateway: true, ...over
+        });
+        const staleOffline = mkGw({ ip: '192.168.1.1', mac: 'de:ad:be:ef:00:01', is_online: false });
+        const freshOnline = mkGw({ ip: '10.0.0.1', mac: 'aa:bb:cc:dd:ee:01', is_online: true });
+        // stale offline gateway listed FIRST — must NOT win
+        assert.strictEqual(selectGateway([staleOffline, freshOnline])?.ip, '10.0.0.1',
+            'must pick the online gateway, not the stale offline one');
+        // when only an offline gateway exists, still return it (no regression on single-gateway)
+        assert.strictEqual(selectGateway([staleOffline])?.ip, '192.168.1.1',
+            'sole gateway (even offline) still selected');
+        console.log('  ✓ BUG-5: selectGateway prefers an online gateway over a stale offline one');
+    }
+
     // Test 17: Redirect state preserved across scan rebuild (in-memory) [Phase 2]
     {
         const mkDevice = (over: Partial<Device>): Device => ({
@@ -2048,6 +2069,28 @@ export async function runDeviceManagerTests() {
         assert.strictEqual(startSpoofArgs[5], 'fe80::abcd', 'victim IPv6 must be forwarded to startSpoof');
         assert.strictEqual(startSpoofArgs[6], 'fe80::1111', 'gateway IPv6 must be forwarded to startSpoof');
         console.log('  ✓ BUG-2: auto-reblock forwards IPv6 to startSpoof (no IPv6 leak on reconnect)');
+    }
+
+    // BUG-6: on a network change Python's watchdog has already run spoofer.stop_all(), so
+    // every session_id we hold is stale. The networkChanged handler must clear them,
+    // otherwise cut/limit silently address dead sessions (server returns success:false but
+    // HTTP 200) and the feature is dead until restart.
+    {
+        const python: any = new EventEmitter();
+        const manager = new DeviceManager(python, {} as any);
+        (manager as any).scanNetwork = async () => [];  // avoid a real scan on network change
+
+        const blocked: any = { ip: '192.168.1.50', mac: 'aa:bb:cc:dd:ee:50', is_blocked: true, speed_limit: 0, session_id: 'stale-block' };
+        const throttled: any = { ip: '192.168.1.51', mac: 'aa:bb:cc:dd:ee:51', is_blocked: false, speed_limit: 40, session_id: 'stale-throttle' };
+        (manager as any).devices.set(blocked.ip, blocked);
+        (manager as any).devices.set(throttled.ip, throttled);
+
+        python.emit('networkChanged', { new_gateway: '10.0.0.1' });
+        await new Promise(resolve => setImmediate(resolve));
+
+        assert.strictEqual(blocked.session_id, undefined, 'stale block session_id must be cleared on network change');
+        assert.strictEqual(throttled.session_id, undefined, 'stale throttle session_id must be cleared on network change');
+        console.log('  ✓ BUG-6: networkChanged clears stale session_ids so cut/limit start fresh sessions');
     }
 
 }

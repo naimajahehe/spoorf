@@ -113,6 +113,12 @@ export function isIpInSameSubnet(ip: string, gatewayIp: string): boolean {
  * agar operasi spoofing gagal aman ("Gateway not found") ketimbang meracuni perangkat acak.
  */
 export function selectGateway(devices: Device[]): Device | undefined {
+    // Prefer an ONLINE gateway first, so after a network switch a stale offline gateway
+    // (from the previous network, still flagged is_gateway in SQLite) can't win and cause
+    // the subnet filter to discard every device on the new network.
+    for (const d of devices) {
+        if (d.is_gateway && d.is_online) return d;
+    }
     for (const d of devices) {
         if (d.is_gateway) return d;
     }
@@ -211,6 +217,14 @@ export class DeviceManager extends EventEmitter {
             if (this.profileEnrichmentTimer) {
                 clearTimeout(this.profileEnrichmentTimer);
                 this.profileEnrichmentTimer = null;
+            }
+            // Python's watchdog already ran spoofer.stop_all() on the network change, so every
+            // session_id we still hold is now dead. Clear them (the block intent in is_blocked
+            // stays) so cut/limit start a FRESH session and auto-reblock is not skipped by a
+            // stale session_id — otherwise those ops silently address a session that no longer
+            // exists (Python returns success:false under an HTTP 200) until the app restarts.
+            for (const dev of this.devices.values()) {
+                if (dev.session_id) dev.session_id = undefined;
             }
             this.emit('networkChanged', data);
             this.scanNetwork().catch(console.error);
