@@ -1085,5 +1085,42 @@ class TestRedirector(unittest.TestCase):
         except BrokenPipeError:
             server.handle_error(None, ("127.0.0.1", 12345))
 
+    def test_stop_redirect_does_not_hold_lock_during_blocking_teardown(self):
+        """BUG-16 sibling: stop_redirect tak boleh menahan self._lock saat memanggil
+        dns.stop() / spoofer.stop() (masing-masing mem-join thread ~2s). Buktikan
+        self._lock SUDAH bebas ketika I/O teardown yang mem-block itu dipanggil, agar
+        operasi redirect lain tak dibekukan ~4 detik selama teardown."""
+        mock_spoofer = MagicMock()
+        mock_spoofer._self_mac = "a8:3b:76:0c:dc:55"
+        manager = RedirectManager(mock_spoofer)
+
+        observed = {}
+
+        def record(tag):
+            acquired = manager._lock.acquire(blocking=False)
+            observed[tag] = acquired
+            if acquired:
+                manager._lock.release()
+
+        mock_dns = MagicMock()
+        mock_dns.stop.side_effect = lambda: record("dns")
+        mock_spoofer.stop.side_effect = lambda *a, **k: record("arp")
+
+        victim_ip = "192.168.1.50"
+        manager._sessions[victim_ip] = {
+            "victim_ip": victim_ip,
+            "dns_spoofer": mock_dns,
+            "arp_session_id": "arp_x",
+        }
+
+        result = manager.stop_redirect(victim_ip)
+
+        self.assertTrue(result)
+        self.assertTrue(mock_dns.stop.called, "dns.stop() harus dipanggil")
+        self.assertTrue(mock_spoofer.stop.called, "spoofer.stop() harus dipanggil")
+        self.assertTrue(observed.get("dns"), "self._lock harus sudah bebas saat dns.stop()")
+        self.assertTrue(observed.get("arp"), "self._lock harus sudah bebas saat spoofer.stop()")
+
+
 if __name__ == "__main__":
     unittest.main()

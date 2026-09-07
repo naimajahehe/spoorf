@@ -666,14 +666,14 @@ class RedirectManager:
             recovery["recovery_error"] = "; ".join(errors)
             raise SpoofError("; ".join(errors))
 
-    def _cleanup_session_unlocked(
-        self,
-        victim_ip: str,
-        session: Dict[str, Any],
-        *,
-        partial: bool,
-    ):
-        errors = []
+    def _release_session_io(self, session: Dict[str, Any]) -> List[str]:
+        """Teardown I/O yang mem-block untuk SATU sesi: hentikan DNS spoofer & sesi ARP
+        (masing-masing mem-join thread ~2s) lalu pulihkan target portal. WAJIB dijalankan
+        DI LUAR self._lock — bila di dalam lock, join ini membekukan semua operasi redirect
+        lain ~4 detik (saudara-lambat BUG-16). Hanya menyentuh field session-lokal (bukan
+        self._sessions/_partial_sessions), jadi aman tanpa lock. Mengembalikan daftar error
+        (tidak melempar)."""
+        errors: List[str] = []
 
         dns = session.get("dns_spoofer")
         if dns:
@@ -711,6 +711,33 @@ class RedirectManager:
             else:
                 session["portal_restore_target"] = None
 
+        return errors
+
+    def _take_portal_for_shutdown_locked(self):
+        """DI DALAM self._lock: bila tak ada sesi tersisa di kedua map dan portal masih hidup,
+        LEPAS portal dari state (self.portal_server = None) lalu kembalikan agar pemanggil dapat
+        portal.stop() DI LUAR lock (portal.stop() mem-join thread HTTP). Kembalikan None bila
+        portal harus tetap hidup."""
+        if self._sessions or self._partial_sessions:
+            return None
+        portal = self.portal_server
+        if portal is None:
+            return None
+        self.portal_server = None
+        return portal
+
+    def _cleanup_session_unlocked(
+        self,
+        victim_ip: str,
+        session: Dict[str, Any],
+        *,
+        partial: bool,
+    ):
+        """Teardown penuh SATU sesi DI DALAM lock (dipakai jalur partial/recovery). Untuk jalur
+        stop_redirect/stop_all yang panas, gunakan _release_session_io (di luar lock) +
+        _take_portal_for_shutdown_locked, sehingga lock tak ditahan selama join."""
+        errors = self._release_session_io(session)
+
         other_sessions = any(
             candidate is not session
             for sessions in (self._sessions, self._partial_sessions)
@@ -739,7 +766,11 @@ class RedirectManager:
             )
 
     def stop_redirect(self, victim_ip: str):
-        """Hentikan sesi redirect untuk target IP."""
+        """Hentikan sesi redirect untuk target IP.
+
+        Tiga fase agar self._lock TIDAK ditahan selama join teardown (~4s): (1) POP sesi dari
+        map di dalam lock; (2) _release_session_io (dns/arp stop) DI LUAR lock; (3) keputusan
+        shutdown portal di dalam lock, portal.stop() di luar lock."""
         with self._lock:
             if (
                 victim_ip not in self._sessions
@@ -747,58 +778,79 @@ class RedirectManager:
             ):
                 logger.warning(f"Sesi redirect {victim_ip} tidak ditemukan.")
                 return False
+            session = self._sessions.pop(victim_ip, None)
+            has_partial = victim_ip in self._partial_sessions
 
-            errors = []
-            if victim_ip in self._sessions:
-                try:
-                    self._stop_session_unlocked(victim_ip)
-                except SpoofError as e:
-                    errors.append(str(e))
-            if victim_ip in self._partial_sessions:
-                try:
-                    self._stop_partial_session_unlocked(victim_ip)
-                except SpoofError as e:
-                    errors.append(str(e))
+        errors: List[str] = []
+        if session is not None:
+            session_errors = self._release_session_io(session)
+            if session_errors:
+                # Semantik retry: cleanup gagal → kembalikan sesi ke map (dengan resource yang
+                # masih perlu dibersihkan) agar bisa dicoba lagi pada stop_redirect berikutnya.
+                errors.extend(session_errors)
+                with self._lock:
+                    self._sessions[victim_ip] = session
+            else:
+                logger.info(f"🏁 [Redirect Manager] Sesi redirect untuk {victim_ip} dihentikan.")
 
-            if errors:
-                raise SpoofError("; ".join(errors))
-            return True
+        # Jalur partial/recovery (gagal-startup) tetap memakai path lama di dalam lock (jarang).
+        if has_partial:
+            with self._lock:
+                if victim_ip in self._partial_sessions:
+                    try:
+                        self._stop_partial_session_unlocked(victim_ip)
+                    except SpoofError as e:
+                        errors.append(str(e))
 
-    def stop_all(self):
-        """Hentikan semua sesi redirect yang aktif."""
-        with self._lock:
-            errors = []
-            victim_ips = list(self._sessions.keys())
-            for ip in victim_ips:
-                try:
-                    self._stop_session_unlocked(ip)
-                except SpoofError as e:
-                    errors.append(str(e))
-
-            partial_ips = list(self._partial_sessions.keys())
-            for ip in partial_ips:
-                try:
-                    self._stop_partial_session_unlocked(ip)
-                except SpoofError as e:
-                    errors.append(str(e))
-
-            if (
-                not errors
-                and not self._sessions
-                and not self._partial_sessions
-                and self.portal_server
-            ):
-                portal = self.portal_server
+        if not errors:
+            with self._lock:
+                portal = self._take_portal_for_shutdown_locked()
+            if portal is not None:
                 try:
                     portal.stop()
                 except Exception as e:
                     errors.append(f"Portal cleanup failed: {e}")
-                else:
-                    if self.portal_server is portal:
-                        self.portal_server = None
 
-            if errors:
-                raise SpoofError("; ".join(errors))
+        if errors:
+            raise SpoofError("; ".join(errors))
+        return True
+
+    def stop_all(self):
+        """Hentikan semua sesi redirect. Seperti stop_redirect: join teardown DI LUAR lock."""
+        with self._lock:
+            sessions = list(self._sessions.items())
+            self._sessions.clear()
+            has_partial = bool(self._partial_sessions)
+
+        errors: List[str] = []
+        for ip, session in sessions:
+            session_errors = self._release_session_io(session)
+            if session_errors:
+                # Semantik retry: pertahankan sesi yang gagal dibersihkan (lihat stop_redirect).
+                errors.extend(session_errors)
+                with self._lock:
+                    self._sessions[ip] = session
+
+        # Jalur partial/recovery tetap di dalam lock (jarang).
+        if has_partial:
+            with self._lock:
+                for ip in list(self._partial_sessions.keys()):
+                    try:
+                        self._stop_partial_session_unlocked(ip)
+                    except SpoofError as e:
+                        errors.append(str(e))
+
+        if not errors:
+            with self._lock:
+                portal = self._take_portal_for_shutdown_locked()
+            if portal is not None:
+                try:
+                    portal.stop()
+                except Exception as e:
+                    errors.append(f"Portal cleanup failed: {e}")
+
+        if errors:
+            raise SpoofError("; ".join(errors))
 
     def get_sessions(self) -> Dict[str, Any]:
         """Dapatkan ringkasan seluruh sesi redirect yang aktif."""
