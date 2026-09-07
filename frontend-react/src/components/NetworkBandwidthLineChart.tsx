@@ -3,6 +3,9 @@ import type { FC } from 'react';
 import { ArrowDown, ArrowUp, Zap, Activity } from 'lucide-react';
 import { cn } from '../lib/utils';
 
+const DOWNLOAD_COLOR = 'var(--bandwidth-download, #10b981)';
+const UPLOAD_COLOR = 'var(--bandwidth-upload, #06b6d4)';
+
 export interface BandwidthDataPoint {
     time: number;       // timestamp in ms
     label: string;      // '-9s', '-8s', ..., 'Now'
@@ -213,14 +216,14 @@ export const NetworkBandwidthLineChart: FC<NetworkBandwidthLineChartProps> = ({
                     <defs>
                         {/* Download Emerald Gradient Fill */}
                         <linearGradient id="downloadGradient" x1="0" y1="0" x2="0" y2="1">
-                            <stop offset="0%" stopColor="#10b981" stopOpacity="0.32" />
-                            <stop offset="100%" stopColor="#10b981" stopOpacity="0.0" />
+                            <stop offset="0%" stopColor={DOWNLOAD_COLOR} stopOpacity="0.32" />
+                            <stop offset="100%" stopColor={DOWNLOAD_COLOR} stopOpacity="0.0" />
                         </linearGradient>
 
                         {/* Upload Cyan Gradient Fill */}
                         <linearGradient id="uploadGradient" x1="0" y1="0" x2="0" y2="1">
-                            <stop offset="0%" stopColor="#06b6d4" stopOpacity="0.25" />
-                            <stop offset="100%" stopColor="#06b6d4" stopOpacity="0.0" />
+                            <stop offset="0%" stopColor={UPLOAD_COLOR} stopOpacity="0.25" />
+                            <stop offset="100%" stopColor={UPLOAD_COLOR} stopOpacity="0.0" />
                         </linearGradient>
                     </defs>
 
@@ -230,7 +233,7 @@ export const NetworkBandwidthLineChart: FC<NetworkBandwidthLineChartProps> = ({
                         y1={paddingTop}
                         x2={width - paddingX}
                         y2={paddingTop}
-                        stroke="rgba(255,255,255,0.06)"
+                        stroke="var(--bandwidth-grid, rgba(255,255,255,0.06))"
                         strokeDasharray="2 3"
                         strokeWidth="1"
                     />
@@ -239,7 +242,7 @@ export const NetworkBandwidthLineChart: FC<NetworkBandwidthLineChartProps> = ({
                         y1={paddingTop + plotHeight / 2}
                         x2={width - paddingX}
                         y2={paddingTop + plotHeight / 2}
-                        stroke="rgba(255,255,255,0.04)"
+                        stroke="var(--bandwidth-grid, rgba(255,255,255,0.04))"
                         strokeDasharray="2 3"
                         strokeWidth="1"
                     />
@@ -248,7 +251,7 @@ export const NetworkBandwidthLineChart: FC<NetworkBandwidthLineChartProps> = ({
                         y1={paddingTop + plotHeight}
                         x2={width - paddingX}
                         y2={paddingTop + plotHeight}
-                        stroke="rgba(255,255,255,0.08)"
+                        stroke="var(--bandwidth-grid, rgba(255,255,255,0.08))"
                         strokeWidth="1"
                     />
 
@@ -269,7 +272,7 @@ export const NetworkBandwidthLineChart: FC<NetworkBandwidthLineChartProps> = ({
                     <path
                         d={downloadPath}
                         fill="none"
-                        stroke="#10b981"
+                        stroke={DOWNLOAD_COLOR}
                         strokeWidth="2"
                         strokeLinecap="round"
                         strokeLinejoin="round"
@@ -278,7 +281,7 @@ export const NetworkBandwidthLineChart: FC<NetworkBandwidthLineChartProps> = ({
                     <path
                         d={uploadPath}
                         fill="none"
-                        stroke="#06b6d4"
+                        stroke={UPLOAD_COLOR}
                         strokeWidth="1.75"
                         strokeLinecap="round"
                         strokeLinejoin="round"
@@ -289,13 +292,13 @@ export const NetworkBandwidthLineChart: FC<NetworkBandwidthLineChartProps> = ({
                     {/* Live Pulsating End Dots */}
                     {lastDownloadPt && (
                         <g>
-                            <circle cx={lastDownloadPt.x} cy={lastDownloadPt.y} r="3" fill="#10b981" />
-                            <circle cx={lastDownloadPt.x} cy={lastDownloadPt.y} r="5" fill="#10b981" opacity="0.4" className="animate-ping" />
+                            <circle cx={lastDownloadPt.x} cy={lastDownloadPt.y} r="3" fill={DOWNLOAD_COLOR} />
+                            <circle cx={lastDownloadPt.x} cy={lastDownloadPt.y} r="5" fill={DOWNLOAD_COLOR} opacity="0.4" className="animate-ping" />
                         </g>
                     )}
 
                     {lastUploadPt && (
-                        <circle cx={lastUploadPt.x} cy={lastUploadPt.y} r="2.5" fill="#06b6d4" />
+                        <circle cx={lastUploadPt.x} cy={lastUploadPt.y} r="2.5" fill={UPLOAD_COLOR} />
                     )}
 
                     {/* Hover Crosshair and Markers */}
@@ -306,12 +309,12 @@ export const NetworkBandwidthLineChart: FC<NetworkBandwidthLineChartProps> = ({
                                 y1={paddingTop}
                                 x2={activeHoverDownloadPt.x}
                                 y2={paddingTop + plotHeight}
-                                stroke="rgba(255,255,255,0.25)"
+                                stroke="var(--bandwidth-crosshair, rgba(255,255,255,0.25))"
                                 strokeWidth="1"
                                 strokeDasharray="2 2"
                             />
-                            <circle cx={activeHoverDownloadPt.x} cy={activeHoverDownloadPt.y} r="4" fill="#10b981" stroke="#fff" strokeWidth="1.5" />
-                            <circle cx={activeHoverUploadPt.x} cy={activeHoverUploadPt.y} r="3.5" fill="#06b6d4" stroke="#fff" strokeWidth="1.5" />
+                            <circle cx={activeHoverDownloadPt.x} cy={activeHoverDownloadPt.y} r="4" fill={DOWNLOAD_COLOR} stroke="#fff" strokeWidth="1.5" />
+                            <circle cx={activeHoverUploadPt.x} cy={activeHoverUploadPt.y} r="3.5" fill={UPLOAD_COLOR} stroke="#fff" strokeWidth="1.5" />
                         </g>
                     )}
 

@@ -199,7 +199,10 @@ export const GamingModeWidget: FC<Props> = ({ status, telemetry, devices, onTogg
             </div>
 
             {/* Hero: live trace (bklit LiveLineChart) + readout ping mengambang */}
-            <div className="relative rounded-xl overflow-hidden" style={{ background: 'linear-gradient(180deg,#0d1016,#0a0c10)' }}>
+            {/* Hero panel intentionally stays a dark "arena" in both themes (neon ping-trace
+                reads like a console screen). The gaming-chart class only adds a light border +
+                shadow in light mode so the dark panel is framed against the light page. */}
+            <div className="gaming-chart relative rounded-xl overflow-hidden" style={{ background: 'linear-gradient(180deg,#0d1016,#0a0c10)' }}>
                 <div className="h-[220px] md:h-[248px] w-full" style={chartVars}>
                     {enabled && samples.length > 0 ? (
                         <LiveLineChart data={samples} value={ping} window={30} numXTicks={5}>
