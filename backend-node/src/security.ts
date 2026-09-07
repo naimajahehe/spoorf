@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
+import crypto from 'crypto';
 
 /**
  * Keamanan sisi-server (P0): allowlist Origin & Host untuk mencegah
@@ -108,9 +109,13 @@ export function apiTokenGuard(req: Request, res: Response, next: NextFunction): 
     }
 
     const provided = req.headers['x-sentinel-token'];
-    if (typeof provided === 'string' && provided === token) {
-        next();
-        return;
+    if (typeof provided === 'string') {
+        const pBuf = Buffer.from(provided);
+        const tBuf = Buffer.from(token);
+        if (pBuf.length === tBuf.length && crypto.timingSafeEqual(pBuf, tBuf)) {
+            next();
+            return;
+        }
     }
 
     res.status(401).json({
@@ -126,7 +131,10 @@ export function apiTokenGuard(req: Request, res: Response, next: NextFunction): 
 export function isValidApiToken(token: unknown): boolean {
     const expected = process.env.SENTINEL_API_TOKEN;
     if (!expected) return true;
-    return typeof token === 'string' && token === expected;
+    if (typeof token !== 'string') return false;
+    const pBuf = Buffer.from(token);
+    const eBuf = Buffer.from(expected);
+    return pBuf.length === eBuf.length && crypto.timingSafeEqual(pBuf, eBuf);
 }
 
 /**

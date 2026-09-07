@@ -13,6 +13,7 @@ import logging
 import asyncio
 import ipaddress
 import threading
+import hmac
 from typing import List, Dict, Any, Optional
 from concurrent.futures import ThreadPoolExecutor
 
@@ -115,7 +116,7 @@ async def api_token_guard(request: Request, call_next):
     if expected:
         if request.url.path not in _PUBLIC_PATHS and request.method != "OPTIONS":
             provided = request.headers.get("x-sentinel-token")
-            if provided != expected:
+            if not provided or not hmac.compare_digest(provided, expected):
                 return JSONResponse(
                     status_code=401,
                     content={"success": False, "error": "Unauthorized: missing or invalid API token."}
@@ -1208,7 +1209,7 @@ async def websocket_events(websocket: WebSocket):
     expected = os.getenv("SENTINEL_API_TOKEN")
     if expected:
         provided = websocket.headers.get("x-sentinel-token") or websocket.query_params.get("token")
-        if provided != expected:
+        if not provided or not hmac.compare_digest(provided, expected):
             await websocket.close(code=1008)  # Policy Violation
             return
     await manager.connect(websocket)

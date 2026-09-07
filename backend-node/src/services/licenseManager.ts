@@ -168,7 +168,22 @@ export class LicenseManager extends EventEmitter {
         cloudUrl?: string;
     }): Promise<AuthStatusResponse> {
         await this.init();
-        const targetUrl = credentials.cloudUrl || this.cloudEndpoint;
+        // KEAMANAN (P0): Anti-SSRF & pencegahan eksfiltrasi kredensial / HWID.
+        // Kredensial dan hash HWID HANYA boleh dikirim ke endpoint resmi terkonfigurasi.
+        let targetUrl = this.cloudEndpoint;
+        if (credentials.cloudUrl) {
+            try {
+                const parsed = new URL(credentials.cloudUrl);
+                const officialParsed = new URL(this.cloudEndpoint);
+                if (parsed.protocol === officialParsed.protocol && parsed.hostname === officialParsed.hostname) {
+                    targetUrl = credentials.cloudUrl;
+                } else {
+                    console.warn(`⚠️ [Security] Menolak cloudUrl tidak terpercaya: ${credentials.cloudUrl}`);
+                }
+            } catch {
+                console.warn(`⚠️ [Security] Format cloudUrl tidak valid: ${credentials.cloudUrl}`);
+            }
+        }
 
         let authResult: { user: AuthUser; license: UserLicense; token: string };
 

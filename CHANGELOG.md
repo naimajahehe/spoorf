@@ -2,6 +2,33 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.36.0] - 2026-09-07
+
+### Security Hardening, Process Lifecycle Safety & Full Audit Remediation
+- **Pencegahan Electron Shutdown Hang — `desktop-electron/src/main.ts` [FINDING-001]**:
+  - Menambahkan listener `req.on('timeout')` pada `stopAllEnginesGracefully()` dengan pemanggilan `req.destroy()`, pembersihan pohon proses anak (`killProcessTree`), dan penyelesaian promise secara deterministik dalam batas timeout 2000ms.
+  - Menghilangkan potensi zombie process Electron yang menggantung tak terhingga di Windows Task Manager saat aplikasi ditutup.
+- **Propagasi API Token Sandboxed Preload — `desktop-electron/src/preload.ts` & `main.ts` [FINDING-002]**:
+  - Menyuntikkan token control-plane via `additionalArguments: ['--sentinel-api-token=...']` saat inisialisasi `BrowserWindow`, dipadukan dengan fallback IPC sinkron (`get-api-token-sync`) dan asinkron (`getApiToken`).
+  - Menjamin `window.electronAPI.apiToken` tidak lagi bernilai string kosong `""` pada preload yang ter-sandbox di Electron 28.
+- **Pencegahan SSRF & Eksfiltrasi Kredensial pada Login — `backend-node/src/services/licenseManager.ts` [FINDING-003]**:
+  - Membatasi parameter `cloudUrl` agar wajib memiliki origin protokol dan hostname yang identik dengan endpoint cloud resmi (`this.cloudEndpoint` / `https://api.spoorf.app`).
+  - Menolak URL acak, mencegah pengiriman kredensial dan hardware hash (HWID) ke server penyerang atau probing SSRF jaringan internal.
+- **Proteksi Navigasi & Popup Electron — `desktop-electron/src/main.ts` [FINDING-004]**:
+  - Mendaftarkan `mainWindow.webContents.setWindowOpenHandler` dengan penolakan default (`{ action: 'deny' }`) dan delegasi URL eksternal langsung ke browser default sistem operasi via `shell.openExternal()`.
+  - Memasang guard `will-navigate` untuk membatalkan pengalihan window utama ke URL selain loopback atau file lokal.
+- **Debounce Anti-Port Collision pada IPC Engine Restart — `desktop-electron/src/main.ts` [FINDING-009]**:
+  - Menambahkan flag `isRestartingEngine` dengan cooldown 1000ms pada `restartPythonEngine()`.
+  - Mencegah spam klik tombol restart dari UI yang memicu multiproses Python bertabrakan pada port 8001 (`WinError 10048`).
+- **Pencegahan Timing Attack pada Token Bearer — `backend-node/src/security.ts` & `python-service/src/server.py` [FINDING-012]**:
+  - Mengganti perbandingan string variabel-waktu (`===` dan `!=`) dengan `crypto.timingSafeEqual` pada Node.js dan `hmac.compare_digest` pada Python microservice HTTP middleware & WebSocket route.
+- **Validasi Input Subprocess ARP — `python-service/src/core/discovery/arp.py` [FINDING-015]**:
+  - Memeriksa `is_valid_private_ip(ip)` sebelum mengeksekusi `subprocess.check_output(['arp', '-a', ip])`, mematuhi Invariant 6 (Defense-in-Depth).
+- **Penambahan PyInstaller pada Dependensi — `python-service/requirements.txt` [FINDING-017]**:
+  - Menambahkan `pyinstaller==6.22.2` ke dalam `requirements.txt` untuk mendukung reproduksibilitas build standalone engine.
+- **Sinkronisasi Skema Database — `docs/DATABASE_SCHEMA.md` [FINDING-010]**:
+  - Mendokumentasikan 8 kolom baru pada tabel `devices` (`last_ip`, `profile_status`, `vendor_confidence`, `type_confidence`, `hostname_confidence`, `profile_evidence`, `profiled_at`, `profile_version`), tabel `license_cache`, kueri UPSERT 43-field lengkap, dan kueri transisi offline (`OFFLINE_GRACE_SECONDS = 75s`).
+
 ## [v2.35.0] - 2026-09-07
 
 ### Scan Engine Optimization, RFC Protocol Compliance & Cross-Layer State Alignment

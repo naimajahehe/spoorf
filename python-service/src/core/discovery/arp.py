@@ -82,6 +82,10 @@ def probe_sleeping_host_via_gateway_arp(
 
 def get_mac_from_arp(ip: str, *, strict: bool = False) -> str:
     """Ambil MAC address untuk IP tertentu dari ARP cache kernel OS."""
+    if not ip or not is_valid_private_ip(ip):
+        if strict:
+            raise ValueError(f"Invalid private IP: {ip}")
+        return ""
     try:
         if sys.platform == 'win32':
             # Argumen list tanpa shell=True (hindari interpolasi shell) + sembunyikan konsol.

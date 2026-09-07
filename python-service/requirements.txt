@@ -16,3 +16,6 @@ pydantic==2.13.4
 # Telemetri throughput/latensi (psutil) & MitM CA / leaf cert (cryptography).
 psutil==7.2.2
 cryptography==50.0.1
+
+# Packaging & binary distribution (build_engine.py).
+pyinstaller==6.22.2

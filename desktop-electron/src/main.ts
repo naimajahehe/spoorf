@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, Menu, Tray, dialog } from 'electron';
+import { app, BrowserWindow, ipcMain, Menu, Tray, dialog, shell } from 'electron';
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
@@ -230,12 +230,15 @@ function scheduleEngineRespawn(reason: string) {
     }, ENGINE_RESPAWN_DELAY_MS);
 }
 
+let isRestartingEngine = false;
+
 /**
  * Restart engine yang diminta pengguna (IPC 'engine-restart' dari renderer).
  * Mereset counter crash-loop lalu mematikan proses lama & memulai yang baru.
  */
 function restartPythonEngine() {
-    if (isQuitting) return;
+    if (isQuitting || isRestartingEngine) return;
+    isRestartingEngine = true;
     logElectron('[Supervisor] Restart engine manual diminta dari UI.');
     engineRestartTimestamps = []; // reset guard crash-loop untuk aksi manual
     if (pythonProcess) {
@@ -246,9 +249,11 @@ function restartPythonEngine() {
         // Beri jeda agar port :8001 sempat dilepas sebelum spawn baru.
         setTimeout(() => {
             if (!isQuitting) startPythonEngine();
+            setTimeout(() => { isRestartingEngine = false; }, 1000);
         }, 800);
     } else {
         startPythonEngine();
+        setTimeout(() => { isRestartingEngine = false; }, 1000);
     }
 }
 
@@ -292,6 +297,17 @@ function startNodeBackend() {
 
 async function stopAllEnginesGracefully(): Promise<void> {
     return new Promise((resolve) => {
+        let isResolved = false;
+        const finish = () => {
+            if (!isResolved) {
+                isResolved = true;
+                if (pythonProcess) {
+                    killProcessTree(pythonProcess);
+                }
+                resolve();
+            }
+        };
+
         try {
             // Send un-spoof restore signal to Python
             const req = http.request(
@@ -304,26 +320,24 @@ async function stopAllEnginesGracefully(): Promise<void> {
                     headers: { 'x-sentinel-token': SENTINEL_API_TOKEN }
                 },
                 () => {
-                    if (pythonProcess) {
-                        killProcessTree(pythonProcess);
-                    }
-                    resolve();
+                    finish();
                 }
             );
 
-            req.on('error', () => {
-                if (pythonProcess) {
-                    killProcessTree(pythonProcess);
-                }
-                resolve();
+            req.on('timeout', () => {
+                logElectron('[Supervisor] Timeout stopping Python engine; forcing termination.');
+                req.destroy();
+                finish();
+            });
+
+            req.on('error', (err) => {
+                logElectron(`[Supervisor] Error stopping Python engine gracefully (${err.message}); killing process tree.`);
+                finish();
             });
 
             req.end();
         } catch {
-            if (pythonProcess) {
-                killProcessTree(pythonProcess);
-            }
-            resolve();
+            finish();
         }
     });
 }
@@ -340,7 +354,35 @@ function createMainWindow() {
         webPreferences: {
             preload: path.join(__dirname, 'preload.js'),
             contextIsolation: true,
-            nodeIntegration: false
+            nodeIntegration: false,
+            additionalArguments: [`--sentinel-api-token=${SENTINEL_API_TOKEN}`]
+        }
+    });
+
+    // KEAMANAN (P1): Larang popup / window baru tak terkontrol. Delegasikan ke browser eksternal sistem.
+    mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+        try {
+            const parsed = new URL(url);
+            if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+                shell.openExternal(url);
+            }
+        } catch {}
+        return { action: 'deny' };
+    });
+
+    // KEAMANAN (P1): Cegah navigasi top-level window utama ke URL tak terpercaya
+    mainWindow.webContents.on('will-navigate', (event, url) => {
+        const currentUrl = mainWindow?.webContents.getURL() || '';
+        if (
+            url !== currentUrl &&
+            !url.startsWith('file://') &&
+            !url.startsWith('http://127.0.0.1:5000') &&
+            !url.startsWith('http://localhost:5173')
+        ) {
+            event.preventDefault();
+            try {
+                shell.openExternal(url);
+            } catch {}
         }
     });
 
@@ -405,6 +447,9 @@ ipcMain.on('engine-restart', () => {
 
 // Sediakan token API lokal ke renderer (fallback bila process.env tak terpropagasi).
 ipcMain.handle('get-api-token', () => SENTINEL_API_TOKEN);
+ipcMain.on('get-api-token-sync', (event) => {
+    event.returnValue = SENTINEL_API_TOKEN;
+});
 
 // App Lifecycle
 app.whenReady().then(() => {
