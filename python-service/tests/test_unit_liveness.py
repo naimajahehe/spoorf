@@ -151,6 +151,31 @@ class TestUnitLiveness(unittest.TestCase):
         self.assertEqual(results['192.168.1.150']['mac'], '00:11:22:33:44:55',
                          "MAC target harus dipertahankan pada hasil gagal/timeout")
 
+    def test_watchdog_hysteresis_suppresses_single_miss_flapping(self):
+        """Anti-flapping: perangkat Wi-Fi power-save (Doze) yang miss TERPENCAR (mis. 1 dari
+        beberapa siklus) tak boleh divonis offline. Offline hanya setelah N miss BERTURUT-TURUT;
+        sekali menjawab → reset. Ini yang menghentikan online↔offline↔online untuk host hidup."""
+        events = []
+        daemon = LivenessWatchdogDaemon(event_callback=lambda e: events.append(e), offline_threshold=2)
+
+        MISS = {'x': {'ip': 'x', 'mac': 'aa:bb:cc:dd:ee:01', 'is_alive': False, 'vector': 'timeout'}}
+        ALIVE = {'x': {'ip': 'x', 'mac': 'aa:bb:cc:dd:ee:01', 'is_alive': True, 'vector': 'unicast_arp'}}
+
+        # 1 miss → belum offline (di bawah ambang)
+        daemon._process_liveness_results(MISS)
+        self.assertEqual(events, [], 'satu miss tak boleh memicu offline')
+
+        # menjawab lagi → reset
+        daemon._process_liveness_results(ALIVE)
+        # miss terpencar berikutnya → tetap belum offline (bukan berturut-turut)
+        daemon._process_liveness_results(MISS)
+        self.assertEqual(events, [], 'miss terpencar (bukan berturut) tak boleh memicu offline')
+
+        # miss KEDUA berturut-turut → baru offline
+        daemon._process_liveness_results(MISS)
+        self.assertEqual(len(events), 1, 'dua miss berturut-turut harus memicu tepat satu event offline')
+        self.assertEqual(events[0]['data']['ip'], 'x')
+
     def test_liveness_daemon_lifecycle(self):
         """Uji lifecycle daemon latar belakang (start, update, stop)."""
         events = []

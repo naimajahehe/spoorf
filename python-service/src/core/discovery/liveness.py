@@ -239,7 +239,7 @@ class LivenessWatchdogDaemon:
     Background Daemon yang secara berkala memverifikasi denyut liveness perangkat
     yang terdaftar dan menyiarkan event disconnection jika terbukti offline.
     """
-    def __init__(self, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None, interval: float = 15.0, broadcast_fn: Optional[Callable[[Dict[str, Any]], None]] = None):
+    def __init__(self, event_callback: Optional[Callable[[Dict[str, Any]], None]] = None, interval: float = 15.0, broadcast_fn: Optional[Callable[[Dict[str, Any]], None]] = None, offline_threshold: int = 2):
         self.event_callback = event_callback or broadcast_fn or (lambda x: None)
         self.interval = interval
         self._running = False
@@ -247,6 +247,12 @@ class LivenessWatchdogDaemon:
         self._devices: Dict[str, Dict[str, Any]] = {}
         self._lock = threading.Lock()
         self._scanning_active = False  # True selama scan penuh -> watchdog dijeda
+        # HISTERESIS (anti-flapping): perangkat Wi-Fi power-save/Doze kadang telat menjawab
+        # >3s satu siklus lalu normal lagi. Menyatakan offline dari SATU miss membuat perangkat
+        # hidup berkedip online↔offline. Butuh N miss BERTURUT-TURUT dulu; sekali menjawab →
+        # penghitung reset. Isolated miss (mis. 1 dari 12 siklus) tak pernah memicu offline.
+        self._offline_threshold = max(1, int(offline_threshold))
+        self._consecutive_misses: Dict[str, int] = {}
 
     def set_scanning_active(self, active: bool):
         """
@@ -289,16 +295,34 @@ class LivenessWatchdogDaemon:
                     continue
 
                 batch_res = pulse_batch(targets, timeout=3.0)
-                for ip, res in batch_res.items():
-                    if not res.get('is_alive'):
-                        logger.info(f"Watchdog detected offline device: {ip}")
-                        self.event_callback({
-                            "event": "device_offline_pulse",
-                            "data": {
-                                "ip": ip,
-                                "mac": res.get('mac'),
-                                "vector": res.get('vector')
-                            }
-                        })
+                self._process_liveness_results(batch_res)
             except Exception as e:
                 logger.debug(f"Watchdog loop notice: {e}")
+
+    def _process_liveness_results(self, batch_res: Dict[str, Dict[str, Any]]):
+        """Terapkan histeresis lalu siarkan event offline. Perangkat dinyatakan offline HANYA
+        setelah `offline_threshold` miss BERTURUT-TURUT; sekali menjawab → penghitungnya reset.
+        Ini menghentikan flapping perangkat power-save (Doze) yang miss terpencar tanpa memperlambat
+        deteksi offline-sungguhan lebih dari beberapa siklus."""
+        seen_ips = set()
+        for ip, res in batch_res.items():
+            seen_ips.add(ip)
+            if res.get('is_alive'):
+                # Menjawab (vektor apa pun) → reset penghitung miss.
+                self._consecutive_misses.pop(ip, None)
+                continue
+            misses = self._consecutive_misses.get(ip, 0) + 1
+            self._consecutive_misses[ip] = misses
+            if misses >= self._offline_threshold:
+                logger.info(f"Watchdog detected offline device: {ip} ({misses} miss berturut-turut)")
+                self.event_callback({
+                    "event": "device_offline_pulse",
+                    "data": {
+                        "ip": ip,
+                        "mac": res.get('mac'),
+                        "vector": res.get('vector')
+                    }
+                })
+        # Buang penghitung untuk perangkat yang tak lagi dilacak (mis. IP berganti) agar tak bocor.
+        for stale in [k for k in self._consecutive_misses if k not in seen_ips]:
+            self._consecutive_misses.pop(stale, None)
