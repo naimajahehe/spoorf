@@ -1695,4 +1695,43 @@ export async function runDatabaseTests() {
         await db.close();
         console.log('  ✓ Duplicate MAC repair: NULL speed preserves the active valid control limit');
     }
+
+    // Name-Unknown fix: a personalized hostname must upgrade a generic/Unknown profile name, and a
+    // generic value must never overwrite a personalized one. (Rotated MACs inherit the profile alias,
+    // so a profile stuck at 'Unknown' makes every rotation display 'Unknown' despite known rows.)
+    {
+        const { betterProfileName } = await import('../src/services/database');
+        assert.strictEqual(betterProfileName('Unknown', 'A55-milik-Hanif'), 'A55-milik-Hanif', 'personalized must upgrade generic');
+        assert.strictEqual(betterProfileName('A55-milik-Hanif', 'Unknown'), 'A55-milik-Hanif', 'generic must NOT overwrite personalized');
+        assert.strictEqual(betterProfileName('A55-milik-Hanif', 'android'), 'A55-milik-Hanif', 'generic candidate is ignored');
+        assert.strictEqual(betterProfileName('', 'MyPhone'), 'MyPhone', 'empty upgrades to personalized');
+        assert.strictEqual(betterProfileName('Unknown', 'android'), 'Unknown', 'generic candidate cannot upgrade generic current');
+        console.log('  ✓ Name propagation: betterProfileName upgrades generic to personalized, never downgrades');
+    }
+
+    // Name-Unknown backfill: an existing blocked profile stuck at alias/hostname 'Unknown' whose device
+    // rows carry a personalized hostname must be healed, so future rotated-MAC fusion inherits the real name.
+    {
+        const { DatabaseService } = await import('../src/services/database');
+        const db = new DatabaseService(':memory:');
+        await db.init();
+        const mk = (ip: string, mac: string): Device => ({
+            ip, mac, hostname: 'A55-milik-Hanif', vendor: 'Samsung', device_type: 'Mobile', os: 'Android',
+            rtt_ms: 5, open_ports: [], services: [], is_blocked: true, is_online: true, is_gateway: false,
+            dhcp_client_id: '01:56:e9:8d:38:1c:97'
+        });
+        await db.syncScanResults([mk('192.168.1.30', 'aa:bb:cc:00:00:01')]);
+        await db.setDeviceBlocked('aa:bb:cc:00:00:01', true);
+        // Force the profile name to the buggy 'Unknown' state (as seen in production).
+        (db as any).db.prepare(`UPDATE device_profiles SET alias='Unknown', hostname='Unknown' WHERE id='prof_aabbcc000001'`).run();
+
+        const healed = await db.backfillProfileNames();
+
+        const prof = (db as any).db.prepare(`SELECT alias, hostname FROM device_profiles WHERE id='prof_aabbcc000001'`).get() as any;
+        assert.strictEqual(prof.alias, 'A55-milik-Hanif', 'backfill must heal profile alias from a personalized device hostname');
+        assert.strictEqual(prof.hostname, 'A55-milik-Hanif', 'backfill must heal profile hostname');
+        assert.ok(healed >= 1, 'backfill must report at least one healed profile');
+        await db.close();
+        console.log('  ✓ Name backfill: an Unknown profile with a personalized device hostname is healed');
+    }
 }

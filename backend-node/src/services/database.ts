@@ -63,6 +63,21 @@ export function isGenericFactoryHostname(hostname: string): boolean {
 }
 
 /**
+ * Pilih nama profil terbaik antara nilai SEKARANG dan KANDIDAT. Kandidat hanya boleh menang bila ia
+ * hostname PERSONAL (bukan generik/'Unknown') DAN nilai sekarang kosong/generik. Mencegah 'Unknown'
+ * menimpa nama personal, dan meng-UPGRADE profil generik begitu hostname personal terlihat — akar
+ * bug "nama jadi Unknown saat rotasi MAC" (MAC baru mewarisi alias profil).
+ */
+export function betterProfileName(current: string | null | undefined, candidate: string | null | undefined): string {
+    const cur = (current || '').trim();
+    const cand = (candidate || '').trim();
+    if (cand && !isGenericFactoryHostname(cand) && (!cur || isGenericFactoryHostname(cur))) {
+        return cand;
+    }
+    return cur;
+}
+
+/**
  * TIER-1 guard: apakah client-id (DUID/Opt61) LAYAK dipakai untuk instant-match 100%.
  * Hanya colon-hex asli, ≥3 byte, bukan all-zero. Menolak placeholder/label (mis. legacy
  * "DUID_LLT") & nilai non-hex — kalau tidak, dua perangkat BERBEDA yang menyimpan placeholder
@@ -897,6 +912,38 @@ export class DatabaseService {
         return false;
     }
 
+    /**
+     * Sembuhkan profil yang alias/hostname-nya generik/'Unknown' padahal salah satu baris device di
+     * bawahnya punya hostname PERSONAL. Tanpa ini, MAC hasil rotasi yang fusi ke profil mewarisi
+     * alias 'Unknown' → tampil "Unknown" walau hostname aslinya diketahui. Mengembalikan jumlah
+     * profil yang diperbaiki. Aman & idempoten (hanya menaikkan generik→personal, tak pernah turun).
+     */
+    async backfillProfileNames(): Promise<number> {
+        await this.init();
+        const profiles = this.db.prepare(`SELECT id, alias, hostname FROM device_profiles`).all() as any[];
+        const pickPersonal = this.db.prepare(
+            `SELECT hostname FROM devices WHERE profile_id = ? AND hostname IS NOT NULL AND TRIM(hostname) != '' ORDER BY last_seen DESC`
+        );
+        const update = this.db.prepare(`UPDATE device_profiles SET alias = ?, hostname = ?, updated_at = datetime('now', 'localtime') WHERE id = ?`);
+        let healed = 0;
+        for (const p of profiles) {
+            const aliasGeneric = isGenericFactoryHostname((p.alias || '').trim());
+            const hostGeneric = isGenericFactoryHostname((p.hostname || '').trim());
+            if (!aliasGeneric && !hostGeneric) continue;
+            const rows = pickPersonal.all(p.id) as any[];
+            const personal = rows.map(r => (r.hostname || '').trim()).find(h => h && !isGenericFactoryHostname(h));
+            if (!personal) continue;
+            const newAlias = betterProfileName(p.alias, personal);
+            const newHost = betterProfileName(p.hostname, personal);
+            if (newAlias !== (p.alias || '').trim() || newHost !== (p.hostname || '').trim()) {
+                update.run(newAlias, newHost, p.id);
+                healed++;
+            }
+        }
+        if (healed > 0) console.log(`🏷️ [Profile Backfill] ${healed} profil dipulihkan namanya dari hostname personal perangkat.`);
+        return healed;
+    }
+
     async getDeviceByIp(ip: string): Promise<Device | null> {
         await this.init();
         const query = `
@@ -926,26 +973,32 @@ export class DatabaseService {
         const dev = this.db.prepare(`SELECT * FROM devices WHERE LOWER(mac) = LOWER(?)`).get(normMac) as any;
         if (dev) {
             const pId = dev.profile_id || deriveProfileId(dev.mac);
-            const pAlias = dev.alias || dev.hostname || 'Target Device';
 
-            // Dapatkan linked_macs yang ada
-            const existingProf = this.db.prepare(`SELECT linked_macs FROM device_profiles WHERE id = ?`).get(pId) as any;
+            // Dapatkan linked_macs + nama profil yang ada
+            const existingProf = this.db.prepare(`SELECT linked_macs, alias, hostname FROM device_profiles WHERE id = ?`).get(pId) as any;
             let linkedMacs: string[] = [normMac];
             if (existingProf && existingProf.linked_macs) {
                 const parsed = safeParseJson<string[]>(existingProf.linked_macs, []);
                 linkedMacs = Array.from(new Set([...parsed, normMac]));
             }
+            // Naikkan nama profil ke hostname PERSONAL bila ada; jangan biarkan 'Unknown'/generik
+            // menetap (akar bug "nama jadi Unknown" saat MAC rotasi mewarisi alias profil).
+            const candidate = dev.alias || dev.hostname || '';
+            const healedAlias = betterProfileName(existingProf?.alias, candidate) || 'Target Device';
+            const healedHost = betterProfileName(existingProf?.hostname, dev.hostname) || dev.hostname;
 
             const upsertProfileStmt = this.db.prepare(`
                 INSERT INTO device_profiles (id, alias, hostname, os, vendor, device_type, is_blocked, linked_macs, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now', 'localtime'))
                 ON CONFLICT(id) DO UPDATE SET
+                    alias = excluded.alias,
+                    hostname = excluded.hostname,
                     is_blocked = excluded.is_blocked,
                     linked_macs = excluded.linked_macs,
                     updated_at = datetime('now', 'localtime')
             `);
             upsertProfileStmt.run(
-                pId, pAlias, dev.hostname, dev.os, dev.vendor, dev.device_type,
+                pId, healedAlias, healedHost, dev.os, dev.vendor, dev.device_type,
                 isBlocked ? 1 : 0, JSON.stringify(linkedMacs)
             );
 

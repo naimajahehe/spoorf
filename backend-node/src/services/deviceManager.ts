@@ -634,6 +634,9 @@ export class DeviceManager extends EventEmitter {
 
     async init(): Promise<void> {
         await this.db.init();
+        // Sembuhkan profil yang namanya generik/'Unknown' dari hostname personal perangkatnya, agar
+        // MAC hasil rotasi tak lagi mewarisi nama "Unknown" (idempoten, hanya naik generik→personal).
+        try { await this.db.backfillProfileNames(); } catch (e: any) { console.warn('Notice profile name backfill:', e?.message); }
         const storedDevices = await this.db.getAllDevices();
         this.devices.clear();
         // Load in reverse (offline first, online last) so online devices cleanly overwrite any legacy stale IP duplicates
@@ -891,6 +894,9 @@ export class DeviceManager extends EventEmitter {
             // 2. Mendeteksi perangkat terblokir yang baru saja kembali ke jaringan
             // 3. Menandai perangkat yang tidak tertangkap sebagai is_online = false (bukan dihapus!)
             const { allDevices, autoReblockTargets, autoThrottleTargets, zombieSessionsToStop } = await this.db.syncScanResults(rawScanned);
+
+            // Sehatkan nama profil dari hostname personal yang baru dipelajari scan ini (idempoten).
+            try { await this.db.backfillProfileNames(); } catch (e: any) { console.warn('Notice profile name backfill (scan):', e?.message); }
 
             // Bersihkan sesi zombie lama dari MAC yang baru saja diarsipkan
             if (zombieSessionsToStop && zombieSessionsToStop.length > 0) {
