@@ -314,7 +314,11 @@ class SentinelShield:
             raise SpoofError(f"MAC gateway untuk {gw_ip} tidak dapat divalidasi")
 
         self_mac = get_self_mac()
-        win_alias = "Wi-Fi"
+        # Alias interface AKTIF (Wi-Fi / Ethernet / tethering) dari get_network_info, bukan
+        # hardcode 'Wi-Fi' — kalau di-hardcode, Set-NetNeighbor -InterfaceAlias 'Wi-Fi' gagal
+        # saat operator memakai kabel LAN atau adapter Wi-Fi kedua, dan Shield melempar
+        # SpoofError (BUG-8).
+        win_alias = info.get('interface') or "Wi-Fi"
         if not self._lock_kernel_neighbor(gw_ip, gw_mac, win_alias):
             raise SpoofError(f"Gagal mengunci neighbor gateway {gw_ip}")
 

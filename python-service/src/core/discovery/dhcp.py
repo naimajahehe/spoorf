@@ -134,6 +134,10 @@ class DHCPDiscoveredCache:
             if clean_ip and norm_mac:
                 self._ip_to_mac[clean_ip] = norm_mac
 
+            # Kembalikan entri terkaya (smart-merged) agar pemanggil/callback tidak memancarkan
+            # entri mentah berisi field kosong dari paket ACK telanjang (BUG-11).
+            return merged
+
     def get(self, key: str, default=None):
         """Mencari entri berdasarkan MAC address terlebih dahulu, lalu via mapping IP."""
         with self._lock:
@@ -578,13 +582,15 @@ def _handle_dhcp_packet(pkt) -> None:
             'last_seen': time.strftime("%Y-%m-%d %H:%M:%S")
         }
 
-        dhcp_cache.update(norm_mac, ip, dhcp_entry)
+        merged_entry = dhcp_cache.update(norm_mac, ip, dhcp_entry)
 
         logger.info(f"📱 [DHCP Sniffer] ({msg_type_name}): MAC={norm_mac} IP={ip or '?'} Host='{hostname}' Class='{vendor_class}' FP='{dhcp_fingerprint}' Lease='{lease_str}' GW='{router_ip}' Rogue={is_rogue_dhcp}")
 
         if _dhcp_callback:
             try:
-                _dhcp_callback(dhcp_entry)
+                # Pancarkan entri terkaya (smart-merged), bukan entri mentah — sebuah ACK tanpa
+                # Option 55/60 kalau tidak akan mengosongkan badge vendor/OS/hostname (BUG-11).
+                _dhcp_callback(merged_entry or dhcp_entry)
             except Exception as cb_err:
                 logger.debug(f"DHCP callback notice: {cb_err}")
     except Exception as e:

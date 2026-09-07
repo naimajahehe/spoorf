@@ -21,12 +21,16 @@ class NetworkTelemetrySampler:
         self.init_counters()
 
     @staticmethod
-    def _get_nic_counters():
-        """Kembalikan counter NIC dari SATU sumber konsisten: 'Wi-Fi' bila ada, jika tidak agregat.
-        Dipakai oleh init_counters() dan sample() agar seed & delta berasal dari sumber yang sama
-        (mencegah sampel pertama menghasilkan Mbps keliru akibat mismatch pernic vs agregat)."""
+    def _get_nic_counters(active_iface: str = ''):
+        """Kembalikan counter NIC dari SATU sumber konsisten: adapter AKTIF (active_iface) bila
+        tersedia, lalu 'Wi-Fi', jika tidak agregat. Meng-hardcode 'Wi-Fi' membuat throughput
+        selalu terbaca dari kartu Wi-Fi yang idle (0 byte) saat pengguna memakai kabel LAN /
+        tethering, sehingga grafik bandwidth mandek di 0.00 Mbps (BUG-15). Dipakai init_counters()
+        & sample() agar seed & delta berasal dari sumber yang sama."""
         try:
             pernic = psutil.net_io_counters(pernic=True)
+            if active_iface and active_iface in pernic:
+                return pernic[active_iface]
             wifi = pernic.get('Wi-Fi')
             if wifi is not None:
                 return wifi
@@ -34,9 +38,17 @@ class NetworkTelemetrySampler:
             pass
         return psutil.net_io_counters()
 
+    @staticmethod
+    def _active_iface() -> str:
+        """Nama adapter jaringan aktif saat ini (Wi-Fi / Ethernet / tethering)."""
+        try:
+            return (get_wifi_info() or {}).get('interface', '') or ''
+        except Exception:
+            return ''
+
     def init_counters(self):
         try:
-            counters = self._get_nic_counters()
+            counters = self._get_nic_counters(self._active_iface())
             self.last_bytes_recv = counters.bytes_recv
             self.last_bytes_sent = counters.bytes_sent
             self.last_time = time.time()
@@ -59,7 +71,7 @@ class NetworkTelemetrySampler:
         download_mbps = 0.0
         upload_mbps = 0.0
         try:
-            nic_stat = self._get_nic_counters()
+            nic_stat = self._get_nic_counters(wifi_info.get('interface', ''))
 
             if self.last_bytes_recv > 0 and is_connected:
                 delta_recv = max(0, nic_stat.bytes_recv - self.last_bytes_recv)

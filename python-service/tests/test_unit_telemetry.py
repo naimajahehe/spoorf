@@ -39,6 +39,29 @@ class TestTelemetryCounters(unittest.TestCase):
         self.assertEqual(ctr.bytes_recv, 1234)
         self.assertEqual(ctr.bytes_sent, 777)
 
+    def test_sample_reads_active_ethernet_not_idle_wifi(self):
+        """BUG-15: saat terhubung via kabel LAN, throughput harus dibaca dari adapter Ethernet
+        AKTIF, bukan kartu Wi-Fi idle (0 byte) yang membuat grafik bandwidth mandek di 0.00."""
+        from src.core.telemetry import NetworkTelemetrySampler
+        state = {'eth_recv': 1_000_000}
+
+        def counters(pernic=False):
+            if pernic:
+                return {'Wi-Fi': _Ctr(50, 50), 'Ethernet': _Ctr(state['eth_recv'], 0)}
+            return _Ctr(0, 0)
+
+        wifi_info = {'connected': True, 'interface': 'Ethernet', 'ssid': '',
+                     'signal': '', 'interface_type': 'ethernet'}
+
+        with patch('src.core.telemetry.get_wifi_info', return_value=wifi_info), \
+             patch('src.core.telemetry.psutil.net_io_counters', side_effect=counters):
+            sampler = NetworkTelemetrySampler()   # seed dari Ethernet (dengan fix)
+            state['eth_recv'] = 2_000_000          # +1 MB terunduh via Ethernet
+            result = sampler.sample()
+
+        self.assertGreater(result['download'], 0,
+                           "download harus mencerminkan trafik Ethernet aktif, bukan Wi-Fi idle")
+
     def test_init_seeds_from_same_source_as_sample(self):
         """Seed init_counters berasal dari sumber yang sama (Wi-Fi), bukan agregat berbeda,
         sehingga delta sampel pertama tidak keliru (negatif ter-clamp 0)."""

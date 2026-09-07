@@ -107,6 +107,25 @@ class TestSentinelShield(unittest.TestCase):
     @patch('src.core.shield.get_current_gateway')
     @patch('src.core.shield.SentinelShield._resolve_gateway_mac')
     @patch('src.core.shield.SentinelShield._lock_kernel_neighbor')
+    def test_enable_uses_active_interface_alias_not_hardcoded_wifi(self, mock_lock, mock_resolve_mac, mock_gw, mock_info):
+        """BUG-8: alias interface untuk Set-NetNeighbor harus dari adapter AKTIF (mis.
+        'Ethernet' saat pakai kabel LAN), bukan hardcode 'Wi-Fi' yang bikin Sentinel Shield
+        gagal (SpoofError) di jaringan kabel / adapter Wi-Fi kedua."""
+        mock_info.return_value = {'ip': '10.0.0.99', 'interface': 'Ethernet'}
+        mock_gw.return_value = '10.0.0.1'
+        mock_resolve_mac.return_value = '98:4a:6b:0f:4a:97'
+        mock_lock.return_value = True
+
+        self.shield.enable(mode='host_lock', auto_retaliate=False)
+
+        self.assertTrue(mock_lock.called, "_lock_kernel_neighbor harus dipanggil")
+        self.assertEqual(mock_lock.call_args.args[2], 'Ethernet',
+                         "win_alias harus dari interface aktif, bukan hardcode 'Wi-Fi'")
+
+    @patch('src.core.shield.get_network_info')
+    @patch('src.core.shield.get_current_gateway')
+    @patch('src.core.shield.SentinelShield._resolve_gateway_mac')
+    @patch('src.core.shield.SentinelShield._lock_kernel_neighbor')
     def test_enable_fails_when_gateway_mac_unresolved(
         self, mock_lock, mock_resolve_mac, mock_gw, mock_info
     ):
