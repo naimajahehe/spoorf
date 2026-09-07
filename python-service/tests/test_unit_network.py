@@ -206,13 +206,15 @@ class TestCoreNetwork(unittest.TestCase):
                 self._fake_addr(_s.AF_INET6, 'fe80::770f:1975:aee2:cec%14'),  # hanya link-local
             ]
         }
-        with patch('psutil.net_if_addrs', return_value=addrs):
+        with patch('psutil.net_if_addrs', return_value=addrs), \
+             patch('src.core.network.netifaces.gateways', return_value={}):
             self.assertFalse(has_ipv6_connectivity())
 
     def test_has_ipv6_false_when_no_ipv6(self):
         import socket as _s
         addrs = {'Wi-Fi': [self._fake_addr(_s.AF_INET, '10.80.45.139')]}
-        with patch('psutil.net_if_addrs', return_value=addrs):
+        with patch('psutil.net_if_addrs', return_value=addrs), \
+             patch('src.core.network.netifaces.gateways', return_value={}):
             self.assertFalse(has_ipv6_connectivity())
 
     def _fake_stats(self, isup):
@@ -228,7 +230,8 @@ class TestCoreNetwork(unittest.TestCase):
         addrs = {'Tailscale': [self._fake_addr(_s.AF_INET6, 'fd7a:115c:a1e0::1')]}
         stats = {'Tailscale': self._fake_stats(True)}
         with patch('psutil.net_if_addrs', return_value=addrs), \
-             patch('psutil.net_if_stats', return_value=stats):
+             patch('psutil.net_if_stats', return_value=stats), \
+             patch('src.core.network.netifaces.gateways', return_value={}):
             self.assertFalse(has_ipv6_connectivity())
 
     def test_has_ipv6_false_when_global_on_down_interface(self):
@@ -237,8 +240,28 @@ class TestCoreNetwork(unittest.TestCase):
         addrs = {'Ethernet': [self._fake_addr(_s.AF_INET6, '2404:8000:1024::45e1')]}
         stats = {'Ethernet': self._fake_stats(False)}
         with patch('psutil.net_if_addrs', return_value=addrs), \
-             patch('psutil.net_if_stats', return_value=stats):
+             patch('psutil.net_if_stats', return_value=stats), \
+             patch('src.core.network.netifaces.gateways', return_value={}):
             self.assertFalse(has_ipv6_connectivity())
+
+    def test_has_ipv6_true_when_ipv6_default_route_present(self):
+        """SP-4: bila operator TAK punya IPv6 global tapi jaringan menyediakan IPv6 (router RA →
+        ada RUTE DEFAULT IPv6), gerbang harus True agar penemuan+NDP-spoof IPv6 korban tetap
+        jalan (link-local NDP cukup, operator tak perlu alamat global). Tanpa ini, trafik korban
+        bocor lewat IPv6 (Happy Eyeballs) meski IPv4 diblokir 100%."""
+        import socket as _s
+        # Operator hanya punya link-local (tak ada global).
+        addrs = {'Wi-Fi': [
+            self._fake_addr(_s.AF_INET, '192.168.1.10'),
+            self._fake_addr(_s.AF_INET6, 'fe80::abcd%14'),
+        ]}
+        stats = {'Wi-Fi': self._fake_stats(True)}
+        # Router mengirim RA → OS memasang rute default IPv6 via link-local router.
+        gateways = {'default': {_s.AF_INET6: ('fe80::1', 'Wi-Fi')}}
+        with patch('psutil.net_if_addrs', return_value=addrs), \
+             patch('psutil.net_if_stats', return_value=stats), \
+             patch('src.core.network.netifaces.gateways', return_value=gateways):
+            self.assertTrue(has_ipv6_connectivity())
 
 
 if __name__ == '__main__':

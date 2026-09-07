@@ -255,6 +255,20 @@ def has_ipv6_connectivity() -> bool:
                     return True
     except Exception as e:
         logger.debug(f"Notice detecting IPv6 connectivity: {e}")
+
+    # (b) Operator mungkin TAK punya alamat IPv6 global (mis. SLAAC hanya memberi link-local, atau
+    # global ada di adapter lain), TAPI jaringan tetap menyediakan IPv6 bila router mengirim RA —
+    # ditandai adanya RUTE DEFAULT IPv6 (next-hop biasanya link-local router). Itu sudah cukup:
+    # NDP-spoof memakai link-local korban+gateway & dikirim dari link-local operator, tak butuh
+    # alamat global. Tanpa cek ini, gerbang IPv6 mati & trafik korban bocor via IPv6 (SP-4).
+    try:
+        v6_default = (netifaces.gateways() or {}).get('default', {}).get(netifaces.AF_INET6)
+        if v6_default:
+            next_hop = str(v6_default[0] if isinstance(v6_default, (tuple, list)) else v6_default).split('%')[0].strip()
+            if next_hop and next_hop not in ('::', '::1'):
+                return True
+    except Exception as e:
+        logger.debug(f"Notice detecting IPv6 default route: {e}")
     return False
 
 

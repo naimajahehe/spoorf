@@ -7,6 +7,7 @@ import unittest
 import threading
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+from scapy.all import ARP
 from src.core.spoofer import ARPSpoofer
 from src.exceptions.custom import SpoofError, SessionNotFoundError
 
@@ -690,13 +691,28 @@ class TestCoreSpoofer(unittest.TestCase):
         self.assertIsNotNone(self.spoofer._sessions[sid].get('blackhole_mac'))
         self.spoofer.stop(sid)
 
+        # Mode THROTTLE (1-99%) tidak memakai blackhole: fase pulih perlu trafik nyata lewat.
         sid2 = self.spoofer.start(
             victim_ip="192.168.1.56", victim_mac="00:11:22:33:44:56",
             gateway_ip="192.168.1.1", gateway_mac="00:aa:bb:cc:dd:ee",
-            speed_limit=0
+            speed_limit=50
         )
         self.assertIsNone(self.spoofer._sessions[sid2].get('blackhole_mac'))
         self.spoofer.stop(sid2)
+
+    @patch('src.core.spoofer.sendp')
+    def test_full_block_forces_blackhole_mac(self, mock_sendp):
+        """SP-5/D: blok penuh (speed_limit<=0, non-redirect) harus SELALU memakai blackhole MAC
+        agar trafik korban jatuh murni di L2 (AP), kebal status IP forwarding global Windows —
+        yang bila ON (mis. ada sesi redirect lain) akan meneruskan paket korban & membocorkan blok."""
+        sid = self.spoofer.start(
+            victim_ip="192.168.1.77", victim_mac="00:11:22:33:44:77",
+            gateway_ip="192.168.1.1", gateway_mac="00:aa:bb:cc:dd:ee",
+            speed_limit=0  # blackhole param default False → TETAP harus blackhole
+        )
+        self.assertIsNotNone(self.spoofer._sessions[sid].get('blackhole_mac'),
+                             "blok penuh harus memakai blackhole MAC (kebal forwarding leak)")
+        self.spoofer.stop(sid)
 
     @patch('src.core.spoofer.sendp')
     def test_start_dedups_old_session_by_mac_on_ip_change(self, mock_sendp):
@@ -721,6 +737,21 @@ class TestCoreSpoofer(unittest.TestCase):
         self.assertNotIn(sid_old, sessions,
                          "Sesi lama (IP lama, MAC sama) harus dibersihkan, bukan menjadi zombie")
         self.spoofer.stop(sid_new)
+
+    def test_build_spoof_packets_uses_dual_opcode(self):
+        """SP-3: paket poison harus DUAL-OPCODE (is-at + who-has). Kernel Android 11+/iOS
+        mengabaikan unsolicited ARP reply (is-at) tanpa permintaan; ARP request (who-has) yang
+        mengklaim gateway berada di poison_mac memaksa update cache ARP korban."""
+        pkts = self.spoofer._build_spoof_packets(
+            target_ip="192.168.1.55", spoof_ip="192.168.1.1",
+            target_mac="00:11:22:33:44:55", poison_mac="02:aa:bb:cc:dd:ee"
+        )
+        ops = sorted(p[ARP].op for p in pkts)
+        self.assertIn(1, ops, "harus ada ARP who-has (op=1) untuk memaksa update kernel modern")
+        self.assertIn(2, ops, "harus ada ARP is-at (op=2)")
+        for p in pkts:
+            self.assertEqual(p[ARP].hwsrc, "02:aa:bb:cc:dd:ee", "hwsrc setiap paket harus poison_mac")
+            self.assertEqual(p[ARP].psrc, "192.168.1.1", "psrc harus IP yang dipalsukan (gateway)")
 
     @patch('src.core.spoofer.sendp')
     def test_stop_all_broadcasts_stop_events_before_per_session_teardown(self, mock_sendp):
