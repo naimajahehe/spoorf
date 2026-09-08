@@ -1794,4 +1794,33 @@ export async function runDatabaseTests() {
         await db.close();
         console.log('  ✓ Name backfill: an Unknown profile with a personalized device hostname is healed');
     }
+
+    // ULTRAREVIEW #6: backfill across MULTIPLE profiles must heal each from ITS OWN device hostname
+    // (guards the grouped/batched lookup against cross-profile leakage).
+    {
+        const { DatabaseService } = await import('../src/services/database');
+        const db = new DatabaseService(':memory:');
+        await db.init();
+        const mk = (ip: string, mac: string, hostname: string): Device => ({
+            ip, mac, hostname, vendor: 'Samsung', device_type: 'Mobile', os: 'Android',
+            rtt_ms: 5, open_ports: [], services: [], is_blocked: true, is_online: true, is_gateway: false
+        });
+        await db.syncScanResults([
+            mk('192.168.1.40', 'aa:bb:cc:00:00:01', 'A55-milik-Hanif'),
+            mk('192.168.1.41', 'dd:ee:ff:00:00:02', 'iPhone-Budi')
+        ]);
+        await db.setDeviceBlocked('aa:bb:cc:00:00:01', true);
+        await db.setDeviceBlocked('dd:ee:ff:00:00:02', true);
+        (db as any).db.prepare(`UPDATE device_profiles SET alias='Unknown', hostname='Unknown'`).run();
+
+        const healed = await db.backfillProfileNames();
+
+        const p1 = (db as any).db.prepare(`SELECT alias, hostname FROM device_profiles WHERE id='prof_aabbcc000001'`).get() as any;
+        const p2 = (db as any).db.prepare(`SELECT alias, hostname FROM device_profiles WHERE id='prof_ddeeff000002'`).get() as any;
+        assert.strictEqual(p1.alias, 'A55-milik-Hanif', 'profil 1 harus sembuh dari hostname perangkatnya sendiri');
+        assert.strictEqual(p2.alias, 'iPhone-Budi', 'profil 2 harus sembuh dari hostname perangkatnya sendiri, bukan bocor dari profil lain');
+        assert.strictEqual(healed, 2, 'kedua profil harus terhitung sembuh');
+        await db.close();
+        console.log('  ✓ ULTRAREVIEW #6: backfill multi-profil menyembuhkan tiap profil dari hostname miliknya sendiri');
+    }
 }

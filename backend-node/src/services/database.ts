@@ -921,17 +921,26 @@ export class DatabaseService {
     async backfillProfileNames(): Promise<number> {
         await this.init();
         const profiles = this.db.prepare(`SELECT id, alias, hostname FROM device_profiles`).all() as any[];
-        const pickPersonal = this.db.prepare(
-            `SELECT hostname FROM devices WHERE profile_id = ? AND hostname IS NOT NULL AND TRIM(hostname) != '' ORDER BY last_seen DESC`
-        );
+        // Ambil SEMUA hostname perangkat sekali jalan (hindari N+1: satu SELECT per profil).
+        // Diurutkan per profil lalu last_seen DESC, sehingga hostname personal terbaru muncul lebih dulu.
+        const hostRows = this.db.prepare(
+            `SELECT profile_id, hostname FROM devices
+             WHERE profile_id IS NOT NULL AND hostname IS NOT NULL AND TRIM(hostname) != ''
+             ORDER BY profile_id, last_seen DESC`
+        ).all() as any[];
+        const hostsByProfile = new Map<string, string[]>();
+        for (const r of hostRows) {
+            const list = hostsByProfile.get(r.profile_id);
+            const name = (r.hostname || '').trim();
+            if (list) list.push(name); else hostsByProfile.set(r.profile_id, [name]);
+        }
         const update = this.db.prepare(`UPDATE device_profiles SET alias = ?, hostname = ?, updated_at = datetime('now', 'localtime') WHERE id = ?`);
         let healed = 0;
         for (const p of profiles) {
             const aliasGeneric = isGenericFactoryHostname((p.alias || '').trim());
             const hostGeneric = isGenericFactoryHostname((p.hostname || '').trim());
             if (!aliasGeneric && !hostGeneric) continue;
-            const rows = pickPersonal.all(p.id) as any[];
-            const personal = rows.map(r => (r.hostname || '').trim()).find(h => h && !isGenericFactoryHostname(h));
+            const personal = (hostsByProfile.get(p.id) || []).find(h => h && !isGenericFactoryHostname(h));
             if (!personal) continue;
             const newAlias = betterProfileName(p.alias, personal);
             const newHost = betterProfileName(p.hostname, personal);

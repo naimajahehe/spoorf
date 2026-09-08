@@ -55,6 +55,27 @@ class TestUnitSpooferV6(unittest.TestCase):
         self.assertTrue(p_ra.haslayer(ICMPv6ND_RA))
         self.assertEqual(p_ra[ICMPv6ND_RA].routerlifetime, 0)
 
+    def test_ndp_packets_have_hlim_255(self):
+        """Regression guard: SEMUA paket NDP (NA & RA) keluar dengan Hop Limit = 255.
+
+        RFC 4861 §7.1.2 mewajibkan hlim=255; peer Windows/iOS/Android membuang senyap
+        paket NDP dengan hlim != 255. Meski field default IPv6.hlim=64, Scapy meng-override
+        menjadi 255 saat payload adalah pesan ICMPv6 ND (overload_fields), jadi NA yang
+        dibangun tanpa `hlim=` eksplisit pun sudah 255 di kawat. Test ini mengunci invarian
+        itu agar refaktor pembangunan paket di masa depan tidak diam-diam menurunkannya ke 64.
+        """
+        pkts = self.spoofer._build_spoof_packets(
+            self.victim_ip,
+            self.victim_mac,
+            self.gateway_ip,
+            self.gateway_mac,
+            self.spoofer._self_mac
+        )
+        na_victim, na_gateway, ra_drop = pkts[0], pkts[1], pkts[2]
+        self.assertEqual(na_victim[IPv6].hlim, 255, 'NA ke korban wajib hlim=255')
+        self.assertEqual(na_gateway[IPv6].hlim, 255, 'NA ke gateway wajib hlim=255')
+        self.assertEqual(ra_drop[IPv6].hlim, 255, 'RA drop wajib hlim=255')
+
     def test_build_restore_packets(self):
         """Uji apakah paket restorasi resmi terbentuk sempurna."""
         pkts = self.spoofer._build_restore_packets(
