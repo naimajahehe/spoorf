@@ -1415,6 +1415,32 @@ export async function runDeviceManagerTests() {
         console.log('  ✓ DUAL-STACK UI: _attachSpoofCutStatus melekatkan status cut IPv4+IPv6 per device');
     }
 
+    // ULTRA #1 wiring: scanNetwork meneruskan set session_id HIDUP (active saja) engine ke syncScanResults.
+    {
+        const python: any = new EventEmitter();
+        python.scan = async () => [];
+        python.stopSpoof = async () => {};
+        python.getStatus = async () => ({
+            sessions: {
+                sid_live: { victim_mac: 'aa:aa:aa:aa:aa:aa', active: true },
+                sid_dead: { victim_mac: 'bb:bb:bb:bb:bb:bb', active: false }
+            }
+        });
+        let captured: any = 'UNSET';
+        const db: any = {
+            syncScanResults: async (_scanned: any[], liveSessionIds?: Set<string>) => {
+                captured = liveSessionIds;
+                return { allDevices: [], autoReblockTargets: [], autoThrottleTargets: [], zombieSessionsToStop: [] };
+            }
+        };
+        const manager = new DeviceManager(python, db);
+        await manager.scanNetwork();
+        assert.ok(captured instanceof Set, 'scanNetwork harus mengoper Set sesi-hidup ke syncScanResults');
+        assert.strictEqual(captured.has('sid_live'), true, 'sesi active disertakan');
+        assert.strictEqual(captured.has('sid_dead'), false, 'sesi inactive dikecualikan');
+        console.log('  ✓ ULTRA #1 wiring: scanNetwork mengoper session_id hidup engine ke syncScanResults');
+    }
+
     // Test 25: a new DHCP device during Method 1 must not queue a second scan.
     {
         const python: any = new EventEmitter();

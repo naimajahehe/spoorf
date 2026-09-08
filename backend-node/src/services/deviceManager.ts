@@ -348,6 +348,25 @@ export class DeviceManager extends EventEmitter {
      * - Tak diblokir → cut_status dikosongkan (indikator tak tampil).
      * Engine tak terjangkau → biarkan nilai lama (tak menimpa dengan data kosong).
      */
+    /**
+     * Kumpulan session_id yang BENAR-BENAR aktif di engine (poison sedang jalan). Dipakai
+     * syncScanResults untuk membedakan blok yang ter-enforce vs session_id basi (sesi mati).
+     * Mengembalikan undefined bila engine tak terjangkau → syncScanResults tak memicu reblock massal.
+     */
+    private async _getLiveEngineSessionIds(): Promise<Set<string> | undefined> {
+        try {
+            const status = await this.python.getStatus();
+            const sessions = (status && status.sessions) || {};
+            const live = new Set<string>();
+            for (const [sid, s] of Object.entries(sessions as Record<string, any>)) {
+                if (s && s.active) live.add(sid);
+            }
+            return live;
+        } catch {
+            return undefined;
+        }
+    }
+
     private async _attachSpoofCutStatus(): Promise<void> {
         let sessions: Record<string, any>;
         try {
@@ -961,7 +980,11 @@ export class DeviceManager extends EventEmitter {
             // 1. Mempertahankan is_blocked jika perangkat pernah diblokir
             // 2. Mendeteksi perangkat terblokir yang baru saja kembali ke jaringan
             // 3. Menandai perangkat yang tidak tertangkap sebagai is_online = false (bukan dihapus!)
-            const { allDevices, autoReblockTargets, autoThrottleTargets, zombieSessionsToStop } = await this.db.syncScanResults(rawScanned);
+            // Ambil daftar sesi HIDUP engine agar syncScanResults dapat mendeteksi session_id BASI
+            // (device ditandai blok tapi sesinya sudah mati di engine) → jadikan target reblock &
+            // bersihkan session_id. undefined bila engine tak terjangkau (fallback: percayai nilai tersimpan).
+            const liveSessionIds = await this._getLiveEngineSessionIds();
+            const { allDevices, autoReblockTargets, autoThrottleTargets, zombieSessionsToStop } = await this.db.syncScanResults(rawScanned, liveSessionIds);
 
             // Sehatkan nama profil dari hostname personal yang baru dipelajari scan ini (idempoten).
             try { if (typeof this.db.backfillProfileNames === "function") await this.db.backfillProfileNames(); } catch (e: any) { console.warn('Notice profile name backfill (scan):', e?.message); }

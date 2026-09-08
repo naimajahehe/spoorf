@@ -1279,7 +1279,7 @@ export class DatabaseService {
      * - Menandai perangkat yang tidak tertangkap sebagai is_online = 0 (bukan dihapus!)
      * - Dijalankan dalam transaksi atomik native SQLite dengan auto-rollback bila terjadi kegagalan.
      */
-    async syncScanResults(scannedDevices: Device[]): Promise<{
+    async syncScanResults(scannedDevices: Device[], liveSessionIds?: Set<string>): Promise<{
         allDevices: Device[];
         autoReblockTargets: Device[];
         autoThrottleTargets: Device[];
@@ -1394,6 +1394,10 @@ export class DatabaseService {
                 last_seen = datetime('now', 'localtime')
         `;
         const upsertStmt = this.db.prepare(upsertQuery);
+
+        // #3 higiene: nol-kan session_id basi. Upsert ON CONFLICT tak menyentuh session_id, jadi
+        // butuh UPDATE terpisah agar nilai basi tak bertahan di DB & menipu keputusan reblock berikutnya.
+        const clearSessionStmt = this.db.prepare(`UPDATE devices SET session_id = NULL WHERE LOWER(mac) = LOWER(?)`);
 
         const setOfflineStmt = this.db.prepare(`
             UPDATE devices
@@ -1515,8 +1519,15 @@ export class DatabaseService {
                     }
                 }
 
-                // Perangkat perlu auto-reblock/auto-throttle HANYA jika belum aktif sesi spoof-nya (baru online / ganti MAC / belum ada session_id)
-                const needsSpoofSession = !existing || !existing.is_online || !existing.session_id;
+                // Sesi tersimpan yang TIDAK ada di daftar sesi HIDUP engine = BASI (mati) → perlakukan
+                // sebagai belum ter-enforce. Hanya bila info engine tersedia (liveSessionIds != undefined);
+                // bila engine tak terjangkau, percayai session_id tersimpan (hindari badai reblock palsu).
+                if (liveSessionIds !== undefined && sessionId && !liveSessionIds.has(sessionId)) {
+                    sessionId = undefined; // agar #1 menjadikannya target reblock
+                    clearSessionStmt.run(macKey); // #3: nol-kan session_id basi di DB (upsert ON CONFLICT tak menyentuhnya)
+                }
+                // Perangkat perlu auto-reblock/auto-throttle HANYA jika belum aktif sesi spoof-nya (baru online / ganti MAC / sesi basi)
+                const needsSpoofSession = !existing || !existing.is_online || !sessionId;
 
                 if (isBlocked && currentSpeedLimit === 0 && needsSpoofSession) {
                     autoReblockTargets.push({

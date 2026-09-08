@@ -671,6 +671,44 @@ export async function runDatabaseTests() {
         console.log('  ✓ SQLite Engine: In-memory SQLite DatabaseService CRUD, Auto-Reblock, and JSON arrays verified');
     }
 
+    // ULTRA #1+#3: syncScanResults must verify session_id against the engine's LIVE sessions.
+    // Stale session_id (blocked device whose engine session died) -> re-block target + cleared in DB.
+    {
+        const { DatabaseService } = await import('../src/services/database');
+        const db = new DatabaseService(':memory:');
+        await db.init();
+        const mac = 'ae:11:22:33:44:55';
+        const mkdev = (): Device => ({
+            ip: '192.168.1.90', mac, hostname: 'Cam', vendor: 'Ezviz', device_type: 'IP Camera / IoT', os: '',
+            rtt_ms: 3, open_ports: [], services: [], is_blocked: false, is_online: true, is_gateway: false
+        });
+        await db.syncScanResults([mkdev()]);
+        await db.setDeviceBlocked(mac, true, 'sess_dead');
+        await db.setDeviceSpeedLimit(mac, 0); // full block (speed_limit=0), as _blockDeviceImpl does
+
+        // #1: rescan online, engine's LIVE sessions do NOT include 'sess_dead' -> must be re-block target.
+        const rDead = await db.syncScanResults([mkdev()], new Set(['sess_other']));
+        assert.ok(rDead.autoReblockTargets.some(d => d.mac === mac), '#1: device with dead engine session must be an auto-reblock target');
+        // #3: the dead session_id must be cleared from the DB (hygiene).
+        const afterDead = await db.getDeviceByMac(mac);
+        assert.strictEqual(afterDead?.session_id, undefined, '#3: dead session_id must be nulled in DB');
+        assert.strictEqual(afterDead?.is_blocked, true, 'block intent must be preserved');
+
+        // Live session -> NOT re-targeted (no churn for healthy blocks).
+        await db.setDeviceBlocked(mac, true, 'sess_live');
+        await db.setDeviceSpeedLimit(mac, 0);
+        const rLive = await db.syncScanResults([mkdev()], new Set(['sess_live']));
+        assert.ok(!rLive.autoReblockTargets.some(d => d.mac === mac), 'live engine session -> must NOT be re-blocked (no churn)');
+
+        // Backward-compat: no liveSessionIds -> trust stored session_id (avoid re-block storm when engine info absent).
+        await db.setDeviceBlocked(mac, true, 'sess_x');
+        await db.setDeviceSpeedLimit(mac, 0);
+        const rNoInfo = await db.syncScanResults([mkdev()]);
+        assert.ok(!rNoInfo.autoReblockTargets.some(d => d.mac === mac), 'without engine info -> trust stored session_id');
+        await db.close();
+        console.log('  ✓ ULTRA #1+#3: syncScanResults re-blocks dead engine sessions & clears stale session_id');
+    }
+
     // Test 13: archiveStaleDevices — only anonymous long-offline devices are archived,
     // configured/recent/online devices are protected.
     {
