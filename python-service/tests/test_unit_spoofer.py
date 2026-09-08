@@ -787,6 +787,38 @@ class TestCoreSpoofer(unittest.TestCase):
                          "stop_all harus broadcast SEMUA stop_event sebelum teardown per-sesi pertama")
         self.assertEqual(len(self.spoofer.get_all_sessions()), 0, "semua sesi harus terhenti")
 
+    def test_get_sessions_reports_dualstack_ipv6_status(self):
+        """OBSERVABILITY: get_sessions() harus menyertakan status IPv6/NDP per sesi (bukan hanya
+        IPv4), agar kebocoran IPv6 (device dual-stack tanpa sesi NDP aktif) terlihat tanpa sniff.
+        status: 'cut' (NDP aktif) | 'leak' (punya target IPv6 tapi NDP tak aktif) | 'n/a' (IPv4-only)."""
+        def mk(ip, mac, v6=None, v6id=None):
+            return {'victim_ip': ip, 'victim_mac': mac, 'gateway_ip': '192.168.1.1',
+                    'gateway_mac': '1c:60:d2:6a:9a:48', 'speed_limit': 0, 'active': True,
+                    'restore_failed': False, 'started_at': 123.0, 'packets_sent': 10,
+                    'victim_ipv6': v6, 'gateway_ipv6': 'fe80::1' if v6 else None, 'v6_session_id': v6id}
+        self.spoofer._sessions = {
+            's_cut':  mk('192.168.1.50', 'aa:aa:aa:aa:aa:aa', v6='fe80::50', v6id='v6_active'),
+            's_v4':   mk('192.168.1.51', 'bb:bb:bb:bb:bb:bb'),
+            's_leak': mk('192.168.1.52', 'cc:cc:cc:cc:cc:cc', v6='fe80::52', v6id='v6_gone'),
+        }
+        with patch('src.core.spoofer.ndp_spoofer.get_status',
+                   return_value={'active_sessions': 1,
+                                 'sessions': {'v6_active': {'active': True, 'packets_sent': 7}}}):
+            out = self.spoofer.get_sessions()
+        # Bersihkan sesi injeksi agar teardown (stop_all) tak mencoba menghentikannya.
+        self.spoofer._sessions = {}
+        # IPv4 fields tetap ada (backward compatible)
+        self.assertEqual(out['s_cut']['victim_ip'], '192.168.1.50')
+        self.assertEqual(out['s_cut']['packets_sent'], 10)
+        # Setiap sesi punya blok ipv6 dengan status yang benar
+        self.assertEqual(out['s_cut']['ipv6']['status'], 'cut')
+        self.assertTrue(out['s_cut']['ipv6']['active'])
+        self.assertEqual(out['s_cut']['ipv6']['packets_sent'], 7)
+        self.assertEqual(out['s_v4']['ipv6']['status'], 'n/a')
+        self.assertFalse(out['s_v4']['ipv6']['active'])
+        self.assertEqual(out['s_leak']['ipv6']['status'], 'leak')
+        self.assertFalse(out['s_leak']['ipv6']['active'])
+
 
 class TestSpooferInterfaceSelection(unittest.TestCase):
     """Uji refresh_interface ASLI (tanpa setUp yang mem-mock refresh_interface)."""

@@ -739,9 +739,27 @@ class ARPSpoofer:
         logger.info("✅ Semua session dihentikan")
 
     def get_sessions(self) -> Dict[str, Dict[str, Any]]:
+        # Snapshot status NDP/IPv6 lebih dulu (DI LUAR self._lock) agar tak ada nested-lock,
+        # lalu gabungkan per-sesi → status dual-stack (IPv4 + IPv6) terlihat dalam satu tempat.
+        # Tanpa ini, /api/status hanya menampilkan IPv4 dan kebocoran IPv6 tak terlihat tanpa sniff.
+        try:
+            ndp_sessions = ndp_spoofer.get_status().get('sessions', {})
+        except Exception:
+            ndp_sessions = {}
         with self._lock:
-            return {
-                sid: {
+            out: Dict[str, Dict[str, Any]] = {}
+            for sid, s in self._sessions.items():
+                v6_target = s.get('victim_ipv6')
+                v6_id = s.get('v6_session_id')
+                v6_sess = ndp_sessions.get(v6_id) if v6_id else None
+                v6_active = bool(v6_sess and v6_sess.get('active'))
+                if not v6_target:
+                    v6_status = 'n/a'      # device IPv4-only: tak ada IPv6 untuk diputus
+                elif v6_active:
+                    v6_status = 'cut'      # IPv6 ikut diracun (NDP aktif)
+                else:
+                    v6_status = 'leak'     # dual-stack TAPI tak ada sesi NDP aktif → bocor IPv6
+                out[sid] = {
                     'victim_ip': s['victim_ip'],
                     'victim_mac': s['victim_mac'],
                     'gateway_ip': s['gateway_ip'],
@@ -750,10 +768,16 @@ class ARPSpoofer:
                     'active': s['active'],
                     'restore_failed': s.get('restore_failed', False),
                     'started_at': s['started_at'],
-                    'packets_sent': s['packets_sent']
+                    'packets_sent': s['packets_sent'],
+                    'ipv6': {
+                        'target': v6_target,
+                        'v6_session_id': v6_id,
+                        'active': v6_active,
+                        'packets_sent': (v6_sess or {}).get('packets_sent', 0),
+                        'status': v6_status,   # 'cut' | 'leak' | 'n/a'
+                    },
                 }
-                for sid, s in self._sessions.items()
-            }
+            return out
 
     @property
     def is_running(self) -> bool:
