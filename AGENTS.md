@@ -103,3 +103,14 @@ d:/spoorf/
 - **Windows Console Unicode**: Do not print non-ASCII emojis (`🎉`, `🚀`) directly to the Windows terminal in scripts unless UTF-8 output mode is explicitly configured, or you will trigger `UnicodeEncodeError: 'charmap'`.
 - **Npcap Driver Requirement**: Scapy requires the Npcap driver to inject Layer 2 raw Ethernet frames on Windows. If Scapy complains about interfaces, check `ifaces` in `src.core.spoofer`.
 - **Background Processes**: Do not leave unmanaged child processes running. Always cleanly terminate connections or test clients.
+
+---
+
+## 6. Engineering Methodology & Superpowers Integration
+
+This repository embeds the **Superpowers** engineering methodology (`.agents/plugins/superpowers` and `.agents/rules/superpowers.md`):
+- **Brainstorming & Planning First**: Before implementing features, brainstorm requirements and write modular implementation plans.
+- **Test-Driven Development (TDD)**: Write automated tests before implementation; maintain 100% passing suites across Python and Node.js.
+- **Systematic Debugging**: Diagnose bugs via hypothesis testing and root-cause evidence rather than speculative tweaks.
+- **Verification Before Completion**: Run full test verification suites (`SPEC-007`) before asserting completion or committing.
+
