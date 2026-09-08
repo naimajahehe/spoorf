@@ -1121,6 +1121,76 @@ class TestRedirector(unittest.TestCase):
         self.assertTrue(observed.get("dns"), "self._lock harus sudah bebas saat dns.stop()")
         self.assertTrue(observed.get("arp"), "self._lock harus sudah bebas saat spoofer.stop()")
 
+    def test_start_and_stop_redirect_are_serialized(self):
+        """ULTRAREVIEW-2 #2/#3: start_redirect tak boleh masuk seksi kritisnya saat stop_redirect
+        sedang teardown DI LUAR self._lock. Jendela itu dulu membiarkan start membangun sesi/portal
+        fresh yang lalu ditimpa oleh re-add stop (resource bocor) atau bertabrakan di port 80."""
+        import threading
+        import time
+        spoofer = MagicMock()
+        spoofer._self_mac = "a8:3b:76:0c:dc:55"
+        mgr = RedirectManager(spoofer)
+
+        # Sesi lama agar stop_redirect punya yang dibongkar.
+        mgr._sessions["192.168.1.50"] = {
+            "victim_ip": "192.168.1.50",
+            "cleanup_arp_session_ids": [],
+            "dns_spoofer": None,
+            "portal_server": None,
+        }
+
+        ev_in_teardown = threading.Event()
+        ev_release_stop = threading.Event()
+        flags = {"overlap": False}
+
+        def slow_release(session):
+            ev_in_teardown.set()
+            ev_release_stop.wait(3.0)
+            return []
+        mgr._release_session_io = slow_release
+
+        def guarded_start(**kwargs):
+            # Bila ini jalan selagi stop masih di teardown → start/stop overlap (bug).
+            if ev_in_teardown.is_set() and not ev_release_stop.is_set():
+                flags["overlap"] = True
+            return {"victim_ip": kwargs.get("victim_ip")}
+        mgr._start_session_unlocked = guarded_start
+
+        errors = []
+
+        def run_stop():
+            try:
+                mgr.stop_redirect("192.168.1.50")
+            except Exception as e:
+                errors.append(("stop", e))
+
+        def run_start():
+            try:
+                mgr.start_redirect("192.168.1.51", "aa:bb:cc:dd:ee:ff",
+                                   "192.168.1.1", "11:22:33:44:55:66", "testuser")
+            except Exception as e:
+                errors.append(("start", e))
+
+        with patch("src.core.redirector.manager.get_network_info",
+                   return_value={"ip": "192.168.1.2", "gateway": "192.168.1.1"}):
+            t_stop = threading.Thread(target=run_stop)
+            t_stop.start()
+            self.assertTrue(ev_in_teardown.wait(3.0), "stop harus mencapai teardown")
+            t_start = threading.Thread(target=run_start)
+            t_start.start()
+            # Beri start kesempatan mencapai seksi kritis: versi buggy ~ms; versi fixed terblokir
+            # di lock lifecycle dan tak pernah menandai overlap.
+            time.sleep(0.4)
+            overlap = flags["overlap"]
+            ev_release_stop.set()
+            t_stop.join(3.0)
+            t_start.join(3.0)
+
+        self.assertEqual([e for e in errors if e[0] == "start"], [],
+                         "start_redirect tidak boleh error di jalur uji ini")
+        self.assertFalse(overlap,
+            "start_redirect masuk seksi kritis saat stop_redirect teardown — start/stop tak terserialisasi")
+
 
 if __name__ == "__main__":
     unittest.main()

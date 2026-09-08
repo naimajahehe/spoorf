@@ -74,5 +74,34 @@ class TestTelemetryCounters(unittest.TestCase):
         self.assertEqual(sampler.last_bytes_sent, 500_000)
 
 
+    def test_sample_ignores_delta_on_adapter_switch(self):
+        """ULTRAREVIEW-2 #6: saat adapter aktif berganti (Wi-Fi->Ethernet) ANTARA seed dan sample,
+        delta antar-NIC tak bermakna dan tak boleh menghasilkan spike phantom; tick itu dilaporkan
+        0 lalu di-reseed ke adapter baru."""
+        from src.core.telemetry import NetworkTelemetrySampler
+        state = {'iface': 'Wi-Fi'}
+
+        def counters(pernic=False):
+            if pernic:
+                return {'Wi-Fi': _Ctr(5_000_000, 1_000_000),
+                        'Ethernet': _Ctr(900_000_000, 800_000_000)}
+            return _Ctr(0, 0)
+
+        def wifi_info(*a, **k):
+            return {'connected': True, 'interface': state['iface'], 'ssid': '',
+                    'signal': '', 'interface_type': 'ethernet'}
+
+        with patch('src.core.telemetry.get_wifi_info', side_effect=wifi_info), \
+             patch('src.core.telemetry.psutil.net_io_counters', side_effect=counters):
+            sampler = NetworkTelemetrySampler()   # seed dari Wi-Fi
+            state['iface'] = 'Ethernet'            # user pindah ke Ethernet sebelum sample
+            result = sampler.sample()
+
+        self.assertEqual(result['download'], 0.0,
+                         "pergantian adapter tidak boleh menghasilkan spike phantom pada tick itu")
+        self.assertEqual(result['upload'], 0.0)
+        self.assertEqual(sampler.last_iface, 'Ethernet', "iface harus di-reseed ke adapter baru")
+
+
 if __name__ == '__main__':
     unittest.main()

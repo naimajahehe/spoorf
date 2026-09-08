@@ -181,6 +181,73 @@ class TestTransparentGateway(unittest.TestCase):
         self.gateway_mgr.clear_dns_logs()
         self.assertEqual(len(self.gateway_mgr.get_dns_logs()), 0)
 
+    def test_start_and_stop_gateway_are_serialized(self):
+        """ULTRAREVIEW-2 #4: start_gateway tak boleh membangun sesi (spoofer.start/sniffer.start)
+        saat stop_gateway sedang teardown DI LUAR self._lock — jendela itu bisa meng-orphan
+        thread GatewayDNSSniffer (dua start bersamaan) / bocor resource."""
+        import threading
+        import time
+        spoofer = MagicMock()
+        spoofer._self_mac = "a8:3b:76:0c:dc:55"
+        spoofer._interface = "iface"
+        spoofer._win_interface_name = "Wi-Fi"
+        mgr = TransparentGatewayManager(spoofer)
+
+        mgr._sessions["192.168.1.50"] = {
+            "victim_ip": "192.168.1.50", "sniffer": MagicMock(), "arp_session_id": "arp_old"
+        }
+
+        ev_in_teardown = threading.Event()
+        ev_release = threading.Event()
+        flags = {"overlap": False}
+
+        def slow_teardown(victim_ip, session):
+            ev_in_teardown.set()
+            ev_release.wait(3.0)
+        mgr._teardown_session = slow_teardown
+
+        def guarded_spoofer_start(*a, **k):
+            if ev_in_teardown.is_set() and not ev_release.is_set():
+                flags["overlap"] = True
+            return "arp_new"
+        spoofer.start.side_effect = guarded_spoofer_start
+
+        errors = []
+
+        def run_stop():
+            try:
+                mgr.stop_gateway("192.168.1.50")
+            except Exception as e:
+                errors.append(("stop", e))
+
+        def run_start():
+            try:
+                mgr.start_gateway("192.168.1.51", "aa:bb:cc:dd:ee:ff",
+                                  "192.168.1.1", "11:22:33:44:55:66")
+            except Exception as e:
+                errors.append(("start", e))
+
+        with patch("src.core.redirector.transparent_gateway.get_network_info",
+                   return_value={"ip": "192.168.1.2", "gateway": "192.168.1.1"}), \
+             patch("src.core.redirector.transparent_gateway.set_ip_forwarding"), \
+             patch("src.core.redirector.transparent_gateway.GatewayDNSSniffer",
+                   return_value=MagicMock()):
+            t_stop = threading.Thread(target=run_stop)
+            t_stop.start()
+            self.assertTrue(ev_in_teardown.wait(3.0), "stop harus mencapai teardown")
+            t_start = threading.Thread(target=run_start)
+            t_start.start()
+            time.sleep(0.4)
+            overlap = flags["overlap"]
+            ev_release.set()
+            t_stop.join(3.0)
+            t_start.join(3.0)
+
+        self.assertEqual([e for e in errors if e[0] == "start"], [],
+                         "start_gateway tidak boleh error di jalur uji ini")
+        self.assertFalse(overlap,
+            "start_gateway membangun sesi saat stop_gateway teardown — start/stop tak terserialisasi")
+
 
 if __name__ == "__main__":
     unittest.main()

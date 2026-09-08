@@ -408,6 +408,12 @@ class TransparentGatewayManager:
         }
         self._dns_logs: deque = deque(maxlen=200)
         self._lock = threading.Lock()
+        # Lock SIKLUS-HIDUP: menserialisasi start/stop_gateway end-to-end. `self._lock` (data)
+        # sengaja DILEPAS saat _teardown_session (sniffer.stop() men-join thread yang callback DNS-nya
+        # butuh self._lock — BUG-16). Jendela itu membiarkan start & stop saling menyela → sniffer
+        # ter-orphan. Lock terpisah ini menutupnya tanpa menahan self._lock saat join. Urutan
+        # akuisisi selalu _op_lock → _lock, tak pernah terbalik (callback DNS hanya pakai _lock).
+        self._op_lock = threading.RLock()
 
     def _get_controller_ip_and_mac(self):
         info = get_network_info()
@@ -426,7 +432,12 @@ class TransparentGatewayManager:
             except Exception as e:
                 logger.debug(f"Notice broadcasting gateway DNS query event: {e}")
 
-    def start_gateway(
+    def start_gateway(self, *args, **kwargs) -> Dict[str, Any]:
+        """Wrapper serialisasi siklus-hidup (lihat _op_lock): cegah interleave dengan stop_*."""
+        with self._op_lock:
+            return self._start_gateway_impl(*args, **kwargs)
+
+    def _start_gateway_impl(
         self,
         victim_ip: str,
         victim_mac: str,
@@ -532,7 +543,12 @@ class TransparentGatewayManager:
 
         logger.info(f"🏁 [Transparent Gateway] Sesi {victim_ip} dihentikan.")
 
-    def stop_gateway(self, victim_ip: str) -> bool:
+    def stop_gateway(self, *args, **kwargs) -> bool:
+        """Wrapper serialisasi siklus-hidup (lihat _op_lock): cegah interleave dengan start_*."""
+        with self._op_lock:
+            return self._stop_gateway_impl(*args, **kwargs)
+
+    def _stop_gateway_impl(self, victim_ip: str) -> bool:
         # Pop under the lock, then tear down OUTSIDE the lock (see _teardown_session / BUG-16).
         with self._lock:
             if victim_ip not in self._sessions:
@@ -543,6 +559,11 @@ class TransparentGatewayManager:
         return True
 
     def stop_all(self):
+        """Wrapper serialisasi siklus-hidup (lihat _op_lock): cegah interleave dengan start_*."""
+        with self._op_lock:
+            return self._stop_all_impl()
+
+    def _stop_all_impl(self):
         with self._lock:
             sessions = list(self._sessions.items())
             self._sessions.clear()

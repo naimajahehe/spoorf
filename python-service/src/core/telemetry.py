@@ -16,6 +16,9 @@ class NetworkTelemetrySampler:
         self.last_time = time.time()
         self.last_bytes_recv = 0
         self.last_bytes_sent = 0
+        # Adapter sumber `last_bytes_*`. Delta hanya sah bila adapter sample == adapter seed;
+        # saat berganti (Wi-Fi<->Ethernet/tethering), counter antar-NIC tak sebanding.
+        self.last_iface = ''
         self.last_ping_time = 0.0
         self.cached_latency_ms = 12
         self.init_counters()
@@ -48,9 +51,11 @@ class NetworkTelemetrySampler:
 
     def init_counters(self):
         try:
-            counters = self._get_nic_counters(self._active_iface())
+            iface = self._active_iface()
+            counters = self._get_nic_counters(iface)
             self.last_bytes_recv = counters.bytes_recv
             self.last_bytes_sent = counters.bytes_sent
+            self.last_iface = iface
             self.last_time = time.time()
         except:
             pass
@@ -71,9 +76,14 @@ class NetworkTelemetrySampler:
         download_mbps = 0.0
         upload_mbps = 0.0
         try:
-            nic_stat = self._get_nic_counters(wifi_info.get('interface', ''))
+            current_iface = wifi_info.get('interface', '')
+            nic_stat = self._get_nic_counters(current_iface)
 
-            if self.last_bytes_recv > 0 and is_connected:
+            # Hitung delta HANYA bila counter berasal dari adapter yang SAMA dengan seed terakhir.
+            # Saat adapter berganti (Wi-Fi<->Ethernet/tethering), selisih antar-NIC menghasilkan
+            # spike phantom (adapter baru byte-nya jauh lebih besar) atau mandek 0 (lebih kecil,
+            # ter-clamp). Untuk tick pergantian: reseed saja, laporkan 0.
+            if current_iface == self.last_iface and self.last_bytes_recv > 0 and is_connected:
                 delta_recv = max(0, nic_stat.bytes_recv - self.last_bytes_recv)
                 delta_sent = max(0, nic_stat.bytes_sent - self.last_bytes_sent)
                 download_mbps = round((delta_recv * 8) / (dt * 1024 * 1024), 2)
@@ -81,6 +91,7 @@ class NetworkTelemetrySampler:
 
             self.last_bytes_recv = nic_stat.bytes_recv
             self.last_bytes_sent = nic_stat.bytes_sent
+            self.last_iface = current_iface
         except:
             pass
 

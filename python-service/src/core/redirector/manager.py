@@ -60,6 +60,13 @@ class RedirectManager:
         self._sessions: Dict[str, Dict[str, Any]] = {}
         self._partial_sessions: Dict[str, Dict[str, Any]] = {}
         self._lock = threading.Lock()
+        # Lock SIKLUS-HIDUP: menserialisasi start/stop end-to-end. `self._lock` (data) sengaja
+        # DILEPAS selama join teardown (BUG-16) — itu membuka jendela di mana start & stop saling
+        # menyela: start bisa membangun sesi/portal fresh selagi stop meng-teardown, lalu ditimpa
+        # re-add stop (bocor) atau bertabrakan di port 80. Lock terpisah ini menutup jendela itu
+        # tanpa menahan `self._lock` saat join, jadi callback DNS/ARP (yang butuh `self._lock`)
+        # tetap tak terhambat. Urutan akuisisi selalu _op_lock → _lock, tak pernah terbalik.
+        self._op_lock = threading.RLock()
 
     def _get_controller_ip_and_mac(self):
         info = get_network_info()
@@ -69,7 +76,12 @@ class RedirectManager:
             raise SpoofError("Gagal mendeteksi IP/MAC lokal komputer pengawas")
         return my_ip, my_mac
 
-    def start_redirect(
+    def start_redirect(self, *args, **kwargs) -> Dict[str, Any]:
+        """Wrapper serialisasi siklus-hidup (lihat _op_lock): cegah interleave dengan stop_*."""
+        with self._op_lock:
+            return self._start_redirect_impl(*args, **kwargs)
+
+    def _start_redirect_impl(
         self,
         victim_ip: str,
         victim_mac: str,
@@ -765,7 +777,12 @@ class RedirectManager:
                 f"Gagal membersihkan redirect {victim_ip}: {'; '.join(errors)}"
             )
 
-    def stop_redirect(self, victim_ip: str):
+    def stop_redirect(self, *args, **kwargs):
+        """Wrapper serialisasi siklus-hidup (lihat _op_lock): cegah interleave dengan start_*."""
+        with self._op_lock:
+            return self._stop_redirect_impl(*args, **kwargs)
+
+    def _stop_redirect_impl(self, victim_ip: str):
         """Hentikan sesi redirect untuk target IP.
 
         Tiga fase agar self._lock TIDAK ditahan selama join teardown (~4s): (1) POP sesi dari
@@ -816,6 +833,11 @@ class RedirectManager:
         return True
 
     def stop_all(self):
+        """Wrapper serialisasi siklus-hidup (lihat _op_lock): cegah interleave dengan start_*."""
+        with self._op_lock:
+            return self._stop_all_impl()
+
+    def _stop_all_impl(self):
         """Hentikan semua sesi redirect. Seperti stop_redirect: join teardown DI LUAR lock."""
         with self._lock:
             sessions = list(self._sessions.items())
