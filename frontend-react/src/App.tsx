@@ -172,6 +172,11 @@ function App() {
     // Kunci sekuensial GLOBAL untuk putus/pulih internet: saat satu operasi berjalan, tombol
     // perangkat lain NONAKTIF TOTAL sampai selesai (bukan antre). null = tak ada yang berjalan.
     const [busyToggleIp, setBusyToggleIp] = useState<string | null>(null);
+    // Guard SINKRON untuk kunci sekuensial: state React di-set asinkron, jadi dua klik cepat bisa
+    // sama-sama lolos cek `busyToggleIp !== null` sebelum re-render (stale closure). Ref ini di-set
+    // seketika sebelum await pertama sehingga klik kedua langsung tertolak. State tetap dipakai untuk
+    // render (menonaktifkan tombol).
+    const busyToggleRef = useRef<string | null>(null);
     const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
     const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
         try {
@@ -1008,7 +1013,7 @@ function App() {
         // Kunci sekuensial global: abaikan klik bila ADA operasi lain berjalan (tombol lain nonaktif total),
         // baris ini sendiri sedang loading, atau target gateway.
         const isSelfLoading = (Boolean(device.ip) && loadingIps.has(device.ip)) || (Boolean(device.mac) && loadingIps.has(device.mac));
-        if (busyToggleIp !== null || isSelfLoading || device.is_gateway) return;
+        if (busyToggleRef.current !== null || busyToggleIp !== null || isSelfLoading || device.is_gateway) return;
 
         // Free tier block limit guard
         if (!device.is_blocked && (device.speed_limit === undefined || device.speed_limit >= 100)) {
@@ -1025,6 +1030,7 @@ function App() {
             }
         }
 
+        busyToggleRef.current = toggleKey;
         setBusyToggleIp(toggleKey);
         setLoadingIps(prev => {
             const next = new Set(prev);
@@ -1049,6 +1055,7 @@ function App() {
                 if (device.mac) next.delete(device.mac);
                 return next;
             });
+            busyToggleRef.current = null;
             setBusyToggleIp(null);
         }
     };
@@ -1071,7 +1078,7 @@ function App() {
 
     // Action: Block Selected Devices (Hanya memblokir perangkat yang sedang aktif/tidak terblokir)
     const handleBlockSelected = () => {
-        if (busyToggleIp !== null) return; // kunci sekuensial global
+        if (busyToggleRef.current !== null || busyToggleIp !== null) return; // kunci sekuensial global
         if (unblockedSelected.length === 0) return;
 
         if (authStatus?.license?.tier === 'free') {
@@ -1086,50 +1093,62 @@ function App() {
             }
         }
 
+        // Kunci diakuisisi SINKRON sebelum IIFE async agar klik kedua langsung tertolak.
+        busyToggleRef.current = unblockedSelected[0]?.ip ?? 'batch';
         // Proses satu-per-satu berurutan: spinner berpindah dari perangkat satu ke berikutnya,
         // menunggu tiap pemutusan benar-benar selesai (bukan serentak + timer).
         void (async () => {
-            for (const d of unblockedSelected) {
-                setBusyToggleIp(d.ip);
-                setLoadingIps(prev => new Set(prev).add(d.ip));
-                try {
-                    await block(d.ip, gatewayIp);
-                } catch {
-                    // Kegagalan per-perangkat sudah ditampilkan via toast; lanjut ke berikutnya.
-                } finally {
-                    setLoadingIps(prev => {
-                        const next = new Set(prev);
-                        next.delete(d.ip);
-                        return next;
-                    });
+            try {
+                for (const d of unblockedSelected) {
+                    setBusyToggleIp(d.ip);
+                    setLoadingIps(prev => new Set(prev).add(d.ip));
+                    try {
+                        await block(d.ip, gatewayIp);
+                    } catch {
+                        // Kegagalan per-perangkat sudah ditampilkan via toast; lanjut ke berikutnya.
+                    } finally {
+                        setLoadingIps(prev => {
+                            const next = new Set(prev);
+                            next.delete(d.ip);
+                            return next;
+                        });
+                    }
                 }
+            } finally {
+                busyToggleRef.current = null;
+                setBusyToggleIp(null);
             }
-            setBusyToggleIp(null);
         })();
     };
 
     // Action: Restore Selected Devices (Hanya memulihkan perangkat yang sedang terblokir)
     const handleRestoreSelected = () => {
-        if (busyToggleIp !== null) return; // kunci sekuensial global
+        if (busyToggleRef.current !== null || busyToggleIp !== null) return; // kunci sekuensial global
         if (blockedSelected.length === 0) return;
 
+        // Kunci diakuisisi SINKRON sebelum IIFE async agar klik kedua langsung tertolak.
+        busyToggleRef.current = blockedSelected[0]?.ip ?? 'batch';
         void (async () => {
-            for (const d of blockedSelected) {
-                setBusyToggleIp(d.ip);
-                setLoadingIps(prev => new Set(prev).add(d.ip));
-                try {
-                    await unblock(d.ip);
-                } catch {
-                    // Kegagalan per-perangkat sudah ditampilkan via toast; lanjut ke berikutnya.
-                } finally {
-                    setLoadingIps(prev => {
-                        const next = new Set(prev);
-                        next.delete(d.ip);
-                        return next;
-                    });
+            try {
+                for (const d of blockedSelected) {
+                    setBusyToggleIp(d.ip);
+                    setLoadingIps(prev => new Set(prev).add(d.ip));
+                    try {
+                        await unblock(d.ip);
+                    } catch {
+                        // Kegagalan per-perangkat sudah ditampilkan via toast; lanjut ke berikutnya.
+                    } finally {
+                        setLoadingIps(prev => {
+                            const next = new Set(prev);
+                            next.delete(d.ip);
+                            return next;
+                        });
+                    }
                 }
+            } finally {
+                busyToggleRef.current = null;
+                setBusyToggleIp(null);
             }
-            setBusyToggleIp(null);
         })();
     };
 
