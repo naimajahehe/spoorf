@@ -168,7 +168,7 @@ export function useWebSocket() {
     // Korelasi per-IP untuk operasi block/unblock: block()/unblock() menunggu penyelesaian NYATA
     // dari backend (settle oleh handler deviceBlocked/blockError/deviceUnblocked/unblockError), dengan
     // safety-timeout 12s agar tombol tak macet permanen bila engine menggantung.
-    const pendingToggleOpsRef = useRef<Map<string, { resolve: () => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }>>(new Map());
+    const pendingToggleOpsRef = useRef<Map<string, { resolve: () => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout>; mac?: string }>>(new Map());
     const refreshAbortControllerRef = useRef<AbortController | null>(null);
     const refreshRequestRef = useRef<(generation?: number) => void>(() => {});
 
@@ -555,7 +555,7 @@ export function useWebSocket() {
         });
 
         newSocket.on('deviceBlocked', (device: Device) => {
-            settleToggleOp(device.ip, true);
+            settleToggleOpForDevice(device, true);
             recordLiveStateChange(['devices']);
             pushActivity({
                 category: 'security',
@@ -568,9 +568,7 @@ export function useWebSocket() {
         });
 
         newSocket.on('deviceUnblocked', (device: Device) => {
-            const key = (device.ip && device.ip.trim() !== '') ? device.ip : device.mac;
-            if (key) settleToggleOp(key, true);
-            if (device.mac) settleToggleOp(device.mac, true);
+            settleToggleOpForDevice(device, true);
             recordLiveStateChange(['devices']);
             pushActivity({
                 category: 'security',
@@ -636,14 +634,13 @@ export function useWebSocket() {
 
         newSocket.on('blockError', (data: { error: string; ip?: string }) => {
             console.error('Block error:', data);
-            if (data.ip) settleToggleOp(data.ip, false, data.error);
+            settleToggleOpForDevice({ ip: data.ip }, false, data.error);
             setError(`Gagal memblokir ${data.ip || 'perangkat'}: ${data.error}`);
         });
 
         newSocket.on('unblockError', (data: { error: string; ip?: string; mac?: string }) => {
             console.error('Unblock error:', data);
-            if (data.ip) settleToggleOp(data.ip, false, data.error);
-            if (data.mac) settleToggleOp(data.mac, false, data.error);
+            settleToggleOpForDevice({ ip: data.ip, mac: data.mac }, false, data.error);
             setError(`Gagal membuka blokir ${data.ip || data.mac || 'perangkat'}: ${data.error}`);
         });
 
@@ -929,32 +926,56 @@ export function useWebSocket() {
         }
     };
 
-    // Selesaikan operasi toggle tertunda untuk `ip` (dipanggil dari handler deviceBlocked/blockError/
-    // deviceUnblocked/unblockError). ok=true → resolve; ok=false → reject.
-    const settleToggleOp = (ip: string, ok: boolean, errorMsg?: string) => {
-        const pending = pendingToggleOpsRef.current.get(ip);
-        if (!pending) return;
+    // Selesaikan satu op tertunda ber-key eksak. Mengembalikan true bila ada yang cocok & diselesaikan.
+    const settleToggleOpByKey = (key: string, ok: boolean, errorMsg?: string): boolean => {
+        const pending = pendingToggleOpsRef.current.get(key);
+        if (!pending) return false;
         clearTimeout(pending.timer);
-        pendingToggleOpsRef.current.delete(ip);
+        pendingToggleOpsRef.current.delete(key);
         if (ok) pending.resolve();
         else pending.reject(new Error(errorMsg || 'Operasi gagal'));
+        return true;
     };
 
-    // Promise yang menunggu penyelesaian NYATA backend untuk sebuah toggle op per-IP. Safety-timeout
-    // 12s menolak (melepas kunci) bila engine menggantung agar tombol tak macet permanen.
-    const awaitToggleCompletion = (ip: string): Promise<void> => {
+    // Selesaikan op toggle terkait sebuah perangkat (dari handler deviceBlocked/blockError/
+    // deviceUnblocked/unblockError). Coba key IP lalu MAC, dan sebagai fallback cocokkan by MAC —
+    // perangkat bisa BERPINDAH IP saat pre-flight, sehingga event settle membawa IP berbeda dari
+    // yang ditunggu block()/unblock(); atau unblock-by-MAC (offline) yang errornya tanpa IP.
+    const settleToggleOpForDevice = (device: { ip?: string; mac?: string }, ok: boolean, errorMsg?: string) => {
+        if (device.ip && settleToggleOpByKey(device.ip, ok, errorMsg)) return;
+        if (device.mac && settleToggleOpByKey(device.mac, ok, errorMsg)) return;
+        if (device.mac) {
+            const macLower = device.mac.toLowerCase();
+            for (const [key, pending] of pendingToggleOpsRef.current.entries()) {
+                if (pending.mac && pending.mac.toLowerCase() === macLower) {
+                    clearTimeout(pending.timer);
+                    pendingToggleOpsRef.current.delete(key);
+                    if (ok) pending.resolve();
+                    else pending.reject(new Error(errorMsg || 'Operasi gagal'));
+                    return;
+                }
+            }
+        }
+    };
+
+    // Promise yang menunggu penyelesaian NYATA backend untuk sebuah toggle op. Di-key oleh IP/MAC yang
+    // dikirim, tapi juga merekam MAC (dari daftar perangkat) agar bisa diselesaikan by MAC bila IP
+    // berubah. Safety-timeout 12s menolak (melepas kunci) bila engine menggantung agar tombol tak macet.
+    const awaitToggleCompletion = (key: string): Promise<void> => {
         return new Promise<void>((resolve, reject) => {
-            const stale = pendingToggleOpsRef.current.get(ip);
+            const stale = pendingToggleOpsRef.current.get(key);
             if (stale) {
                 clearTimeout(stale.timer);
                 stale.reject(new Error('Dibatalkan oleh permintaan baru'));
-                pendingToggleOpsRef.current.delete(ip);
+                pendingToggleOpsRef.current.delete(key);
             }
+            const keyLower = key.toLowerCase();
+            const dev = deviceRef.current.find(d => d.ip === key || (d.mac && d.mac.toLowerCase() === keyLower));
             const timer = setTimeout(() => {
-                pendingToggleOpsRef.current.delete(ip);
+                pendingToggleOpsRef.current.delete(key);
                 reject(new Error('Waktu tunggu habis: engine tidak merespons.'));
             }, 12000);
-            pendingToggleOpsRef.current.set(ip, { resolve, reject, timer });
+            pendingToggleOpsRef.current.set(key, { resolve, reject, timer, mac: dev?.mac });
         });
     };
 
