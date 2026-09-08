@@ -2,6 +2,19 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.38.0] - 2026-09-08
+
+### Security-Aware Presence Tracking & Coherent Alerting
+- **Pencegahan Notifikasi Gembira & Animasi pada Perangkat Terblokir — `frontend-react/src/App.tsx`**:
+  - Menambahkan guard `if (dev.is_blocked)` pada presence loop listener `useEffect` di `App.tsx`.
+  - Mensupresi total pemanggilan `playChimeSound()`, `setPlusOneEvents` (animasi beam `+1`), toast `new_device`/`reconnected`, dan Windows native desktop notifications saat perangkat berstatus terblokir kembali online.
+  - Memperbarui status internal `deviceOnlineStatusRef` secara senyap sehingga memori frontend tetap sinkron tanpa memicu bising notifikasi.
+- **Dual-Key Profile & MAC Tracking pada Presence Ref — `frontend-react/src/App.tsx`**:
+  - Mengintegrasikan pelacakan kehadiran dengan identitas profil: `prof:${dev.profile_id}` dengan fallback ke `macLower`.
+  - Mencegah smartphone berfitur Randomized MAC (seperti Samsung Galaxy atau iPhone) berulang kali memicu notifikasi "Perangkat Baru Masuk" palsu saat reconnect setelah diblokir.
+- **Unifikasi Notifikasi Keamanan Auto-Reblock — `frontend-react/src/App.tsx`**:
+  - Mengintegrasikan event `autoReblockedEvent` dengan Windows Desktop Notification keamanan native (*"NetCut Sentinel: Target Terblokir Dicegat!"*) ketika target terblokir mencoba menyusup kembali ke jaringan Wi-Fi.
+
 ## [v2.37.0] - 2026-09-07
 
 ### Device Identity Persistence, Auto-Reblock & Zombie Session Remediation

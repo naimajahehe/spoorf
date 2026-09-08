@@ -4,7 +4,7 @@
 | :--- | :--- |
 | **Document ID** | SPEC-006 |
 | **Status** | Approved / Implemented |
-| **Version** | 2.1.0 |
+| **Version** | 2.2.0 |
 | **Subsystem** | `frontend-react` (`src.components.motion`, `src.components.DeviceTable`, `src.App`) |
 | **Frameworks** | React 18, Tailwind CSS, Framer Motion, BeUI Motion Components |
 | **Key Source Files** | `src/components/motion/tabs.tsx`, `src/components/motion/tooltip.tsx`, `src/components/DeviceTable.tsx`, `src/App.tsx` |
@@ -80,3 +80,16 @@ Kolom akses perangkat menggantikan tombol dropdown lama dengan menu mengambang r
 1. **Gaya Ikon**: Seluruh ikon sub-menu ditampilkan dalam format *clean icon* tanpa border atau background berlebih.
 2. **Warna Ikon**: Menggunakan palet netral yang konsisten (`text-gray-400 hover:text-white`) untuk menjaga estetika antarmuka modern bernuansa *dark mode*.
 3. **Lebar Sidebar**: Disesuaikan proporsional agar hemat ruang horizontal tanpa memotong label teks navigasi.
+---
+
+## 6. Security-Aware Presence Tracking & Coherent Alerting
+
+Mengintegrasikan deteksi kehadiran perangkat dengan status keamanan Layer 2 (`is_blocked`):
+1. **Dual-Key Identity Tracking**:
+   - Pelacakan status online memprioritaskan profil identitas: `dev.profile_id ? 'prof:' + dev.profile_id : dev.mac.toLowerCase()`.
+   - Mencegah perangkat dengan MAC acak (Randomized MAC) berulang kali memicu notifikasi "Perangkat Baru" palsu saat reconnect.
+2. **Block Status Guard**:
+   - Jika target berstatus `is_blocked: true`, status internal diperbarui secara senyap tanpa memicu toast sambutan, denting suara melodi (`playChimeSound`), atau animasi beam gamifikasi `+1`.
+3. **Unified Auto-Reblock Alert**:
+   - Mengintegrasikan banner kuning Auto-Reblock dengan notifikasi desktop native berstatus peringatan keamanan (*"NetCut Sentinel: Target Terblokir Dicegat!"*) ketika target terblokir mencoba kembali ke jaringan.
+

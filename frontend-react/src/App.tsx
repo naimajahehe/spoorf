@@ -600,7 +600,12 @@ function App() {
             // First load: populate known device online statuses without firing alerts
             devices.forEach(d => {
                 if (d.mac) {
-                    deviceOnlineStatusRef.current.set(d.mac.toLowerCase(), Boolean(d.is_online));
+                    const macLower = d.mac.toLowerCase();
+                    const isOnline = Boolean(d.is_online);
+                    deviceOnlineStatusRef.current.set(macLower, isOnline);
+                    if (d.profile_id && d.profile_id.trim() !== '') {
+                        deviceOnlineStatusRef.current.set(`prof:${d.profile_id.trim()}`, isOnline);
+                    }
                 }
             });
             isInitialScanDoneRef.current = true;
@@ -613,12 +618,31 @@ function App() {
         devices.forEach(dev => {
             if (!dev.mac || dev.is_gateway || dev.is_self) return;
             const macLower = dev.mac.toLowerCase();
-            const prevStatus = deviceOnlineStatusRef.current.get(macLower);
+            const profKey = (dev.profile_id && dev.profile_id.trim() !== '') ? `prof:${dev.profile_id.trim()}` : null;
+            // Evaluasi status terdahulu: utamakan profKey jika ada, fallback ke MAC fisik
+            const prevStatus = profKey
+                ? (deviceOnlineStatusRef.current.get(profKey) ?? deviceOnlineStatusRef.current.get(macLower))
+                : deviceOnlineStatusRef.current.get(macLower);
             const isCurrentlyOnline = Boolean(dev.is_online);
+
+            const updateStatusRef = (val: boolean) => {
+                deviceOnlineStatusRef.current.set(macLower, val);
+                if (profKey) {
+                    deviceOnlineStatusRef.current.set(profKey, val);
+                }
+            };
+
+            // SECURITY-AWARE GUARD: Perangkat yang sedang diblokir (is_blocked: true)
+            // sinkronkan status internal secara senyap, tetapi JANGAN PERNAH memicu
+            // toast ramah, denting melodi, animasi gamifikasi +1, atau desktop notification.
+            if (dev.is_blocked) {
+                updateStatusRef(isCurrentlyOnline);
+                return;
+            }
 
             if (prevStatus === undefined) {
                 // Perangkat baru pertama kali terdeteksi
-                deviceOnlineStatusRef.current.set(macLower, isCurrentlyOnline);
+                updateStatusRef(isCurrentlyOnline);
                 if (isCurrentlyOnline) {
                     // Efek gamifikasi "+1": hanya saat Auto Scan aktif (blok ini sudah lewat load awal).
                     if (isAutoScanActiveRef.current) {
@@ -652,7 +676,7 @@ function App() {
                 }
             } else if (prevStatus === false && isCurrentlyOnline === true) {
                 // Perangkat yang sebelumnya offline kini KEMBALI ONLINE / RECONNECTED!
-                deviceOnlineStatusRef.current.set(macLower, true);
+                updateStatusRef(true);
                 toastsToFire.push({ device: dev, toastType: 'reconnected' });
                 historyToFire.push({
                     id: `reconnect-${dev.mac}-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
@@ -681,7 +705,7 @@ function App() {
                 }
             } else {
                 // Perbarui status online jika ada perubahan (misal true -> false)
-                deviceOnlineStatusRef.current.set(macLower, isCurrentlyOnline);
+                updateStatusRef(isCurrentlyOnline);
             }
         });
 
@@ -758,7 +782,7 @@ function App() {
         return () => clearTimeout(timer);
     }, [error, clearError]);
 
-    // Record Auto-Reblock event to notification history
+    // Record Auto-Reblock event to notification history & security desktop alert
     useEffect(() => {
         if (autoReblockedEvent) {
             const entry: NotificationItem = {
@@ -776,8 +800,24 @@ function App() {
                 deviceIp: autoReblockedEvent.ip
             };
             setNotificationHistory(prev => [entry, ...prev]);
+
+            // Fire authoritative Security Desktop Notification if enabled and not muted
+            if (!isMuted) {
+                const targetName = autoReblockedEvent.alias && autoReblockedEvent.alias.trim() !== ''
+                    ? autoReblockedEvent.alias.trim()
+                    : (autoReblockedEvent.hostname && autoReblockedEvent.hostname.trim() !== '' ? autoReblockedEvent.hostname : autoReblockedEvent.ip);
+                sendDesktopNotification(
+                    'NetCut Sentinel: Target Terblokir Dicegat!',
+                    {
+                        body: `Target ${targetName} [${autoReblockedEvent.ip}] mencoba masuk kembali ke Wi-Fi dan telah otomatis diputus.`,
+                        onClick: () => {
+                            setSelectedInspectorIp(autoReblockedEvent.ip);
+                        }
+                    }
+                );
+            }
         }
-    }, [autoReblockedEvent]);
+    }, [autoReblockedEvent, isMuted]);
 
     // Handle Disconnected Device Toast Notifications (Suppressed if muted, recorded to history)
     useEffect(() => {
@@ -785,7 +825,11 @@ function App() {
             const dev = disconnectedDeviceEvent;
             const devKey = (dev.mac || dev.ip).toLowerCase();
             if (dev.mac) {
-                deviceOnlineStatusRef.current.set(dev.mac.toLowerCase(), false);
+                const macLower = dev.mac.toLowerCase();
+                deviceOnlineStatusRef.current.set(macLower, false);
+                if (dev.profile_id && dev.profile_id.trim() !== '') {
+                    deviceOnlineStatusRef.current.set(`prof:${dev.profile_id.trim()}`, false);
+                }
             }
 
             // Record to Notification Center History silently
