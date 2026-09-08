@@ -177,6 +177,28 @@ class TestCoreNetwork(unittest.TestCase):
             self.assertTrue(is_network_changed("10.99.99.99", curr_iface))
             self.assertTrue(is_network_changed(curr_gw, "Virtual-Adapter-XYZ"))
 
+    def test_network_changed_via_gateway_mac_same_ip(self):
+        """Dua jaringan berbeda ber-IP gateway SAMA harus terdeteksi lewat MAC gateway; pembacaan
+        MAC kosong (transient) & prev-MAC belum diketahui TIDAK memicu perubahan palsu."""
+        gw = '192.168.1.1'; iface = 'Wi-Fi'
+        with patch('src.core.network.get_current_gateway', return_value=gw), \
+             patch('src.core.network.get_network_info', return_value={'interface': iface}):
+            # MAC gateway berbeda (kedua diketahui) → jaringan berganti walau IP & iface sama
+            with patch('src.core.discovery.arp.get_mac_from_arp', return_value='bb:bb:bb:bb:bb:bb'):
+                self.assertTrue(is_network_changed(gw, iface, 'aa:aa:aa:aa:aa:aa'))
+            # MAC gateway sama → tidak berganti
+            with patch('src.core.discovery.arp.get_mac_from_arp', return_value='aa:aa:aa:aa:aa:aa'):
+                self.assertFalse(is_network_changed(gw, iface, 'aa:aa:aa:aa:aa:aa'))
+            # MAC saat ini kosong (ARP miss transient) → JANGAN memicu perubahan palsu
+            with patch('src.core.discovery.arp.get_mac_from_arp', return_value=''):
+                self.assertFalse(is_network_changed(gw, iface, 'aa:aa:aa:aa:aa:aa'))
+            # prev-MAC belum diketahui → tak bisa dibandingkan → tidak berganti
+            with patch('src.core.discovery.arp.get_mac_from_arp', return_value='bb:bb:bb:bb:bb:bb'):
+                self.assertFalse(is_network_changed(gw, iface, ''))
+            # Backward-compat 2-arg (tanpa MAC) → perilaku lama, MAC tak diperiksa
+            with patch('src.core.discovery.arp.get_mac_from_arp', return_value='zz:zz:zz:zz:zz:zz'):
+                self.assertFalse(is_network_changed(gw, iface))
+
     # ===== IPv6 capability detection (local, no packets) =====
     def _fake_addr(self, family, address):
         class _A:

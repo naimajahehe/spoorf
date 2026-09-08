@@ -34,6 +34,7 @@ from .core.discovery import (
     send_multicast_wakeup,
     pulse_batch,
     pulse_host,
+    get_mac_from_arp,
     LivenessWatchdogDaemon,
 )
 from .core.discovery.profile_observation import (
@@ -227,13 +228,15 @@ liveness_daemon = LivenessWatchdogDaemon(event_callback=lambda evt: manager.broa
 # ===== WATCHDOG THREAD =====
 last_gateway = ""
 last_interface = ""
+last_gateway_mac = ""
 
 def network_watchdog_thread():
-    global last_gateway, last_interface
+    global last_gateway, last_interface, last_gateway_mac
     try:
         info = scanner.get_network_info()
         last_interface = info.get('interface', '')
         last_gateway = scanner.get_current_gateway()
+        last_gateway_mac = get_mac_from_arp(last_gateway) if last_gateway else ""
     except:
         pass
 
@@ -257,7 +260,7 @@ def network_watchdog_thread():
         if check_cycle >= 10:
             check_cycle = 0
             try:
-                if scanner.is_network_changed(last_gateway, last_interface):
+                if scanner.is_network_changed(last_gateway, last_interface, last_gateway_mac):
                     logger.warning("🔥 Watchdog detected network change! Refreshing spoofer & halting stale sessions...")
                     spoofer.stop_all()
                     redirect_manager.stop_all()
@@ -270,6 +273,7 @@ def network_watchdog_thread():
                         info = scanner.get_network_info()
                         last_interface = info.get('interface', '')
                         last_gateway = scanner.get_current_gateway()
+                        last_gateway_mac = get_mac_from_arp(last_gateway) if last_gateway else ""
                     except:
                         pass
 

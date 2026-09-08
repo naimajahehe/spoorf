@@ -383,8 +383,14 @@ def get_wifi_info() -> Dict[str, Any]:
 
     return wifi_info
 
-def is_network_changed(prev_gateway: str, prev_interface: str) -> bool:
-    """Deteksi apakah gateway atau interface jaringan mengalami perubahan."""
+def is_network_changed(prev_gateway: str, prev_interface: str, prev_gateway_mac: str = "") -> bool:
+    """Deteksi apakah gateway atau interface jaringan mengalami perubahan.
+
+    Anchor utama: IP gateway + nama interface (kebal roam band 2.4/5GHz karena keduanya stabil).
+    TAMBAHAN (prev_gateway_mac): bila IP & interface sama TAPI MAC gateway berbeda, itu jaringan
+    fisik BERBEDA yang kebetulan berbagi IP gateway sama (mis. dua router 192.168.1.1) — kasus yang
+    lolos dari perbandingan IP. Hanya diperiksa bila MAC sebelumnya diketahui, dan pembacaan MAC
+    kosong (transient ARP miss) DIABAIKAN agar tak memicu perubahan palsu (spurious stop_all)."""
     curr_gateway = get_current_gateway()
     if not curr_gateway:
         return False
@@ -396,6 +402,12 @@ def is_network_changed(prev_gateway: str, prev_interface: str) -> bool:
     if prev_gateway != curr_gateway or prev_interface != curr_interface:
         logger.warning(f"🔥 JARINGAN BERUBAH! Gateway: {prev_gateway}->{curr_gateway}, Iface: {prev_interface}->{curr_interface}")
         return True
+    if prev_gateway_mac:
+        from .discovery.arp import get_mac_from_arp  # lazy: hindari circular import (arp -> network)
+        curr_mac = get_mac_from_arp(curr_gateway)
+        if curr_mac and curr_mac != prev_gateway_mac:
+            logger.warning(f"🔥 JARINGAN BERUBAH (MAC gateway berbeda di IP sama)! {prev_gateway_mac}->{curr_mac} @ {curr_gateway}")
+            return True
     return False
 
 def is_forwarding_enabled(win_iface_name: Optional[str] = None) -> bool:
