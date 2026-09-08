@@ -352,21 +352,30 @@ export class DeviceManager extends EventEmitter {
                 let updatedAny = false;
                 if (data.mac) {
                     const normMac = data.mac.toLowerCase();
+                    // Kumpulkan dulu (jangan mutasi Map saat iterasi): kita akan menghapus kunci IP
+                    // lama lalu menyisipkan kunci identitas di dalam loop pemrosesan.
+                    const matches: Array<[string, Device]> = [];
                     for (const [ipKey, dev] of this.devices.entries()) {
-                        if (dev.mac.toLowerCase() === normMac) {
-                            dev.is_online = false;
-                            // Bersihkan sesi Gaming Mode agar tak bocor & reconnect ter-throttle lagi.
-                            await this._stopGamingSession(normMac);
-                            if (dev.ip) {
-                                dev.last_ip = dev.ip;
-                                this.devices.delete(ipKey);
-                                dev.ip = '';
-                            }
-                            this.db.setDeviceOnlineStatus(dev.mac, false).catch(console.warn);
-                            this.emit('deviceUpdated', dev);
-                            this.emit('deviceDisconnected', dev);
-                            updatedAny = true;
+                        if (dev.mac.toLowerCase() === normMac) matches.push([ipKey, dev]);
+                    }
+                    for (const [ipKey, dev] of matches) {
+                        dev.is_online = false;
+                        // Bersihkan sesi Gaming Mode agar tak bocor & reconnect ter-throttle lagi.
+                        await this._stopGamingSession(normMac);
+                        if (dev.ip) {
+                            dev.last_ip = dev.ip;
+                            this.devices.delete(ipKey);
+                            dev.ip = '';
                         }
+                        // Pertahankan perangkat yang baru offline memakai kunci IDENTITAS (bukan
+                        // menghapusnya), agar tetap tampil di tab Offline — konsisten dengan jalur
+                        // scanNetwork (BUG-17). Tanpa ini, RELEASE membuat perangkat hilang dari UI
+                        // sampai rescan berikutnya.
+                        this.devices.set(deviceMemKey(dev), dev);
+                        this.db.setDeviceOnlineStatus(dev.mac, false).catch(console.warn);
+                        this.emit('deviceUpdated', dev);
+                        this.emit('deviceDisconnected', dev);
+                        updatedAny = true;
                     }
                 }
                 if (updatedAny) {
@@ -987,9 +996,14 @@ export class DeviceManager extends EventEmitter {
                     }
 
                     if (existing) {
-                        // Jika perangkat sebelumnya terdaftar di IP berbeda di memori, hapus IP lama
-                        if (existing.ip && existing.ip !== dev.ip) {
-                            this.devices.delete(existing.ip);
+                        // Hapus kunci lama yang DITEMPATI `existing`: bisa IP lama (migrasi IP), ATAU
+                        // kunci IDENTITAS saat perangkat sedang offline (ip='' → profile_id/MAC). Kalau
+                        // hanya cek `existing.ip`, kunci identitas tak terhapus dan object yang sama juga
+                        // diset di dev.ip (baris bawah) → duplikat identity+IP yang menggandakan hitungan
+                        // kuota lisensi (filter(is_blocked).length).
+                        const staleKey = deviceMemKey(existing);
+                        if (staleKey !== dev.ip) {
+                            this.devices.delete(staleKey);
                         }
 
                         // Jika ada perangkat lain yang sebelumnya menempati dev.ip di memori, bersihkan konflik tersebut

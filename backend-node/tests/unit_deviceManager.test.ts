@@ -1293,6 +1293,69 @@ export async function runDeviceManagerTests() {
         console.log('  ✓ Scan merge: existing memory receives every DHCP evidence field');
     }
 
+    // ULTRAREVIEW-2 #1: an offline device stored under its IDENTITY key must not end up duplicated
+    // under BOTH the identity key and its new IP when it returns online — that double-counts the
+    // license block quota (Array.from(devices.values()).filter(is_blocked).length).
+    {
+        const python: any = new EventEmitter();
+        python.stopSpoof = async () => {};
+        const offline = makeStateRetentionDevice({
+            ip: '',
+            mac: 'a8:3b:76:0c:dc:55',
+            profile_id: 'prof_test1',
+            is_blocked: true,
+            is_online: false,
+            speed_limit: 0
+        });
+        const online = { ...offline, ip: '192.168.1.50', is_online: true };
+        python.scan = async () => [online];
+        const db: any = {
+            syncScanResults: async () => ({
+                allDevices: [online],
+                autoReblockTargets: [],
+                autoThrottleTargets: [],
+                zombieSessionsToStop: []
+            })
+        };
+        const manager = new DeviceManager(python, db);
+        // Seed the offline device under its identity key, exactly as init()/offline-transition does.
+        (manager as any).devices.set('prof_test1', offline);
+
+        await manager.scanNetwork();
+
+        const all = Array.from((manager as any).devices.values()) as Device[];
+        const sameMac = all.filter(d => d.mac.toLowerCase() === 'a8:3b:76:0c:dc:55');
+        assert.strictEqual(sameMac.length, 1, 'perangkat harus ada di TEPAT satu kunci setelah online lagi (bukan duplikat identity+IP)');
+        assert.strictEqual(all.filter(d => d.is_blocked).length, 1, 'perangkat terblokir harus dihitung sekali untuk kuota lisensi');
+        console.log('  ✓ ULTRAREVIEW-2 #1: perangkat yang kembali online tidak terduplikasi di kunci identity + IP');
+    }
+
+    // ULTRAREVIEW-2 #8: pada DHCP RELEASE, perangkat harus di-re-key ke kunci identitas (tetap
+    // tampil di tab Offline), bukan dihapus dari memori — konsisten dengan jalur scanNetwork (BUG-17).
+    {
+        const python: any = new EventEmitter();
+        const db: any = { setDeviceOnlineStatus: async () => {} };
+        const manager = new DeviceManager(python, db);
+        const dev = makeStateRetentionDevice({
+            ip: '192.168.1.77',
+            mac: 'b2:33:44:55:66:77',
+            profile_id: 'prof_rel8',
+            is_blocked: true,
+            is_online: true
+        });
+        (manager as any).devices.set(dev.ip, dev);
+
+        await (manager as any)._handleDhcpEvent({ kind: 'release', mac: 'b2:33:44:55:66:77' });
+
+        const all = Array.from((manager as any).devices.values()) as Device[];
+        const found = all.find(d => d.mac.toLowerCase() === 'b2:33:44:55:66:77');
+        assert.ok(found, 'perangkat harus tetap ada di memori setelah DHCP RELEASE (tampil di tab Offline)');
+        assert.strictEqual(found!.is_online, false, 'perangkat harus ditandai offline');
+        assert.strictEqual(found!.ip, '', 'IP aktif harus dikosongkan');
+        assert.ok((manager as any).devices.has('prof_rel8'), 'perangkat offline harus tersimpan di bawah kunci identitas');
+        console.log('  ✓ ULTRAREVIEW-2 #8: DHCP RELEASE mempertahankan perangkat via kunci identitas, bukan menghapusnya');
+    }
+
     // Test 25: a new DHCP device during Method 1 must not queue a second scan.
     {
         const python: any = new EventEmitter();
