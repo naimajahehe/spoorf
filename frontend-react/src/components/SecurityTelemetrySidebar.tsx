@@ -23,6 +23,7 @@ import { TelemetryData } from '../hooks/useWebSocket';
 import { RangeSlider } from './motion/RangeSlider';
 import { BouncyAccordion, BouncyAccordionItem } from './motion/bouncy-accordion';
 import { NetworkBandwidthLineChart, BandwidthDataPoint } from './NetworkBandwidthLineChart';
+import { DualStackKillStatus } from './DualStackKillStatus';
 import { InstagramIcon } from './icons/InstagramIcon';
 import { getResolvedDeviceName } from '../lib/deviceSort';
 import { cn } from '../lib/utils';
@@ -621,6 +622,10 @@ export const SecurityTelemetrySidebar: FC<SecurityTelemetrySidebarProps> = ({
                             )}
                         </div>
                     </div>
+
+                    {(device.is_blocked || isThrottled) && device.cut_status && (
+                        <DualStackKillStatus cut={device.cut_status} />
+                    )}
 
                     <div className="flex items-center justify-between text-xs pt-1 border-t border-white/[0.04]">
                         <span className="text-zinc-400">Host Role</span>

@@ -25,6 +25,19 @@ export interface ProfileAssessment {
     profile_version: number;
 }
 
+/**
+ * Status pemutusan dua-stack yang di-enforce di engine (dari /api/status). Dilekatkan ke device
+ * saat diblokir/di-throttle agar UI bisa menampilkan apakah IPv4 & IPv6 benar-benar tercut.
+ * ipv4: 'cut' (blackhole) | 'throttle' (dibatasi) | 'off' (ditandai blok tapi tak ada sesi aktif → bocor).
+ * ipv6: 'cut' (NDP aktif) | 'leak' (dual-stack tapi NDP tak aktif) | 'na' (device IPv4-only).
+ */
+export interface CutStatus {
+    ipv4: 'cut' | 'throttle' | 'off';
+    ipv6: 'cut' | 'leak' | 'na';
+    ipv4_packets: number;
+    ipv6_packets: number;
+}
+
 export interface Device {
     ip: string;
     last_ip?: string;
@@ -70,6 +83,7 @@ export interface Device {
     ipv6_global?: string;
     ipv6_addresses?: string[];
     is_dual_stack?: boolean;
+    cut_status?: CutStatus;
     profile_status?: ProfileStatus;
     vendor_confidence?: number;
     type_confidence?: number;

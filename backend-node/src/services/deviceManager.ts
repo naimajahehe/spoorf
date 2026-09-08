@@ -4,7 +4,7 @@ import { EventEmitter } from 'events';
 import { normalizeProfileIpv6Addresses, PythonBridge } from './pythonBridge';
 import { DatabaseService } from './database';
 import { LicenseManager, FeatureLimitError, FeatureLockedError } from './licenseManager';
-import { Device, ProfileAssessment, ProfileRefreshResult } from '../types';
+import { Device, CutStatus, ProfileAssessment, ProfileRefreshResult } from '../types';
 import type { ScanOptions } from './pythonBridge';
 
 // Retensi: perangkat tamu yang offline lebih lama dari ini diarsipkan (bukan dihapus)
@@ -338,6 +338,47 @@ export class DeviceManager extends EventEmitter {
         }
         console.log(`♻️ [Reconcile] ${blocked.length} perangkat terblokir, sebagian tak ter-enforce di Python (session basi: ${cleared}) → memicu scan re-block.`);
         this.scanNetwork().catch(err => console.warn('Notice reconcile re-block scan:', err?.message));
+    }
+
+    /**
+     * Lekatkan status pemutusan DUA-STACK (IPv4+IPv6) dari engine /api/status ke tiap device,
+     * agar UI bisa menampilkan indikator "Dual-Stack Kill Switch" (dan menyorot kebocoran IPv6).
+     * - Ada sesi engine → ipv4: 'cut' (blackhole) / 'throttle' (dibatasi); ipv6 dari sesi ('cut'|'leak'|'na').
+     * - Ditandai blok tapi TAK ada sesi → ipv4: 'off' (bocor), ipv6: 'leak' bila dual-stack.
+     * - Tak diblokir → cut_status dikosongkan (indikator tak tampil).
+     * Engine tak terjangkau → biarkan nilai lama (tak menimpa dengan data kosong).
+     */
+    private async _attachSpoofCutStatus(): Promise<void> {
+        let sessions: Record<string, any>;
+        try {
+            const status = await this.python.getStatus();
+            sessions = (status && status.sessions) || {};
+        } catch {
+            return;
+        }
+        const byIp = new Map<string, any>();
+        const byMac = new Map<string, any>();
+        for (const s of Object.values(sessions) as any[]) {
+            if (s && s.victim_ip) byIp.set(s.victim_ip, s);
+            if (s && s.victim_mac) byMac.set(String(s.victim_mac).toLowerCase(), s);
+        }
+        for (const dev of this.devices.values()) {
+            const s = (dev.ip && byIp.get(dev.ip)) || (dev.mac && byMac.get(dev.mac.toLowerCase()));
+            if (s) {
+                const ipv4: CutStatus['ipv4'] = (s.speed_limit ?? 0) <= 0 ? 'cut' : 'throttle';
+                const ipv6: CutStatus['ipv6'] = (s.ipv6 && s.ipv6.status) || (dev.is_dual_stack ? 'leak' : 'na');
+                dev.cut_status = {
+                    ipv4,
+                    ipv6,
+                    ipv4_packets: s.packets_sent ?? 0,
+                    ipv6_packets: (s.ipv6 && s.ipv6.packets_sent) ?? 0
+                };
+            } else if (dev.is_blocked && !dev.is_gateway && !dev.is_self) {
+                dev.cut_status = { ipv4: 'off', ipv6: dev.is_dual_stack ? 'leak' : 'na', ipv4_packets: 0, ipv6_packets: 0 };
+            } else {
+                dev.cut_status = undefined;
+            }
+        }
     }
 
     private async _handleDhcpEvent(data: any): Promise<void> {
@@ -1175,6 +1216,10 @@ export class DeviceManager extends EventEmitter {
             for (const mac of newlyAddedProfileMacs) {
                 this.scheduleProfileEnrichment(mac, PROFILE_ENRICHMENT_DEBOUNCE_MS);
             }
+
+            // Lekatkan status pemutusan dua-stack (IPv4+IPv6) dari engine agar UI dapat menampilkan
+            // indikator kill-switch & menyorot kebocoran IPv6. Best-effort: kegagalan tak menggagalkan scan.
+            await this._attachSpoofCutStatus();
 
             this.emit('devicesUpdated', Array.from(this.devices.values()));
             return Array.from(this.devices.values());

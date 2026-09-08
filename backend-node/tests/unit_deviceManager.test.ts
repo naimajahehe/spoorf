@@ -1382,6 +1382,39 @@ export async function runDeviceManagerTests() {
         console.log('  ✓ ULTRAREVIEW batch-3 #1: setAutoScan menegakkan gate tier di backend (free ditolak, pro diizinkan)');
     }
 
+    // DUAL-STACK UI: _attachSpoofCutStatus melekatkan status cut IPv4+IPv6 dari engine /api/status
+    // ke tiap device (untuk indikator "Dual-Stack Kill Switch" di sidebar).
+    {
+        const python: any = new EventEmitter();
+        python.getStatus = async () => ({
+            sessions: {
+                s1: { victim_ip: '192.168.1.50', victim_mac: 'aa:aa:aa:aa:aa:aa', speed_limit: 0, packets_sent: 900, ipv6: { status: 'cut', packets_sent: 120 } },
+                s2: { victim_ip: '192.168.1.51', victim_mac: 'bb:bb:bb:bb:bb:bb', speed_limit: 0, packets_sent: 500, ipv6: { status: 'leak', packets_sent: 0 } },
+                s3: { victim_ip: '192.168.1.52', victim_mac: 'cc:cc:cc:cc:cc:cc', speed_limit: 50, packets_sent: 300, ipv6: { status: 'na', packets_sent: 0 } }
+            }
+        });
+        const db: any = {};
+        const manager = new DeviceManager(python, db);
+        const mk = (ip: string, mac: string, over: Partial<Device>): Device => makeStateRetentionDevice({ ip, mac, ...over });
+        (manager as any).devices.set('192.168.1.50', mk('192.168.1.50', 'aa:aa:aa:aa:aa:aa', { is_blocked: true, is_dual_stack: true, speed_limit: 0 }));
+        (manager as any).devices.set('192.168.1.51', mk('192.168.1.51', 'bb:bb:bb:bb:bb:bb', { is_blocked: true, is_dual_stack: true, speed_limit: 0 }));
+        (manager as any).devices.set('192.168.1.52', mk('192.168.1.52', 'cc:cc:cc:cc:cc:cc', { is_blocked: false, is_dual_stack: false, speed_limit: 50 }));
+        (manager as any).devices.set('192.168.1.53', mk('192.168.1.53', 'dd:dd:dd:dd:dd:dd', { is_blocked: true, is_dual_stack: true, speed_limit: 0 })); // blocked but NO session
+        (manager as any).devices.set('192.168.1.54', mk('192.168.1.54', 'ee:ee:ee:ee:ee:ee', { is_blocked: false, is_dual_stack: false, speed_limit: 100 })); // not blocked
+
+        await (manager as any)._attachSpoofCutStatus();
+        const g = (ip: string) => (manager as any).devices.get(ip).cut_status;
+
+        assert.deepStrictEqual(g('192.168.1.50'), { ipv4: 'cut', ipv6: 'cut', ipv4_packets: 900, ipv6_packets: 120 }, 'dual-stack fully cut');
+        assert.strictEqual(g('192.168.1.51').ipv6, 'leak', 'dual-stack IPv6 leak surfaced');
+        assert.strictEqual(g('192.168.1.51').ipv4, 'cut');
+        assert.strictEqual(g('192.168.1.52').ipv4, 'throttle', 'throttled session → ipv4 throttle');
+        assert.strictEqual(g('192.168.1.52').ipv6, 'na', 'IPv4-only device → ipv6 na');
+        assert.deepStrictEqual(g('192.168.1.53'), { ipv4: 'off', ipv6: 'leak', ipv4_packets: 0, ipv6_packets: 0 }, 'blocked but no session → not enforced (leak)');
+        assert.strictEqual(g('192.168.1.54'), undefined, 'non-blocked device has no cut_status');
+        console.log('  ✓ DUAL-STACK UI: _attachSpoofCutStatus melekatkan status cut IPv4+IPv6 per device');
+    }
+
     // Test 25: a new DHCP device during Method 1 must not queue a second scan.
     {
         const python: any = new EventEmitter();

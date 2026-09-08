@@ -1,3 +1,11 @@
+/** Status pemutusan dua-stack yang di-enforce di engine (lihat backend CutStatus). */
+export interface CutStatus {
+    ipv4: 'cut' | 'throttle' | 'off';
+    ipv6: 'cut' | 'leak' | 'na';
+    ipv4_packets: number;
+    ipv6_packets: number;
+}
+
 export interface Device {
     ip: string;
     last_ip?: string;
@@ -43,6 +51,7 @@ export interface Device {
     ipv6_global?: string;
     ipv6_addresses?: string[];
     is_dual_stack?: boolean;
+    cut_status?: CutStatus;
     // Passive identity profiling (evidence-fusion classifier output).
     profile_status?: 'high' | 'medium' | 'unknown';
     vendor_confidence?: number;
