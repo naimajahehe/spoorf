@@ -1,6 +1,6 @@
 import assert from 'assert';
 import { DatabaseService } from '../src/services/database';
-import { LicenseManager, DEFAULT_FREE_LICENSE, FeatureLimitError, FeatureLockedError } from '../src/services/licenseManager';
+import { LicenseManager, DEFAULT_FREE_LICENSE, FeatureLimitError, FeatureLockedError, isTrustedCloudUrl } from '../src/services/licenseManager';
 import { DeviceManager } from '../src/services/deviceManager';
 import { PythonBridge } from '../src/services/pythonBridge';
 import { Device } from '../src/types';
@@ -209,6 +209,19 @@ export async function runLicenseUnitTests() {
     assert.strictEqual(afterLogoutStatus.isAuthenticated, false);
     assert.strictEqual(afterLogoutStatus.license.tier, 'free');
     console.log('  ✓ Logout Cleanliness: Session cleared and reverted to Free baseline');
+
+    // ULTRAREVIEW #3: anti-SSRF cloudUrl harus memeriksa port DAN path, bukan hanya protokol+host.
+    {
+        const official = 'https://api.spoorf.app/v1';
+        assert.strictEqual(isTrustedCloudUrl(official, official), true, 'endpoint resmi identik harus dipercaya');
+        assert.strictEqual(isTrustedCloudUrl('https://api.spoorf.app/v1/', official), true, 'trailing slash tetap dipercaya');
+        assert.strictEqual(isTrustedCloudUrl('https://api.spoorf.app:8443/v1', official), false, 'port berbeda pada host resmi harus ditolak');
+        assert.strictEqual(isTrustedCloudUrl('https://api.spoorf.app/mirror/upload', official), false, 'path berbeda pada host resmi harus ditolak');
+        assert.strictEqual(isTrustedCloudUrl('http://api.spoorf.app/v1', official), false, 'protokol berbeda harus ditolak');
+        assert.strictEqual(isTrustedCloudUrl('https://evil.com/v1', official), false, 'host berbeda harus ditolak');
+        assert.strictEqual(isTrustedCloudUrl('not a url', official), false, 'URL tak valid harus ditolak');
+        console.log('  ✓ ULTRAREVIEW #3: cloudUrl anti-SSRF menolak port/path arbitrer pada host resmi');
+    }
 
     await db.close();
 

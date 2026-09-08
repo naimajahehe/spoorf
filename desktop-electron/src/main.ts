@@ -4,7 +4,7 @@ import fs from 'fs';
 import crypto from 'crypto';
 import { spawn, ChildProcess } from 'child_process';
 import http from 'http';
-import { shouldRespawnAfterExit, buildTreeKillArgs } from './supervisor-logic';
+import { shouldRespawnAfterExit, buildTreeKillArgs, isAllowedNavigation } from './supervisor-logic';
 
 // KEAMANAN (P1): Ephemeral IPC Bearer Token (SPEC-010 §2.4 / §3).
 // Di-generate sekali per sesi & disuntik ke env SEBELUM Python di-spawn dan
@@ -371,14 +371,10 @@ function createMainWindow() {
     });
 
     // KEAMANAN (P1): Cegah navigasi top-level window utama ke URL tak terpercaya
+    const ALLOWED_NAV_ORIGINS = ['http://127.0.0.1:5000', 'http://localhost:5173'];
     mainWindow.webContents.on('will-navigate', (event, url) => {
         const currentUrl = mainWindow?.webContents.getURL() || '';
-        if (
-            url !== currentUrl &&
-            !url.startsWith('file://') &&
-            !url.startsWith('http://127.0.0.1:5000') &&
-            !url.startsWith('http://localhost:5173')
-        ) {
+        if (!isAllowedNavigation(url, currentUrl, ALLOWED_NAV_ORIGINS)) {
             event.preventDefault();
             try {
                 shell.openExternal(url);

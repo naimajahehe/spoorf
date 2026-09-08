@@ -218,6 +218,10 @@ export class WebSocketManager {
             // Handle unblock request (supports IP or MAC address for offline unblocking)
             socket.on('unblock', async (data: { ip?: string; mac?: string; identifier?: string }) => {
                 const target = data?.identifier || data?.mac || data?.ip || '';
+                if (!target || target.trim() === '') {
+                    socket.emit('unblockError', { error: 'identifier/mac/ip diperlukan', ip: data?.ip, mac: data?.mac });
+                    return;
+                }
                 try {
                     const device = await this.deviceManager.unblockDevice(target);
                     socket.emit('deviceUnblocked', device);

@@ -42,3 +42,32 @@ export function shouldRespawnAfterExit(code: number | null, ctx: RespawnContext)
 export function buildTreeKillArgs(pid: number): string[] {
     return ['/PID', String(pid), '/T', '/F'];
 }
+
+/**
+ * KEAMANAN (P1): apakah navigasi top-level window utama boleh diizinkan.
+ *
+ * Mengembalikan true hanya jika URL tetap di origin terpercaya (renderer lokal)
+ * atau skema file:. Perbandingan memakai origin URL yang di-parse, bukan
+ * pencocokan prefix string mentah, agar trik userinfo/subdomain/port
+ * (`http://127.0.0.1:5000@ evil.com/`, `http://127.0.0.1:5000.evil.com/`,
+ * `http://127.0.0.1:50001/`) tidak lolos.
+ */
+export function isAllowedNavigation(url: string, currentUrl: string, allowedOrigins: string[]): boolean {
+    if (url === currentUrl) return true;
+    let parsed: URL;
+    try {
+        parsed = new URL(url);
+    } catch {
+        return false;
+    }
+    if (parsed.protocol === 'file:') return true;
+    // Normalisasi allow-list ke origin yang di-parse, lalu bandingkan origin lengkap
+    // (protokol + host + port) — bukan prefix string.
+    return allowedOrigins.some((o) => {
+        try {
+            return new URL(o).origin === parsed.origin;
+        } catch {
+            return false;
+        }
+    });
+}

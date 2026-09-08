@@ -1067,14 +1067,7 @@ export class DeviceManager extends EventEmitter {
                     }
 
                     // Bersihkan sesi lama jika ada (dari sebelum offline / IP lama) sebelum membangun sesi fresh
-                    if (currentDev.session_id) {
-                        try {
-                            await this.python.stopSpoof(currentDev.session_id);
-                        } catch (e) {
-                            // Sesi lama mungkin sudah mati di Python
-                        }
-                        currentDev.session_id = undefined;
-                    }
+                    await this._clearStaleSpoofSession(currentDev);
 
                     try {
                         console.log(`⚡ [AUTO-REBLOCK] Target detected returning: ${currentDev.hostname || currentDev.ip} (MAC: ${currentDev.mac}, IP: ${currentDev.ip})`);
@@ -1117,14 +1110,7 @@ export class DeviceManager extends EventEmitter {
                     }
 
                     // Bersihkan sesi lama jika ada (dari sebelum offline / IP lama) sebelum membangun sesi fresh
-                    if (currentDev.session_id) {
-                        try {
-                            await this.python.stopSpoof(currentDev.session_id);
-                        } catch (e) {
-                            // Sesi lama mungkin sudah mati di Python
-                        }
-                        currentDev.session_id = undefined;
-                    }
+                    await this._clearStaleSpoofSession(currentDev);
 
                     try {
                         const limit = currentDev.speed_limit ?? 50;
@@ -1243,11 +1229,32 @@ export class DeviceManager extends EventEmitter {
         return device;
     }
 
+    /**
+     * Hentikan sesi spoof lama pada perangkat (dari sebelum offline / IP lama) sebelum
+     * membangun sesi fresh. Kegagalan stopSpoof diabaikan: sesi lama mungkin sudah mati
+     * di Python. Dipakai oleh jalur auto-reblock dan auto-throttle.
+     */
+    private async _clearStaleSpoofSession(dev: Device): Promise<void> {
+        if (dev.session_id) {
+            try {
+                await this.python.stopSpoof(dev.session_id);
+            } catch (e) {
+                // Sesi lama mungkin sudah mati di Python
+            }
+            dev.session_id = undefined;
+        }
+    }
+
     async unblockDevice(identifier: string): Promise<Device> {
         return this.runExclusive(() => this._unblockDeviceImpl(identifier));
     }
 
     private async _unblockDeviceImpl(identifier: string): Promise<Device> {
+        // ULTRAREVIEW #2: tolak identifier kosong. Tanpa ini, loop fallback di bawah mencocokkan
+        // perangkat arsip pertama dengan ip='' / profile_id='' dan melepas blokirnya secara keliru.
+        if (!identifier || identifier.trim() === '') {
+            throw new Error('unblockDevice: identifier (ip/mac/profile_id) kosong tidak diperbolehkan');
+        }
         let device = this.devices.get(identifier);
         if (!device) {
             const norm = identifier.toLowerCase();

@@ -4,6 +4,23 @@ import os from 'os';
 import { DatabaseService } from './database';
 import { LicenseTier, UserLicense, AuthUser, CachedLicense, AuthStatusResponse } from '../types';
 
+/**
+ * KEAMANAN (Anti-SSRF): apakah `candidate` cloudUrl aman menerima kredensial + HWID.
+ * Harus cocok origin (protokol + host + PORT) DAN path resmi — bukan hanya protokol+host,
+ * agar port/path arbitrer pada host yang sama (mis. `:8443/mirror/upload`) tidak lolos.
+ */
+export function isTrustedCloudUrl(candidate: string, official: string): boolean {
+    try {
+        const parsed = new URL(candidate);
+        const officialParsed = new URL(official);
+        const normPath = (p: string) => p.replace(/\/+$/, '') || '/';
+        return parsed.origin === officialParsed.origin
+            && normPath(parsed.pathname) === normPath(officialParsed.pathname);
+    } catch {
+        return false;
+    }
+}
+
 export const DEFAULT_FREE_LICENSE: UserLicense = {
     tier: 'free',
     max_cuts: 5,
@@ -172,16 +189,10 @@ export class LicenseManager extends EventEmitter {
         // Kredensial dan hash HWID HANYA boleh dikirim ke endpoint resmi terkonfigurasi.
         let targetUrl = this.cloudEndpoint;
         if (credentials.cloudUrl) {
-            try {
-                const parsed = new URL(credentials.cloudUrl);
-                const officialParsed = new URL(this.cloudEndpoint);
-                if (parsed.protocol === officialParsed.protocol && parsed.hostname === officialParsed.hostname) {
-                    targetUrl = credentials.cloudUrl;
-                } else {
-                    console.warn(`⚠️ [Security] Menolak cloudUrl tidak terpercaya: ${credentials.cloudUrl}`);
-                }
-            } catch {
-                console.warn(`⚠️ [Security] Format cloudUrl tidak valid: ${credentials.cloudUrl}`);
+            if (isTrustedCloudUrl(credentials.cloudUrl, this.cloudEndpoint)) {
+                targetUrl = credentials.cloudUrl;
+            } else {
+                console.warn(`⚠️ [Security] Menolak cloudUrl tidak terpercaya: ${credentials.cloudUrl}`);
             }
         }
 

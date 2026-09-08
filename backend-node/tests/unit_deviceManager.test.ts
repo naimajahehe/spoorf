@@ -2294,5 +2294,35 @@ export async function runDeviceManagerTests() {
         console.log('  ✓ AUDIT FIX: unblockDevice unblocks offline device via MAC address');
     }
 
+    // ULTRAREVIEW #2: unblockDevice('') must reject, not match the first archived device (ip='' / profile_id='')
+    {
+        const python: any = new EventEmitter();
+        python.stopSpoof = async () => {};
+        let blockedCleared = false;
+        const db: any = {
+            getDeviceByMac: async () => undefined,
+            setDeviceBlocked: async (_id: string, blocked: boolean) => { if (!blocked) blockedCleared = true; },
+            setDeviceSpeedLimit: async () => {},
+            setDeviceOnlineStatus: async () => {}
+        };
+        const manager = new DeviceManager(python, db);
+        // Perangkat offline yang dikunci by profile_id/MAC dengan IP aktif kosong — kasus berbahaya:
+        // loop fallback lama mencocokkan `d.ip === ''` untuk identifier kosong.
+        (manager as any).devices.set('profile-x', {
+            ip: '', mac: 'aa:bb:cc:dd:ee:ff', profile_id: 'profile-x',
+            hostname: 'Offline-Phone', is_blocked: true, is_online: false, speed_limit: 0
+        });
+
+        let threw = false;
+        try {
+            await manager.unblockDevice('');
+        } catch {
+            threw = true;
+        }
+        assert.strictEqual(threw, true, 'unblockDevice("") harus ditolak, bukan mencocokkan perangkat arsip sembarang');
+        assert.strictEqual(blockedCleared, false, 'identifier kosong tidak boleh melepas blokir perangkat mana pun');
+        console.log('  ✓ ULTRAREVIEW #2: unblockDevice("") ditolak, tidak melepas blokir perangkat arsip acak');
+    }
+
 }
 
