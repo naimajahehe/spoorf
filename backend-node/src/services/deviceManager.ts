@@ -714,6 +714,18 @@ export class DeviceManager extends EventEmitter {
      */
     setAutoScan(enabled: boolean): boolean {
         const next = Boolean(enabled);
+        // Gate tier di BACKEND: Auto Scan hanya untuk tier berbayar (free = "Scan saja"). Ditegakkan
+        // di sini — bukan hanya UI — agar klien free ter-autentikasi tak bisa menyalakan scan latar
+        // via emit WS langsung. Permisif bila LicenseManager tak ada (dev/test tanpa lisensi).
+        if (next && this.license && this.license.getLicense().tier === 'free') {
+            console.warn('⚠️ [Auto Scan] Ditolak: tier free hanya "Scan saja". Upgrade untuk mengaktifkan Auto Scan.');
+            if (this.autoScanEnabled) {
+                this.autoScanEnabled = false;
+                this.emit('autoScanChanged', { enabled: false });
+            }
+            return false;
+        }
+
         const changed = next !== this.autoScanEnabled;
         this.autoScanEnabled = next;
 

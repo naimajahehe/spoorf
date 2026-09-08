@@ -1356,6 +1356,32 @@ export async function runDeviceManagerTests() {
         console.log('  ✓ ULTRAREVIEW-2 #8: DHCP RELEASE mempertahankan perangkat via kunci identitas, bukan menghapusnya');
     }
 
+    // ULTRAREVIEW batch-3 #1: setAutoScan harus menegakkan gate tier di BACKEND (free = "Scan saja").
+    // Sebelumnya hanya frontend yang menggate → klien free bisa emit setAutoScan(true) via WS langsung.
+    {
+        const python: any = new EventEmitter();
+        python.scan = async () => [];
+        python.stopSpoof = async () => {};
+        const db: any = {
+            syncScanResults: async () => ({
+                allDevices: [], autoReblockTargets: [], autoThrottleTargets: [], zombieSessionsToStop: []
+            })
+        };
+
+        const freeLicense: any = { getLicense: () => ({ tier: 'free' }) };
+        const managerFree = new DeviceManager(python, db, freeLicense);
+        const resFree = managerFree.setAutoScan(true);
+        assert.strictEqual(resFree, false, 'free tier tidak boleh mengaktifkan Auto Scan');
+        assert.strictEqual(managerFree.isAutoScanEnabled(), false, 'Auto Scan harus tetap OFF untuk free tier');
+
+        const proLicense: any = { getLicense: () => ({ tier: 'pro' }) };
+        const managerPro = new DeviceManager(python, db, proLicense);
+        const resPro = managerPro.setAutoScan(true);
+        assert.strictEqual(resPro, true, 'pro tier boleh mengaktifkan Auto Scan');
+        assert.strictEqual(managerPro.isAutoScanEnabled(), true, 'Auto Scan harus ON untuk pro tier');
+        console.log('  ✓ ULTRAREVIEW batch-3 #1: setAutoScan menegakkan gate tier di backend (free ditolak, pro diizinkan)');
+    }
+
     // Test 25: a new DHCP device during Method 1 must not queue a second scan.
     {
         const python: any = new EventEmitter();
