@@ -84,3 +84,42 @@ taskkill /F /PID <PID>
   for _ in range(6):
       sendp(pkt_restore)
   ```
+
+---
+
+## 6. State Flapping (Osilasi Online ↔ Offline pada Host Mati / Stale ARP Cache)
+
+### Gejala:
+- Perangkat (seperti IP `10.40.151.1` atau host phantom/mati) terus menerus berganti status di UI antara **Online (Hijau)** dan **Offline (Abu-abu)**.
+- Di terminal / log service muncul pola periodik berulang:
+  ```text
+  Watchdog detected offline device: 10.40.151.1 (4 miss berturut-turut)
+  ...
+  SCAN SELESAI! Ditemukan 3 perangkat aktif di jaringan
+  ...
+  Watchdog detected offline device: 10.40.151.1 (4 miss berturut-turut)
+  ```
+
+### Akar Masalah (Root Cause):
+1. **Asumsi Keliru Scanner (`scanner.py` & `arp.py`)**:
+   - `collect_from_arp_cache(discovered)` membaca cache kernel `arp -a` Windows secara pasif dan langsung memasukkan entri ke dalam daftar `discovered`.
+   - Di `_build_device`, variabel `is_active_layer2` di-*hardcode* bernilai `True`. Akibatnya, meskipun host tidak membalas ICMP ping (`ping['alive'] == False`) dan tidak membalas port scan TCP/UDP, scanner tetap memvonis host tersebut `is_online: True`.
+   - Node.js menerima hasil scan ini dan langsung memperbarui database SQLite (`is_online = 1`) serta UI menjadi **ONLINE**.
+2. **Uji Nyata Fisik Watchdog (`liveness.py`)**:
+   - `liveness_daemon` menjalankan `pulse_host` tiap 10 detik dengan balapan tri-vektor (ARP burst, ICMP, UDP/IPv6).
+   - Karena host fisik mati atau tidak terhubung, semua 3 vektor gagal (`is_alive: False`).
+   - Setelah 4 miss berturut-turut, Watchdog menembakkan event `device_offline_pulse` ke Node.js, mengubah status menjadi `is_online = 0` (UI berubah **OFFLINE**).
+3. **Flapping Loop**:
+   - Siklus scan berikutnya kembali membaca tabel `arp -a` Windows yang belum kedaluwarsa $\rightarrow$ memaksa status ONLINE lagi $\rightarrow$ Watchdog mendeteksi 4 miss lagi $\rightarrow$ memaksa OFFLINE.
+
+### Solusi Arsitektural 100% (3 Pilar):
+1. **Pilar 1 (Verifikasi Aktif untuk Entri Pasif ARP di `scanner.py`)**:
+   - Entri dari `arp -a` kernel Windows adalah data pasif/historis.
+   - Pada `_build_device`, jika host gagal di-ping (`ping['alive'] == False`) dan tidak memiliki bukti paket masuk aktif (bukan dari mDNS, SSDP, DHCP, atau IPv6 NDP), lakukan uji denyut Layer 2 cepat (`pulse_host` / ARP burst).
+   - Jika host tidak membalas verifikasi aktif L2, perangkat ditandai `is_online: False` dan **tidak dimasukkan** ke dalam daftar `devices` aktif hasil scan.
+2. **Pilar 2 (Sinergi State Database di `database.ts`)**:
+   - Arsitektur Spoorf menetapkan bahwa `scan_full()` hanya mengembalikan perangkat yang **benar-benar aktif**.
+   - Perangkat yang tidak ada dalam hasil scan otomatis ditandai `is_online = 0` oleh SQLite reconciliation (`syncScanResults`), namun data profil, MAC, alias, dan vendor tetap tersimpan di database dan tampil di tab Offline.
+3. **Pilar 3 (Histeresis & Pembersihan Watchdog di `liveness.py`)**:
+   - Karena perangkat mati tidak lagi dilaporkan oleh scanner, `liveness_daemon.update_tracked_devices()` otomatis menghentikan pemantauannya, mencegah miss berulang dan log spam.
+   - Event `device_offline_pulse` hanya ditembakkan saat terjadi transisi status (`misses == self._offline_threshold`).

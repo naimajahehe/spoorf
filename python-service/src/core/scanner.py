@@ -273,6 +273,27 @@ class NetworkScanner:
 
             first_seen = cls._DEVICE_HISTORY[norm_mac]['first_seen']
             last_seen = cls._DEVICE_HISTORY[norm_mac]['last_seen']
+
+        # Verifikasi keaktifan fisik Layer 2 jika ping gagal:
+        # Host yang tidak membalas ICMP dan tidak membuka port vital hanya boleh dianggap aktif
+        # bila memiliki bukti respon aktif (mDNS, SSDP, DHCP, IPv6), atau jika membalas probe ARP cepat.
+        if not ping['alive'] and not is_gateway and not is_self:
+            has_active_signal = (
+                bool(open_ports) or
+                bool(mdns_h) or
+                bool(ssdp_h) or
+                bool(dhcp_hit) or
+                bool(ipv6_addrs)
+            )
+            if not has_active_signal:
+                probe_disc: Dict[str, str] = {}
+                try:
+                    probe_sleeping_host_via_unicast_arp(ip, norm_mac, probe_disc, timeout=0.25)
+                except Exception:
+                    pass
+                if ip not in probe_disc:
+                    is_active_layer2 = False
+
         is_online = ping['alive'] or is_active_layer2
 
         dhcp_hit = dhcp_map.get(norm_mac) or dhcp_map.get(ip, {})
@@ -537,7 +558,7 @@ class NetworkScanner:
                 for future in concurrent.futures.as_completed(future_to_ip):
                     try:
                         dev = future.result()
-                        if dev:
+                        if dev and dev.get('is_online', True):
                             devices.append(dev)
                     except Exception as e:
                         logger.warning(f"Error enriching device: {e}")

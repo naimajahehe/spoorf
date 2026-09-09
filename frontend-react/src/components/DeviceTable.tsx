@@ -240,7 +240,7 @@ export const DeviceTable: FC<Props> = ({
                         const isSelected = selectedIps.includes(device.mac);
                         const isExpanded = expandedIp === device.mac;
                         const isInspecting = activeInspectorIp === device.ip;
-                        const isOnline = device.is_self ? true : device.is_online;
+                        const isOnline = Boolean(device.is_online);
                         const isDeviceBusy = (Boolean(device.ip) && busyToggleIp === device.ip) || (Boolean(device.mac) && busyToggleIp === device.mac);
                         const isLoading = (Boolean(device.ip) && loadingIps.has(device.ip)) || (Boolean(device.mac) && loadingIps.has(device.mac));
                         // Kunci total: operasi putus/pulih perangkat LAIN sedang berjalan.

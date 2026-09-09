@@ -262,6 +262,10 @@ def network_watchdog_thread():
             try:
                 if scanner.is_network_changed(last_gateway, last_interface, last_gateway_mac):
                     logger.warning("🔥 Watchdog detected network change! Refreshing spoofer & halting stale sessions...")
+                    try:
+                        shield_engine.disable()
+                    except Exception as e:
+                        logger.debug(f"Watchdog shield disable notice: {e}")
                     spoofer.stop_all()
                     redirect_manager.stop_all()
                     transparent_gateway.stop_all()
@@ -284,7 +288,8 @@ def network_watchdog_thread():
                         "message": f"Gateway changed to {last_gateway}",
                         "data": {
                             "new_gateway": last_gateway,
-                            "new_interface": last_interface
+                            "new_interface": last_interface,
+                            "new_gateway_mac": last_gateway_mac
                         }
                     })
             except Exception as e:

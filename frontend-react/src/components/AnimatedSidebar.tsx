@@ -1,5 +1,5 @@
 import { SlicedText } from "./kokonutui/sliced-text";
-import { ChevronRight, Command, LayoutDashboard, GlobeOff, Terminal, Settings, Search, PanelLeft, Radio, Zap, ShieldCheck, Gamepad2, BookOpen } from "lucide-react";
+import { ChevronRight, Command, LayoutDashboard, GlobeOff, Terminal, Settings, Search, Radio, Zap, ShieldCheck, Gamepad2, BookOpen } from "lucide-react";
 import {
   AnimatePresence,
   type HTMLMotionProps,
@@ -537,13 +537,85 @@ export const AnimatedSidebar = forwardRef<HTMLElement, AnimatedSidebarProps>(
         ? "var(--sidebar-width-icon)"
         : "var(--sidebar-width)";
 
+    const [profileMenuOpen, setProfileMenuOpen] = useState(false);
+    const profileMenuRef = useRef<HTMLDivElement>(null);
+    const profileTriggerRef = useRef<HTMLDivElement>(null);
+    const [popoverPos, setPopoverPos] = useState<{ bottom: number; left: number; width: number } | null>(null);
+
+    const updatePopoverPosition = useCallback(() => {
+      if (!profileTriggerRef.current) return;
+      const rect = profileTriggerRef.current.getBoundingClientRect();
+      const bottom = Math.max(12, window.innerHeight - rect.top + 8);
+      if (collapsed) {
+        setPopoverPos({
+          bottom,
+          left: Math.max(8, rect.left),
+          width: 224,
+        });
+      } else {
+        setPopoverPos({
+          bottom,
+          left: rect.left,
+          width: Math.max(210, rect.width),
+        });
+      }
+    }, [collapsed]);
+
+    const handleToggleProfileMenu = () => {
+      if (!profileMenuOpen) {
+        updatePopoverPosition();
+        setProfileMenuOpen(true);
+      } else {
+        setProfileMenuOpen(false);
+      }
+    };
+
+    useEffect(() => {
+      if (!profileMenuOpen) return;
+      updatePopoverPosition();
+      const handleResize = () => updatePopoverPosition();
+      const handleScroll = () => updatePopoverPosition();
+      window.addEventListener("resize", handleResize);
+      window.addEventListener("scroll", handleScroll, true);
+      return () => {
+        window.removeEventListener("resize", handleResize);
+        window.removeEventListener("scroll", handleScroll, true);
+      };
+    }, [profileMenuOpen, updatePopoverPosition]);
+
+    useEffect(() => {
+      if (!profileMenuOpen) return;
+      const handleClickOutside = (event: MouseEvent) => {
+        const target = event.target as Node;
+        if (
+          profileMenuRef.current &&
+          !profileMenuRef.current.contains(target) &&
+          profileTriggerRef.current &&
+          !profileTriggerRef.current.contains(target)
+        ) {
+          setProfileMenuOpen(false);
+        }
+      };
+      const handleKeyDown = (event: KeyboardEvent) => {
+        if (event.key === "Escape") {
+          setProfileMenuOpen(false);
+        }
+      };
+      document.addEventListener("mousedown", handleClickOutside);
+      document.addEventListener("keydown", handleKeyDown);
+      return () => {
+        document.removeEventListener("mousedown", handleClickOutside);
+        document.removeEventListener("keydown", handleKeyDown);
+      };
+    }, [profileMenuOpen]);
+
     // If children are not explicitly passed, render the tailored Sentinel app navigation
     const content = children ?? (
       <>
-        {/* Workspace Brand Header (Aligned h-16 with right topbar header & centered) */}
-        <AnimatedSidebarHeader className="h-16 border-b border-white/[0.08] px-3 flex items-center justify-center shrink-0">
+        {/* Workspace Brand Header (Clean seamless, no borders) */}
+        <AnimatedSidebarHeader className="h-16 px-3 flex items-center justify-center shrink-0">
           <div className={cn("flex items-center gap-3 min-w-0 overflow-hidden", collapsed ? "justify-center w-full" : "w-full justify-start px-1")}>
-            <div className="size-8 rounded-xl bg-emerald-500/10 border border-emerald-500/25 flex items-center justify-center text-emerald-400 shrink-0 shadow-sm">
+            <div className="size-8 rounded-xl bg-emerald-500/10 flex items-center justify-center text-emerald-400 shrink-0 shadow-sm">
               <Command size={16} className="stroke-[2.5]" />
             </div>
             {!collapsed && (
@@ -671,75 +743,33 @@ export const AnimatedSidebar = forwardRef<HTMLElement, AnimatedSidebarProps>(
               </AnimatedSidebarMenu>
             </AnimatedSidebarGroupContent>
           </AnimatedSidebarGroup>
-
-          {/* Preferences Group */}
-          <AnimatedSidebarGroup>
-            <AnimatedSidebarGroupLabel>PREFERENCES</AnimatedSidebarGroupLabel>
-            <AnimatedSidebarGroupContent>
-              <AnimatedSidebarMenu>
-                <AnimatedSidebarMenuItem>
-                  <AnimatedSidebarMenuButton
-                    isActive={activeNav === "documentation"}
-                    onSelect={() => onNavSelect?.("documentation")}
-                    icon={<BookOpen size={18} />}
-                  >
-                    Dokumentasi
-                  </AnimatedSidebarMenuButton>
-                </AnimatedSidebarMenuItem>
-
-                <AnimatedSidebarMenuItem>
-                  <AnimatedSidebarMenuButton
-                    isActive={activeNav === "settings"}
-                    onSelect={() => onNavSelect?.("settings")}
-                    icon={<Settings size={18} />}
-                  >
-                    Settings
-                  </AnimatedSidebarMenuButton>
-                </AnimatedSidebarMenuItem>
-              </AnimatedSidebarMenu>
-            </AnimatedSidebarGroupContent>
-          </AnimatedSidebarGroup>
         </AnimatedSidebarContent>
 
-        {/* Footer User Profile Card & Collapse Toggle Button */}
+        {/* Footer User Profile Card (Seamless, no borders, with Settings & Docs in Profile Menu) */}
+        {/* Footer User Profile Card (Seamless, no borders, with Settings & Docs in Profile Menu) */}
         <AnimatedSidebarFooter className={cn(
-          "border-t border-white/[0.08] mt-auto sticky bottom-0 bg-[#090a0c] shrink-0 transition-all flex flex-col gap-1.5",
+          "mt-auto sticky bottom-0 bg-[#090a0c] shrink-0 transition-all flex flex-col relative",
           collapsed ? "p-2 items-center" : "p-3"
         )}>
-          {/* Collapse/Expand Toggle Button in Sidebar (Clean icon without text) */}
-          <button
-            type="button"
-            onClick={onToggleCollapse}
-            className={cn(
-              "flex items-center justify-center rounded-xl text-zinc-400 hover:text-white hover:bg-white/[0.06] transition-all border border-transparent hover:border-white/[0.06] shrink-0",
-              collapsed
-                ? "size-10 p-0 mx-auto"
-                : "w-full h-8 px-2"
-            )}
-            title={collapsed ? "Expand Sidebar" : "Collapse Sidebar"}
-            aria-label={collapsed ? "Expand Sidebar" : "Collapse Sidebar"}
-          >
-            <PanelLeft size={16} className={cn("shrink-0 transition-transform duration-200", collapsed && "rotate-180")} />
-          </button>
-
-          {/* User Profile */}
+          {/* Profile Trigger Card (No borders, completely seamless) */}
           <div
-            onClick={onOpenAuthModal}
+            ref={profileTriggerRef}
+            onClick={handleToggleProfileMenu}
             className={cn(
               "flex items-center rounded-xl hover:bg-white/[0.06] transition-colors cursor-pointer select-none",
-              collapsed ? "size-8 justify-center p-0 mx-auto" : "w-full p-2 gap-3"
+              collapsed ? "size-10 justify-center p-0 mx-auto" : "w-full p-2 gap-3"
             )}
-            title={`Akun: ${authStatus?.user?.name || authStatus?.user?.email || 'Guest'} (${(authStatus?.license?.tier || 'free').toUpperCase()}) - Klik untuk kelola`}
+            title={`Akun: ${authStatus?.user?.name || authStatus?.user?.email || 'Guest'} (${(authStatus?.license?.tier || 'free').toUpperCase()}) - Klik untuk menu profil`}
           >
             <div className={cn(
-              "size-8 rounded-full border font-semibold flex items-center justify-center text-xs relative shrink-0",
-              authStatus?.license?.tier === 'vip' ? "bg-amber-500/20 border-amber-500/40 text-amber-200" :
-              authStatus?.license?.tier === 'pro' ? "bg-purple-500/20 border-purple-500/40 text-purple-200" :
-              "bg-white/[0.08] border-white/[0.12] text-zinc-200"
+              "size-8 rounded-full font-semibold flex items-center justify-center text-xs relative shrink-0",
+              authStatus?.license?.tier === 'vip' ? "bg-amber-500/20 text-amber-200" :
+              authStatus?.license?.tier === 'pro' ? "bg-purple-500/20 text-purple-200" :
+              "bg-white/[0.08] text-zinc-200"
             )}>
               <span>{authStatus?.user?.name ? authStatus.user.name.substring(0, 2).toUpperCase() : 'SP'}</span>
               <span className={cn(
-                "absolute -bottom-0.5 -right-0.5 size-2 rounded-full border-2 border-[#090a0c]",
+                "absolute -bottom-0.5 -right-0.5 size-2 rounded-full ring-2 ring-[#090a0c]",
                 isConnected ? "bg-emerald-500" : "bg-zinc-500"
               )} />
             </div>
@@ -752,22 +782,116 @@ export const AnimatedSidebar = forwardRef<HTMLElement, AnimatedSidebarProps>(
                     </span>
                     <span className={cn(
                       "px-1.5 py-0.2 rounded text-[9px] font-mono font-bold uppercase shrink-0",
-                      authStatus?.license?.tier === 'vip' ? "bg-amber-500/20 text-amber-300 border border-amber-500/30" :
-                      authStatus?.license?.tier === 'pro' ? "bg-purple-500/20 text-purple-300 border border-purple-500/30" :
-                      "bg-zinc-800 text-zinc-400 border border-zinc-700"
+                      authStatus?.license?.tier === 'vip' ? "bg-amber-500/20 text-amber-300" :
+                      authStatus?.license?.tier === 'pro' ? "bg-purple-500/20 text-purple-300" :
+                      "bg-zinc-800 text-zinc-400"
                     )}>
                       {authStatus?.license?.tier || 'FREE'}
                     </span>
                   </div>
                   <span className="text-[10px] font-mono text-zinc-500 truncate">
-                    {authStatus?.user?.email || 'Klik untuk Aktivasi Lisensi'}
+                    {authStatus?.user?.email || 'Aktivasi Lisensi'}
                   </span>
                 </div>
-                <ChevronRight size={14} className="text-zinc-500 shrink-0 ml-auto" />
+                <ChevronRight size={14} className={cn("text-zinc-500 shrink-0 ml-auto transition-transform", profileMenuOpen && "-rotate-90")} />
               </>
             )}
           </div>
         </AnimatedSidebarFooter>
+
+        {/* Profile Popover Portal to document.body (Escapes all overflow-hidden and parent width restrictions) */}
+        {typeof document !== "undefined" &&
+          createPortal(
+            <AnimatePresence>
+              {profileMenuOpen && popoverPos && (
+                <motion.div
+                  ref={profileMenuRef}
+                  initial={{ opacity: 0, y: 6, scale: 0.96 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={{ opacity: 0, y: 6, scale: 0.96 }}
+                  transition={{ duration: 0.15 }}
+                  style={{
+                    position: "fixed",
+                    bottom: `${popoverPos.bottom}px`,
+                    left: `${popoverPos.left}px`,
+                    width: `${popoverPos.width}px`,
+                    zIndex: 9999,
+                  }}
+                  className="rounded-2xl bg-[#14151a] border border-white/[0.08] shadow-[0_12px_40px_rgba(0,0,0,0.85)] p-1.5 flex flex-col gap-1 select-none backdrop-blur-xl pointer-events-auto"
+                >
+                  {/* Profile Header Info */}
+                  <div className="px-3 py-2 flex flex-col gap-0.5 select-none">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs font-bold text-white truncate">
+                        {authStatus?.user?.name || authStatus?.user?.email || 'Spoorfer Guest'}
+                      </span>
+                      <span className={cn(
+                        "px-1.5 py-0.2 rounded text-[9px] font-mono font-bold uppercase shrink-0",
+                        authStatus?.license?.tier === 'vip' ? "bg-amber-500/20 text-amber-300" :
+                        authStatus?.license?.tier === 'pro' ? "bg-purple-500/20 text-purple-300" :
+                        "bg-zinc-800 text-zinc-400"
+                      )}>
+                        {authStatus?.license?.tier || 'FREE'}
+                      </span>
+                    </div>
+                    <span className="text-[10px] font-mono text-zinc-400 truncate">
+                      {authStatus?.user?.email || 'Sentinel Operator'}
+                    </span>
+                  </div>
+
+                  <div className="h-px bg-white/[0.06] my-0.5" />
+
+                  {/* Settings Item */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setProfileMenuOpen(false);
+                      onNavSelect?.("settings");
+                    }}
+                    className={cn(
+                      "flex items-center gap-2.5 w-full px-2.5 py-2 rounded-xl text-xs font-medium transition-colors text-zinc-300 hover:text-white hover:bg-white/[0.08]",
+                      activeNav === "settings" && "bg-white/[0.08] text-white font-semibold"
+                    )}
+                  >
+                    <Settings size={15} className="text-zinc-400 shrink-0" />
+                    <span>Pengaturan (Settings)</span>
+                  </button>
+
+                  {/* Dokumentasi Item */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setProfileMenuOpen(false);
+                      onNavSelect?.("documentation");
+                    }}
+                    className={cn(
+                      "flex items-center gap-2.5 w-full px-2.5 py-2 rounded-xl text-xs font-medium transition-colors text-zinc-300 hover:text-white hover:bg-white/[0.08]",
+                      activeNav === "documentation" && "bg-white/[0.08] text-white font-semibold"
+                    )}
+                  >
+                    <BookOpen size={15} className="text-zinc-400 shrink-0" />
+                    <span>Dokumentasi</span>
+                  </button>
+
+                  <div className="h-px bg-white/[0.06] my-0.5" />
+
+                  {/* Kelola Lisensi & Akun */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setProfileMenuOpen(false);
+                      onOpenAuthModal?.();
+                    }}
+                    className="flex items-center gap-2.5 w-full px-2.5 py-2 rounded-xl text-xs font-medium transition-colors text-zinc-300 hover:text-white hover:bg-white/[0.08]"
+                  >
+                    <Zap size={15} className="text-amber-400 shrink-0" />
+                    <span>Kelola Lisensi & Akun</span>
+                  </button>
+                </motion.div>
+              )}
+            </AnimatePresence>,
+            document.body,
+          )}
       </>
     );
 
@@ -803,7 +927,7 @@ export const AnimatedSidebar = forwardRef<HTMLElement, AnimatedSidebarProps>(
           }
           style={style}
           className={cn(
-            "group/sidebar sticky top-0 left-0 hidden h-screen shrink-0 md:block will-change-[width] bg-[#090a0c] border-r border-white/[0.08] z-30 self-start",
+            "group/sidebar sticky top-0 left-0 hidden h-screen shrink-0 md:block will-change-[width] bg-[#090a0c] z-30 self-start",
             "peer",
             side === "right" && "order-last",
             className,
@@ -821,8 +945,6 @@ export const AnimatedSidebar = forwardRef<HTMLElement, AnimatedSidebarProps>(
             className={cn(
               "flex h-screen w-full flex-col justify-between overflow-hidden bg-[#090a0c]",
               collapsible === "offcanvas" && "w-[var(--sidebar-width)]",
-              variant === "sidebar" &&
-                (side === "left" ? "border-border border-r" : "border-border border-l"),
               variant === "floating" &&
                 "m-2 h-[calc(100svh-1rem)] rounded-2xl border border-border shadow-sm",
               variant === "inset" && "m-2 h-[calc(100svh-1rem)] rounded-2xl",
@@ -831,7 +953,6 @@ export const AnimatedSidebar = forwardRef<HTMLElement, AnimatedSidebarProps>(
           >
             {content}
           </motion.div>
-          <AnimatedSidebarRail />
         </motion.aside>
       </AnimatedSidebarPanelContext.Provider>
     );
@@ -1025,7 +1146,7 @@ export const AnimatedSidebarFooter = forwardRef<
       ref={forwardedRef}
       data-slot="sidebar-footer"
       className={cn(
-        "flex shrink-0 flex-col gap-2 border-border border-t pb-[max(0.75rem,env(safe-area-inset-bottom))] transition-all",
+        "flex shrink-0 flex-col gap-2 pb-[max(0.75rem,env(safe-area-inset-bottom))] transition-all",
         collapsed ? "p-2 items-center" : "p-3",
         className,
       )}
@@ -1063,7 +1184,7 @@ export const AnimatedSidebarGroupLabel = forwardRef<
 
   if (collapsed) {
     return (
-      <div className="my-2 mx-auto w-6 border-t border-white/[0.08]" />
+      <div className="my-1.5" />
     );
   }
 
@@ -1364,7 +1485,7 @@ export function AnimatedSidebarMenuButton({
           transition={context.reduce ? { duration: 0 } : SPRING_LAYOUT}
           className={cn(
             "absolute inset-0 rounded-xl bg-white/[0.08] pointer-events-none",
-            panel.collapsed && "rounded-xl border border-white/[0.1]"
+            panel.collapsed && "rounded-xl"
           )}
         />
       ) : null}

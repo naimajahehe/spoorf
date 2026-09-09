@@ -38,7 +38,20 @@ export interface CutStatus {
     ipv6_packets: number;
 }
 
+export interface Network {
+    id: string;                 // 'net_' + gateway_mac_clean
+    ssid: string;               // Wi-Fi SSID or adapter name
+    gateway_ip: string;         // Default gateway IPv4
+    gateway_mac: string;        // Gateway LAN MAC
+    subnet?: string;            // Subnet CIDR (e.g. 192.168.1.0/24)
+    interface_type?: 'wifi' | 'ethernet' | 'tethering';
+    created_at?: string;
+    first_connected_at?: string;
+    last_connected_at?: string;
+}
+
 export interface Device {
+    network_id?: string;
     ip: string;
     last_ip?: string;
     mac: string;

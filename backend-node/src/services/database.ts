@@ -1,7 +1,16 @@
 import Database from 'better-sqlite3';
 import path from 'path';
 import fs from 'fs';
-import { Device, CachedLicense, ProfileAssessment, ProfileEvidence, ProfileStatus } from '../types';
+import { Device, Network, CachedLicense, ProfileAssessment, ProfileEvidence, ProfileStatus } from '../types';
+
+/**
+ * Turunkan network_id dari MAC gateway router — unik per router LAN & bebas kolisi.
+ * Menghasilkan 'net_<hex>' atau 'net_default' bila MAC kosong.
+ */
+export function deriveNetworkId(gatewayMac?: string | null): string {
+    const clean = (gatewayMac || '').toLowerCase().replace(/[^0-9a-f]/g, '');
+    return clean ? `net_${clean}` : 'net_default';
+}
 
 /**
  * Grace period (detik) sebelum perangkat yang hilang dari hasil scan ditandai offline.
@@ -436,11 +445,95 @@ export class DatabaseService {
         if (this.initialized) return;
 
         try {
-            // Skema tabel devices
+            // Pastikan tabel networks tersedia terlebih dahulu
+            this.db.exec(`
+                CREATE TABLE IF NOT EXISTS networks (
+                    id TEXT PRIMARY KEY,
+                    ssid TEXT NOT NULL,
+                    gateway_ip TEXT NOT NULL,
+                    gateway_mac TEXT NOT NULL,
+                    subnet TEXT,
+                    interface_type TEXT DEFAULT 'wifi',
+                    created_at TEXT DEFAULT (datetime('now', 'localtime')),
+                    last_connected_at TEXT DEFAULT (datetime('now', 'localtime'))
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_networks_last_connected ON networks(last_connected_at DESC);
+
+                INSERT OR IGNORE INTO networks (id, ssid, gateway_ip, gateway_mac)
+                VALUES ('net_default', 'Default Network', '0.0.0.0', '00:00:00:00:00:00');
+
+                CREATE TABLE IF NOT EXISTS device_profiles (
+                    id TEXT PRIMARY KEY,
+                    alias TEXT NOT NULL,
+                    hostname TEXT,
+                    os TEXT,
+                    vendor TEXT,
+                    device_type TEXT,
+                    dhcp_fingerprint TEXT,
+                    dhcp_vendor_class TEXT,
+                    dhcp_client_id TEXT,
+                    linked_macs TEXT DEFAULT '[]',
+                    created_at TEXT DEFAULT (datetime('now', 'localtime')),
+                    updated_at TEXT DEFAULT (datetime('now', 'localtime'))
+                );
+            `);
+
+            // Migration check: periksa apakah tabel devices lama belum memiliki kolom network_id
+            const existingDeviceCols = this.db.pragma('table_info(devices)') as Array<{
+                cid: number;
+                name: string;
+                type: string;
+                notnull: number;
+                dflt_value: any;
+                pk: number;
+            }>;
+            const hasNetworkId = existingDeviceCols.some(c => c.name === 'network_id');
+            if (existingDeviceCols.length > 0 && !hasNetworkId) {
+                console.log('🔄 [DatabaseService] Migrating legacy devices schema to Network-Scoped Isolation (network_id)...');
+                const colsDef = existingDeviceCols
+                    .filter(c => c.name !== 'network_id')
+                    .map(c => {
+                        let def = `"${c.name}" ${c.type || 'TEXT'}`;
+                        if (c.dflt_value !== null && c.dflt_value !== undefined) {
+                            let valStr = String(c.dflt_value);
+                            if (!valStr.startsWith('(') && !valStr.startsWith("'") && !/^-?\d/.test(valStr) && valStr.toUpperCase() !== 'NULL') {
+                                valStr = `(${valStr})`;
+                            }
+                            def += ` DEFAULT ${valStr}`;
+                        }
+                        if (c.notnull && c.name !== 'mac') {
+                            def += ' NOT NULL';
+                        }
+                        return def;
+                    });
+                const colDefsSql = colsDef.join(',\n                            ');
+                const colNames = existingDeviceCols
+                    .filter(c => c.name !== 'network_id')
+                    .map(c => `"${c.name}"`)
+                    .join(', ');
+
+                this.db.transaction(() => {
+                    this.db.exec(`
+                        ALTER TABLE devices RENAME TO _devices_legacy_migration;
+                        CREATE TABLE devices (
+                            network_id TEXT NOT NULL DEFAULT 'net_default' REFERENCES networks(id) ON DELETE CASCADE,
+                            ${colDefsSql},
+                            PRIMARY KEY (network_id, mac)
+                        );
+                        INSERT INTO devices (network_id, ${colNames})
+                        SELECT 'net_default', ${colNames} FROM _devices_legacy_migration;
+                        DROP TABLE _devices_legacy_migration;
+                    `);
+                })();
+            }
+
             this.db.exec(`
                 CREATE TABLE IF NOT EXISTS devices (
-                    mac TEXT PRIMARY KEY,
+                    network_id TEXT NOT NULL DEFAULT 'net_default' REFERENCES networks(id) ON DELETE CASCADE,
+                    mac TEXT NOT NULL,
                     ip TEXT NOT NULL,
+                    last_ip TEXT,
                     hostname TEXT,
                     vendor TEXT,
                     os TEXT,
@@ -460,7 +553,7 @@ export class DatabaseService {
                     is_randomized_mac INTEGER DEFAULT 0,
                     mac_type TEXT,
                     alias TEXT,
-                    profile_id TEXT,
+                    profile_id TEXT REFERENCES device_profiles(id),
                     matched_by TEXT,
                     session_id TEXT,
                     speed_limit INTEGER DEFAULT 100,
@@ -485,29 +578,14 @@ export class DatabaseService {
                     profiled_at TEXT,
                     profile_version INTEGER DEFAULT 1,
                     first_seen TEXT DEFAULT (datetime('now', 'localtime')),
-                    last_seen TEXT DEFAULT (datetime('now', 'localtime'))
+                    last_seen TEXT DEFAULT (datetime('now', 'localtime')),
+                    PRIMARY KEY (network_id, mac)
                 );
 
-                CREATE TABLE IF NOT EXISTS device_profiles (
-                    id TEXT PRIMARY KEY,
-                    alias TEXT NOT NULL,
-                    hostname TEXT,
-                    os TEXT,
-                    vendor TEXT,
-                    device_type TEXT,
-                    is_blocked INTEGER DEFAULT 0,
-                    speed_limit INTEGER DEFAULT 100,
-                    dhcp_fingerprint TEXT,
-                    dhcp_vendor_class TEXT,
-                    dhcp_client_id TEXT,
-                    linked_macs TEXT DEFAULT '[]',
-                    created_at TEXT DEFAULT (datetime('now', 'localtime')),
-                    updated_at TEXT DEFAULT (datetime('now', 'localtime'))
-                );
-
+                CREATE INDEX IF NOT EXISTS idx_devices_net_id ON devices(network_id);
+                CREATE INDEX IF NOT EXISTS idx_devices_net_online ON devices(network_id, is_online);
+                CREATE INDEX IF NOT EXISTS idx_devices_net_blocked ON devices(network_id, is_blocked);
                 CREATE INDEX IF NOT EXISTS idx_devices_ip ON devices(ip);
-                CREATE INDEX IF NOT EXISTS idx_devices_is_blocked ON devices(is_blocked);
-                CREATE INDEX IF NOT EXISTS idx_devices_is_online ON devices(is_online);
                 CREATE INDEX IF NOT EXISTS idx_devices_is_archived ON devices(is_archived);
                 CREATE INDEX IF NOT EXISTS idx_devices_profile_id ON devices(profile_id);
 
@@ -551,12 +629,66 @@ export class DatabaseService {
 
             this.reconcileCanonicalDeviceMacs();
 
+            // Pembersihan Integritas Controller: Perangkat yang offline tidak boleh memiliki flag is_self = 1
+            this.db.exec("UPDATE devices SET is_self = 0 WHERE is_self = 1 AND is_online = 0;");
+
             console.log(`✅ SQLite connected & schema initialized (${this.dbPath})`);
             this.initialized = true;
         } catch (error) {
             console.error('❌ Failed to initialize SQLite database:', error);
             throw error;
         }
+    }
+
+    ensureNetwork(net: Network): void {
+        const stmt = this.db.prepare(`
+            INSERT INTO networks (id, ssid, gateway_ip, gateway_mac, subnet, interface_type, last_connected_at)
+            VALUES (?, ?, ?, ?, ?, ?, datetime('now', 'localtime'))
+            ON CONFLICT(id) DO UPDATE SET
+                ssid = excluded.ssid,
+                gateway_ip = excluded.gateway_ip,
+                gateway_mac = excluded.gateway_mac,
+                subnet = COALESCE(excluded.subnet, networks.subnet),
+                interface_type = COALESCE(excluded.interface_type, networks.interface_type),
+                last_connected_at = datetime('now', 'localtime')
+        `);
+        stmt.run(
+            net.id,
+            net.ssid,
+            net.gateway_ip,
+            net.gateway_mac,
+            net.subnet || null,
+            net.interface_type || 'wifi'
+        );
+    }
+
+    getNetwork(id: string): Network | null {
+        const row = this.db.prepare('SELECT * FROM networks WHERE id = ?').get(id) as any;
+        if (!row) return null;
+        return {
+            id: row.id,
+            ssid: row.ssid,
+            gateway_ip: row.gateway_ip,
+            gateway_mac: row.gateway_mac,
+            subnet: row.subnet || undefined,
+            interface_type: row.interface_type || undefined,
+            created_at: row.created_at,
+            last_connected_at: row.last_connected_at
+        };
+    }
+
+    getAllNetworks(): Network[] {
+        const rows = this.db.prepare('SELECT * FROM networks ORDER BY last_connected_at DESC').all() as any[];
+        return rows.map(row => ({
+            id: row.id,
+            ssid: row.ssid,
+            gateway_ip: row.gateway_ip,
+            gateway_mac: row.gateway_mac,
+            subnet: row.subnet || undefined,
+            interface_type: row.interface_type || undefined,
+            created_at: row.created_at,
+            last_connected_at: row.last_connected_at
+        }));
     }
 
     private reconcileCanonicalDeviceMacs(): void {
@@ -573,18 +705,23 @@ export class DatabaseService {
             } catch {
                 continue;
             }
-            const group = groupedRows.get(canonicalMac) || [];
+            const groupKey = `${row.network_id || 'net_default'}::${canonicalMac}`;
+            const group = groupedRows.get(groupKey) || [];
             group.push(row);
-            groupedRows.set(canonicalMac, group);
+            groupedRows.set(groupKey, group);
         }
 
         const groupsToRepair = Array.from(groupedRows.entries()).filter(
-            ([canonicalMac, group]) => group.length > 1 || group[0].mac !== canonicalMac
+            ([groupKey, group]) => {
+                const mac = groupKey.split('::')[1];
+                return group.length > 1 || group[0].mac !== mac;
+            }
         );
         const canonicalProfileIds = new Map<string, string>();
 
         const repairTransaction = this.db.transaction(() => {
-            for (const [canonicalMac, group] of groupsToRepair) {
+            for (const [groupKey, group] of groupsToRepair) {
+                const canonicalMac = groupKey.split('::')[1];
                 const ordered = [...group].sort(compareNewestDeviceRows);
                 const merged = { ...ordered[0], mac: canonicalMac };
 
@@ -820,13 +957,21 @@ export class DatabaseService {
         return result.changes;
     }
 
-    private async getDevices(includeArchived: boolean): Promise<Device[]> {
+    private async getDevices(includeArchived: boolean, networkId?: string): Promise<Device[]> {
         await this.init();
-        const archiveFilter = includeArchived
-            ? ''
-            : 'WHERE d.is_archived = 0 OR d.is_archived IS NULL';
+        const conditions: string[] = [];
+        const params: any[] = [];
+        if (!includeArchived) {
+            conditions.push('(d.is_archived = 0 OR d.is_archived IS NULL)');
+        }
+        if (networkId) {
+            conditions.push('d.network_id = ?');
+            params.push(networkId);
+        }
+        const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
         const query = `
             SELECT 
+                d.network_id,
                 d.mac, d.ip, d.last_ip, d.hostname, d.vendor, d.os, d.device_type,
                 d.web_title, d.web_server, d.workgroup, d.user_name,
                 d.open_ports, d.services, d.is_blocked, d.is_online, d.is_gateway, d.is_self,
@@ -841,10 +986,10 @@ export class DatabaseService {
                 d.last_seen
             FROM devices d
             LEFT JOIN device_profiles p ON d.profile_id = p.id
-            ${archiveFilter}
+            ${whereClause}
             ORDER BY d.is_blocked DESC, d.is_online DESC, d.last_seen DESC
         `;
-        const rows = this.db.prepare(query).all() as any[];
+        const rows = this.db.prepare(query).all(...params) as any[];
         if (includeArchived) {
             return rows.map(row => this.rowToDevice(row));
         }
@@ -864,23 +1009,30 @@ export class DatabaseService {
         });
     }
 
-    async getAllDevices(): Promise<Device[]> {
-        return this.getDevices(false);
+    async getAllDevices(networkId?: string): Promise<Device[]> {
+        return this.getDevices(false, networkId);
     }
 
-    private async getDevicesForReconciliation(): Promise<Device[]> {
-        return this.getDevices(true);
+    private async getDevicesForReconciliation(networkId?: string): Promise<Device[]> {
+        return this.getDevices(true, networkId);
     }
 
-    async getDeviceByMac(mac: string): Promise<Device | null> {
+    async getDeviceByMac(mac: string, networkId?: string): Promise<Device | null> {
         await this.init();
-        const query = `
+        let query = `
             SELECT d.*, p.linked_macs
             FROM devices d
             LEFT JOIN device_profiles p ON d.profile_id = p.id
             WHERE LOWER(d.mac) = LOWER(?)
         `;
-        const row = this.db.prepare(query).get(mac);
+        const params: any[] = [mac];
+        if (networkId) {
+            query += ' AND d.network_id = ?';
+            params.push(networkId);
+        } else {
+            query += ' ORDER BY d.is_online DESC, d.last_seen DESC LIMIT 1';
+        }
+        const row = this.db.prepare(query).get(...params) as any;
         if (!row) return null;
         return this.rowToDevice(row);
     }
@@ -891,22 +1043,35 @@ export class DatabaseService {
      * Cocok bila: (1) DUID/client-id LAYAK & sama persis, ATAU (2) hostname PERSONAL (bukan generik)
      * + fingerprint(Opt55) + vendor(Opt60) ketiganya sama. Unblock-safe: hanya is_blocked=1.
      */
-    hasBlockedIdentityMatch(data: { client_id?: string; hostname?: string; dhcp_fingerprint?: string; vendor_class?: string }): boolean {
+    hasBlockedIdentityMatch(
+        data: { client_id?: string; hostname?: string; dhcp_fingerprint?: string; vendor_class?: string },
+        networkId?: string
+    ): boolean {
         if (!this.db) return false;
         const cid = (data.client_id || '').trim().toLowerCase();
         if (isUsableClientId(cid)) {
-            const row = this.db.prepare(
-                `SELECT 1 FROM devices WHERE is_blocked = 1 AND LOWER(dhcp_client_id) = ? LIMIT 1`
-            ).get(cid);
+            let query = `SELECT 1 FROM devices WHERE is_blocked = 1 AND LOWER(dhcp_client_id) = ?`;
+            const params: any[] = [cid];
+            if (networkId) {
+                query += ' AND network_id = ?';
+                params.push(networkId);
+            }
+            query += ' LIMIT 1';
+            const row = this.db.prepare(query).get(...params);
             if (row) return true;
         }
         const host = (data.hostname || '').trim().toLowerCase();
         const fp = (data.dhcp_fingerprint || '').trim().toLowerCase();
         const vc = (data.vendor_class || '').trim().toLowerCase();
         if (host && !isGenericFactoryHostname(host) && fp && vc) {
-            const row = this.db.prepare(
-                `SELECT 1 FROM devices WHERE is_blocked = 1 AND LOWER(hostname) = ? AND LOWER(dhcp_fingerprint) = ? AND LOWER(dhcp_vendor_class) = ? LIMIT 1`
-            ).get(host, fp, vc);
+            let query = `SELECT 1 FROM devices WHERE is_blocked = 1 AND LOWER(hostname) = ? AND LOWER(dhcp_fingerprint) = ? AND LOWER(dhcp_vendor_class) = ?`;
+            const params: any[] = [host, fp, vc];
+            if (networkId) {
+                query += ' AND network_id = ?';
+                params.push(networkId);
+            }
+            query += ' LIMIT 1';
+            const row = this.db.prepare(query).get(...params);
             if (row) return true;
         }
         return false;
@@ -953,33 +1118,52 @@ export class DatabaseService {
         return healed;
     }
 
-    async getDeviceByIp(ip: string): Promise<Device | null> {
+    async getDeviceByIp(ip: string, networkId?: string): Promise<Device | null> {
         await this.init();
-        const query = `
+        let query = `
             SELECT d.*, p.linked_macs 
             FROM devices d
             LEFT JOIN device_profiles p ON d.profile_id = p.id
-            WHERE d.ip = ? 
-            ORDER BY d.is_online DESC, d.last_seen DESC 
-            LIMIT 1
+            WHERE d.ip = ?
         `;
-        const row = this.db.prepare(query).get(ip);
+        const params: any[] = [ip];
+        if (networkId) {
+            query += ' AND d.network_id = ?';
+            params.push(networkId);
+        }
+        query += ' ORDER BY d.is_online DESC, d.last_seen DESC LIMIT 1';
+        const row = this.db.prepare(query).get(...params) as any;
         if (!row) return null;
         return this.rowToDevice(row);
     }
 
-    async setDeviceBlocked(mac: string, isBlocked: boolean, sessionId?: string): Promise<void> {
+    async setDeviceBlocked(
+        mac: string,
+        isBlocked: boolean,
+        sessionIdOrNetworkId?: string,
+        maybeNetworkId?: string
+    ): Promise<void> {
         await this.init();
         const normMac = mac.toLowerCase();
+
+        let sessionId: string | undefined;
+        let networkId: string = 'net_default';
+        if (sessionIdOrNetworkId && sessionIdOrNetworkId.startsWith('net_') && !maybeNetworkId) {
+            networkId = sessionIdOrNetworkId;
+            sessionId = undefined;
+        } else {
+            sessionId = sessionIdOrNetworkId;
+            if (maybeNetworkId) networkId = maybeNetworkId;
+        }
 
         const updateDeviceStmt = this.db.prepare(`
             UPDATE devices 
             SET is_blocked = ?, session_id = ?, is_online = CASE WHEN ? = 1 THEN 1 ELSE is_online END, last_seen = datetime('now', 'localtime')
-            WHERE LOWER(mac) = LOWER(?)
+            WHERE LOWER(mac) = LOWER(?) AND network_id = ?
         `);
-        updateDeviceStmt.run(isBlocked ? 1 : 0, sessionId || null, isBlocked ? 1 : 0, normMac);
+        updateDeviceStmt.run(isBlocked ? 1 : 0, sessionId || null, isBlocked ? 1 : 0, normMac, networkId);
 
-        const dev = this.db.prepare(`SELECT * FROM devices WHERE LOWER(mac) = LOWER(?)`).get(normMac) as any;
+        const dev = this.db.prepare(`SELECT * FROM devices WHERE LOWER(mac) = LOWER(?) AND network_id = ?`).get(normMac, networkId) as any;
         if (dev) {
             const pId = dev.profile_id || deriveProfileId(dev.mac);
 
@@ -996,59 +1180,59 @@ export class DatabaseService {
             const healedAlias = betterProfileName(existingProf?.alias, candidate) || 'Target Device';
             const healedHost = betterProfileName(existingProf?.hostname, dev.hostname) || dev.hostname;
 
+            // Catatan: is_blocked TIDAK disimpan di device_profiles agar tidak bocor lintas jaringan!
             const upsertProfileStmt = this.db.prepare(`
-                INSERT INTO device_profiles (id, alias, hostname, os, vendor, device_type, is_blocked, linked_macs, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now', 'localtime'))
+                INSERT INTO device_profiles (id, alias, hostname, os, vendor, device_type, linked_macs, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now', 'localtime'))
                 ON CONFLICT(id) DO UPDATE SET
                     alias = excluded.alias,
                     hostname = excluded.hostname,
-                    is_blocked = excluded.is_blocked,
                     linked_macs = excluded.linked_macs,
                     updated_at = datetime('now', 'localtime')
             `);
             upsertProfileStmt.run(
                 pId, healedAlias, healedHost, dev.os, dev.vendor, dev.device_type,
-                isBlocked ? 1 : 0, JSON.stringify(linkedMacs)
+                JSON.stringify(linkedMacs)
             );
 
-            this.db.prepare(`UPDATE devices SET profile_id = ? WHERE LOWER(mac) = LOWER(?)`).run(pId, normMac);
+            this.db.prepare(`UPDATE devices SET profile_id = ? WHERE LOWER(mac) = LOWER(?) AND network_id = ?`).run(pId, normMac, networkId);
         }
     }
 
-    async setDeviceOnlineStatus(mac: string, isOnline: boolean): Promise<void> {
+    async setDeviceOnlineStatus(mac: string, isOnline: boolean, networkId?: string): Promise<void> {
         try {
             await this.init();
-            this.db.prepare(
-                `UPDATE devices SET is_online = ?, last_seen = datetime('now', 'localtime') WHERE LOWER(mac) = LOWER(?)`
-            ).run(isOnline ? 1 : 0, mac.toLowerCase());
+            let query = `UPDATE devices SET is_online = ?, last_seen = datetime('now', 'localtime') WHERE LOWER(mac) = LOWER(?)`;
+            const params: any[] = [isOnline ? 1 : 0, mac.toLowerCase()];
+            if (networkId) {
+                query += ' AND network_id = ?';
+                params.push(networkId);
+            }
+            this.db.prepare(query).run(...params);
         } catch (e) {
             console.warn(`Notice updating online status for ${mac}:`, e);
         }
     }
 
-    async setDeviceSpeedLimit(mac: string, speedLimit: number): Promise<Device> {
+    async setDeviceSpeedLimit(mac: string, speedLimit: number, networkId: string = 'net_default'): Promise<Device> {
         await this.init();
         const normMac = mac.toLowerCase();
         const updateStmt = this.db.prepare(`
             UPDATE devices 
             SET speed_limit = ?, last_seen = datetime('now', 'localtime')
-            WHERE LOWER(mac) = LOWER(?)
+            WHERE LOWER(mac) = LOWER(?) AND network_id = ?
         `);
-        const info = updateStmt.run(speedLimit, normMac);
-        if (info.changes === 0) throw new Error(`Device with MAC ${mac} not found`);
+        const info = updateStmt.run(speedLimit, normMac, networkId);
+        if (info.changes === 0) throw new Error(`Device with MAC ${mac} not found in network ${networkId}`);
 
-        const dev = this.db.prepare(`SELECT * FROM devices WHERE LOWER(mac) = LOWER(?)`).get(normMac) as any;
-        if (dev && dev.profile_id) {
-            this.db.prepare(`UPDATE device_profiles SET speed_limit = ?, updated_at = datetime('now', 'localtime') WHERE id = ?`)
-                .run(speedLimit, dev.profile_id);
-        }
+        const dev = this.db.prepare(`SELECT * FROM devices WHERE LOWER(mac) = LOWER(?) AND network_id = ?`).get(normMac, networkId) as any;
         return this.rowToDevice(dev);
     }
 
-    async setDeviceAlias(mac: string, alias: string): Promise<Device> {
+    async setDeviceAlias(mac: string, alias: string, networkId: string = 'net_default'): Promise<Device> {
         await this.init();
         const normMac = mac.toLowerCase();
-        const existing = await this.getDeviceByMac(normMac);
+        const existing = await this.getDeviceByMac(normMac, networkId);
         if (!existing) {
             throw new Error(`Device with MAC ${mac} not found`);
         }
@@ -1064,8 +1248,8 @@ export class DatabaseService {
         }
 
         this.db.prepare(`
-            INSERT INTO device_profiles (id, alias, hostname, os, vendor, device_type, is_blocked, linked_macs, dhcp_fingerprint, dhcp_vendor_class, dhcp_client_id, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', 'localtime'))
+            INSERT INTO device_profiles (id, alias, hostname, os, vendor, device_type, linked_macs, dhcp_fingerprint, dhcp_vendor_class, dhcp_client_id, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', 'localtime'))
             ON CONFLICT(id) DO UPDATE SET
                 alias = excluded.alias,
                 linked_macs = excluded.linked_macs,
@@ -1075,7 +1259,7 @@ export class DatabaseService {
                 updated_at = datetime('now', 'localtime')
         `).run(
             pId, alias, existing.hostname, existing.os, existing.vendor, existing.device_type,
-            existing.is_blocked ? 1 : 0, JSON.stringify(linkedMacs),
+            JSON.stringify(linkedMacs),
             existing.dhcp_fingerprint || null,
             existing.dhcp_vendor_class || null,
             existing.dhcp_client_id || null
@@ -1084,52 +1268,65 @@ export class DatabaseService {
         this.db.prepare(`
             UPDATE devices 
             SET alias = ?, profile_id = ?, is_online = 1, last_seen = datetime('now', 'localtime') 
-            WHERE LOWER(mac) = LOWER(?) OR profile_id = ?
-        `).run(alias, pId, normMac, pId);
+            WHERE (LOWER(mac) = LOWER(?) OR profile_id = ?) AND network_id = ?
+        `).run(alias, pId, normMac, pId, networkId);
 
-        const updated = await this.getDeviceByMac(normMac);
+        const updated = await this.getDeviceByMac(normMac, networkId);
         if (updated) {
             updated.is_online = true;
         }
         return updated!;
     }
 
-    async deleteDevice(mac: string): Promise<void> {
+    async deleteDevice(mac: string, networkId?: string): Promise<void> {
         await this.init();
         const normMac = mac.toLowerCase();
-        const existing = await this.getDeviceByMac(normMac);
+        const existing = await this.getDeviceByMac(normMac, networkId);
 
-        if (existing?.profile_id) {
-            this.db.prepare(`DELETE FROM devices WHERE profile_id = ? OR LOWER(mac) = LOWER(?)`).run(existing.profile_id, normMac);
-            this.db.prepare(`DELETE FROM device_profiles WHERE id = ?`).run(existing.profile_id);
+        if (networkId) {
+            if (existing?.profile_id) {
+                this.db.prepare(`DELETE FROM devices WHERE (profile_id = ? OR LOWER(mac) = LOWER(?)) AND network_id = ?`).run(existing.profile_id, normMac, networkId);
+            } else {
+                this.db.prepare(`DELETE FROM devices WHERE LOWER(mac) = LOWER(?) AND network_id = ?`).run(normMac, networkId);
+            }
         } else {
-            this.db.prepare(`DELETE FROM devices WHERE LOWER(mac) = LOWER(?)`).run(normMac);
-            const allProfiles = this.db.prepare(`SELECT * FROM device_profiles`).all() as any[];
-            for (const p of allProfiles) {
-                const linked = safeParseJson<string[]>(p.linked_macs, []);
-                if (linked.map(m => m.toLowerCase()).includes(normMac)) {
-                    const nextLinked = linked.filter(m => m.toLowerCase() !== normMac);
-                    if (nextLinked.length === 0) {
-                        this.db.prepare(`DELETE FROM device_profiles WHERE id = ?`).run(p.id);
-                    } else {
-                        this.db.prepare(`UPDATE device_profiles SET linked_macs = ? WHERE id = ?`).run(JSON.stringify(nextLinked), p.id);
+            if (existing?.profile_id) {
+                this.db.prepare(`DELETE FROM devices WHERE profile_id = ? OR LOWER(mac) = LOWER(?)`).run(existing.profile_id, normMac);
+                this.db.prepare(`DELETE FROM device_profiles WHERE id = ?`).run(existing.profile_id);
+            } else {
+                this.db.prepare(`DELETE FROM devices WHERE LOWER(mac) = LOWER(?)`).run(normMac);
+                const allProfiles = this.db.prepare(`SELECT * FROM device_profiles`).all() as any[];
+                for (const p of allProfiles) {
+                    const linked = safeParseJson<string[]>(p.linked_macs, []);
+                    if (linked.map(m => m.toLowerCase()).includes(normMac)) {
+                        const nextLinked = linked.filter(m => m.toLowerCase() !== normMac);
+                        if (nextLinked.length === 0) {
+                            this.db.prepare(`DELETE FROM device_profiles WHERE id = ?`).run(p.id);
+                        } else {
+                            this.db.prepare(`UPDATE device_profiles SET linked_macs = ? WHERE id = ?`).run(JSON.stringify(nextLinked), p.id);
+                        }
                     }
                 }
             }
         }
     }
 
-    async clearAllDevices(): Promise<void> {
+    async clearAllDevices(networkId?: string): Promise<void> {
         await this.init();
-        this.db.exec("DELETE FROM devices; DELETE FROM device_profiles;");
+        if (networkId) {
+            this.db.prepare(`DELETE FROM devices WHERE network_id = ?`).run(networkId);
+        } else {
+            this.db.exec("DELETE FROM devices; DELETE FROM device_profiles;");
+        }
     }
 
-    async saveDevice(device: Device): Promise<void> {
+    async saveDevice(device: Device, networkId?: string): Promise<void> {
         await this.init();
+        const netId = networkId || device.network_id || 'net_default';
         const normMac = device.mac.toLowerCase();
         const saveTransaction = this.db.transaction(() => {
-            // Disosiasikan IP ini dari perangkat lain jika ada yang memegang IP sama
-            this.db.prepare(`UPDATE devices SET is_online = 0, last_ip = CASE WHEN ip != '' AND ip IS NOT NULL THEN ip ELSE last_ip END, ip = '' WHERE ip = ? AND LOWER(mac) != LOWER(?)`).run(device.ip, normMac);
+            // Disosiasikan IP ini dari perangkat lain jika ada yang memegang IP sama di jaringan ini
+            this.db.prepare(`UPDATE devices SET is_online = 0, last_ip = CASE WHEN ip != '' AND ip IS NOT NULL THEN ip ELSE last_ip END, ip = '' WHERE network_id = ? AND ip = ? AND LOWER(mac) != LOWER(?)`).run(netId, device.ip, normMac);
             const query = `
                 UPDATE devices SET
                     ip = ?,
@@ -1145,7 +1342,7 @@ export class DatabaseService {
                     open_ports = ?,
                     services = ?,
                     last_seen = datetime('now', 'localtime')
-                WHERE LOWER(mac) = LOWER(?)
+                WHERE LOWER(mac) = LOWER(?) AND network_id = ?
             `;
             this.db.prepare(query).run(
                 device.ip,
@@ -1160,18 +1357,19 @@ export class DatabaseService {
                 device.user_name || '', device.user_name || '',
                 JSON.stringify(device.open_ports || []),
                 JSON.stringify(device.services || []),
-                normMac
+                normMac,
+                netId
             );
         });
         saveTransaction();
     }
 
-    async updateDeviceIp(mac: string, ip: string): Promise<void> {
+    async updateDeviceIp(mac: string, ip: string, networkId: string = 'net_default'): Promise<void> {
         await this.init();
         const normMac = mac.toLowerCase();
         const updateTransaction = this.db.transaction(() => {
-            this.db.prepare(`UPDATE devices SET is_online = 0, last_ip = CASE WHEN ip != '' AND ip IS NOT NULL THEN ip ELSE last_ip END, ip = '' WHERE ip = ? AND LOWER(mac) != LOWER(?)`).run(ip, normMac);
-            this.db.prepare(`UPDATE devices SET ip = ?, last_ip = ?, is_online = 1, last_seen = datetime('now', 'localtime') WHERE LOWER(mac) = LOWER(?)`).run(ip, ip, normMac);
+            this.db.prepare(`UPDATE devices SET is_online = 0, last_ip = CASE WHEN ip != '' AND ip IS NOT NULL THEN ip ELSE last_ip END, ip = '' WHERE network_id = ? AND ip = ? AND LOWER(mac) != LOWER(?)`).run(networkId, ip, normMac);
+            this.db.prepare(`UPDATE devices SET ip = ?, last_ip = ?, is_online = 1, last_seen = datetime('now', 'localtime') WHERE LOWER(mac) = LOWER(?) AND network_id = ?`).run(ip, ip, normMac, networkId);
         });
         updateTransaction();
     }
@@ -1184,7 +1382,7 @@ export class DatabaseService {
         fingerprint?: string;
         clientId?: string;
         fqdn?: string;
-    }): Promise<void> {
+    }, networkId: string = 'net_default'): Promise<void> {
         await this.init();
         const normMac = profile.mac.toLowerCase();
         const cleanIp = profile.ip.trim();
@@ -1194,8 +1392,8 @@ export class DatabaseService {
                 SET is_online = 0,
                     last_ip = CASE WHEN ip != '' AND ip IS NOT NULL THEN ip ELSE last_ip END,
                     ip = ''
-                WHERE ip = ? AND LOWER(mac) != LOWER(?)
-            `).run(cleanIp, normMac);
+                WHERE network_id = ? AND ip = ? AND LOWER(mac) != LOWER(?)
+            `).run(networkId, cleanIp, normMac);
             this.db.prepare(`
                 UPDATE devices SET
                     ip = ?,
@@ -1207,7 +1405,7 @@ export class DatabaseService {
                     dhcp_client_id = CASE WHEN ? != '' THEN ? ELSE dhcp_client_id END,
                     dhcp_fqdn = CASE WHEN ? != '' THEN ? ELSE dhcp_fqdn END,
                     last_seen = datetime('now', 'localtime')
-                WHERE LOWER(mac) = LOWER(?)
+                WHERE LOWER(mac) = LOWER(?) AND network_id = ?
             `).run(
                 cleanIp,
                 cleanIp,
@@ -1216,13 +1414,14 @@ export class DatabaseService {
                 profile.fingerprint || '', profile.fingerprint || '',
                 profile.clientId || '', profile.clientId || '',
                 profile.fqdn || '', profile.fqdn || '',
-                normMac
+                normMac,
+                networkId
             );
         });
         updateTransaction();
     }
 
-    async updateDeviceProfileAssessment(profile: ProfileAssessment): Promise<void> {
+    async updateDeviceProfileAssessment(profile: ProfileAssessment, networkId?: string): Promise<void> {
         await this.init();
         const validated = validateProfileAssessment(profile);
         const vendor = isGenericProfileLabel(validated.vendor, 'vendor') ? null : validated.vendor;
@@ -1231,6 +1430,26 @@ export class DatabaseService {
             : validated.device_type;
         const hostname = isGenericProfileLabel(validated.hostname, 'hostname') ? null : validated.hostname;
         const os = isGenericProfileLabel(validated.os, 'os') ? null : validated.os;
+
+        let whereClause = 'WHERE LOWER(mac) = LOWER(?)';
+        const params: any[] = [
+            vendor, vendor,
+            deviceType, deviceType,
+            hostname, hostname,
+            os, os,
+            validated.vendor_confidence,
+            validated.type_confidence,
+            validated.hostname_confidence,
+            validated.profile_status,
+            validated.evidenceJson,
+            validated.profiled_at,
+            validated.profile_version,
+            validated.mac
+        ];
+        if (networkId) {
+            whereClause += ' AND network_id = ?';
+            params.push(networkId);
+        }
 
         const updateTransaction = this.db.transaction(() => {
             const result = this.db.prepare(`
@@ -1247,21 +1466,8 @@ export class DatabaseService {
                     profiled_at = ?,
                     profile_version = ?,
                     last_seen = datetime('now', 'localtime')
-                WHERE LOWER(mac) = LOWER(?)
-            `).run(
-                vendor, vendor,
-                deviceType, deviceType,
-                hostname, hostname,
-                os, os,
-                validated.vendor_confidence,
-                validated.type_confidence,
-                validated.hostname_confidence,
-                validated.profile_status,
-                validated.evidenceJson,
-                validated.profiled_at,
-                validated.profile_version,
-                validated.mac
-            );
+                ${whereClause}
+            `).run(...params);
 
             if (result.changes === 0) {
                 throw new Error(`Device with MAC ${validated.mac} not found`);
@@ -1279,7 +1485,11 @@ export class DatabaseService {
      * - Menandai perangkat yang tidak tertangkap sebagai is_online = 0 (bukan dihapus!)
      * - Dijalankan dalam transaksi atomik native SQLite dengan auto-rollback bila terjadi kegagalan.
      */
-    async syncScanResults(scannedDevices: Device[], liveSessionIds?: Set<string>): Promise<{
+    async syncScanResults(
+        scannedDevices: Device[],
+        networkIdOrLiveSessionIds?: string | Set<string>,
+        maybeLiveSessionIds?: Set<string>
+    ): Promise<{
         allDevices: Device[];
         autoReblockTargets: Device[];
         autoThrottleTargets: Device[];
@@ -1287,7 +1497,32 @@ export class DatabaseService {
     }> {
         await this.init();
 
-        const existingDevices = await this.getDevicesForReconciliation();
+        let networkId: string = 'net_default';
+        let liveSessionIds: Set<string> | undefined;
+
+        if (typeof networkIdOrLiveSessionIds === 'string') {
+            networkId = networkIdOrLiveSessionIds;
+            liveSessionIds = maybeLiveSessionIds;
+        } else if (networkIdOrLiveSessionIds instanceof Set) {
+            liveSessionIds = networkIdOrLiveSessionIds;
+            const devWithNet = scannedDevices.find(d => Boolean(d.network_id));
+            if (devWithNet?.network_id) {
+                networkId = devWithNet.network_id;
+            }
+        } else {
+            const devWithNet = scannedDevices.find(d => Boolean(d.network_id));
+            if (devWithNet?.network_id) {
+                networkId = devWithNet.network_id;
+            }
+        }
+
+        // Pastikan network_id terdaftar di tabel networks agar foreign key valid
+        this.db.prepare(`
+            INSERT OR IGNORE INTO networks (id, ssid, gateway_ip, gateway_mac)
+            VALUES (?, 'Active Network', '0.0.0.0', '00:00:00:00:00:00')
+        `).run(networkId);
+
+        const existingDevices = await this.getDevicesForReconciliation(networkId);
         const existingMap = new Map<string, Device>();
         for (const dev of existingDevices) {
             existingMap.set(dev.mac.toLowerCase(), dev);
@@ -1305,8 +1540,8 @@ export class DatabaseService {
             linked_macs: safeParseJson<string[]>(p.linked_macs, [])
         }));
 
-        // Prepared statements untuk performa ultra-cepat di dalam transaksi
-        const resetGatewayStmt = this.db.prepare(`UPDATE devices SET is_gateway = 0 WHERE LOWER(mac) != LOWER(?)`);
+        // Prepared statements untuk performa ultra-cepat di dalam transaksi (SCOPED KE network_id)
+        const resetGatewayStmt = this.db.prepare(`UPDATE devices SET is_gateway = 0 WHERE network_id = ? AND LOWER(mac) != LOWER(?)`);
         const updateProfileLinkedMacsStmt = this.db.prepare(`
             UPDATE device_profiles
             SET linked_macs = ?, updated_at = datetime('now', 'localtime')
@@ -1315,19 +1550,20 @@ export class DatabaseService {
         const archiveDevicesStmt = this.db.prepare(`
             UPDATE devices
             SET is_archived = 1, is_online = 0, session_id = NULL
-            WHERE profile_id = ? 
-              AND LOWER(mac) != LOWER(?)
+            WHERE network_id = ? AND profile_id = ? AND LOWER(mac) != LOWER(?)
         `);
         const selectArchivedSessionsStmt = this.db.prepare(`
             SELECT mac, session_id FROM devices
-            WHERE profile_id = ? 
-              AND LOWER(mac) != LOWER(?) 
-              AND session_id IS NOT NULL
+            WHERE network_id = ? AND profile_id = ? AND LOWER(mac) != LOWER(?) AND session_id IS NOT NULL
+        `);
+        const clearOtherSelfStmt = this.db.prepare(`
+            UPDATE devices SET is_self = 0
+            WHERE network_id = ? AND LOWER(mac) != LOWER(?) AND is_self = 1
         `);
 
         const upsertQuery = `
             INSERT INTO devices (
-                mac, ip, last_ip, hostname, vendor, os, device_type,
+                network_id, mac, ip, last_ip, hostname, vendor, os, device_type,
                 web_title, web_server, workgroup, user_name,
                 open_ports, services, is_blocked, is_online, is_gateway,
                 rtt_ms, session_id, is_self, ttl, is_randomized_mac, mac_type, alias, profile_id, matched_by, speed_limit,
@@ -1337,7 +1573,7 @@ export class DatabaseService {
                 profile_status, vendor_confidence, type_confidence, hostname_confidence,
                 profile_evidence, profiled_at, profile_version
             ) VALUES (
-                ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?, ?,
                 ?, ?, ?, ?,
                 ?, ?, ?, 1, ?,
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
@@ -1347,7 +1583,7 @@ export class DatabaseService {
                 COALESCE(?, 'unknown'), COALESCE(?, 0), COALESCE(?, 0), COALESCE(?, 0),
                 COALESCE(?, '[]'), ?, COALESCE(?, 1)
             )
-            ON CONFLICT (mac) DO UPDATE SET
+            ON CONFLICT (network_id, mac) DO UPDATE SET
                 ip = excluded.ip,
                 last_ip = CASE WHEN excluded.ip IS NOT NULL AND excluded.ip != '' THEN excluded.ip ELSE devices.last_ip END,
                 hostname = CASE WHEN excluded.hostname IS NOT NULL AND excluded.hostname != '' THEN excluded.hostname ELSE devices.hostname END,
@@ -1395,16 +1631,15 @@ export class DatabaseService {
         `;
         const upsertStmt = this.db.prepare(upsertQuery);
 
-        // #3 higiene: nol-kan session_id basi. Upsert ON CONFLICT tak menyentuh session_id, jadi
-        // butuh UPDATE terpisah agar nilai basi tak bertahan di DB & menipu keputusan reblock berikutnya.
-        const clearSessionStmt = this.db.prepare(`UPDATE devices SET session_id = NULL WHERE LOWER(mac) = LOWER(?)`);
+        const clearSessionStmt = this.db.prepare(`UPDATE devices SET session_id = NULL WHERE network_id = ? AND LOWER(mac) = LOWER(?)`);
 
         const setOfflineStmt = this.db.prepare(`
             UPDATE devices
             SET is_online = 0,
                 last_ip = CASE WHEN ip != '' AND ip IS NOT NULL THEN ip ELSE last_ip END,
                 ip = ''
-            WHERE LOWER(mac) = LOWER(?)
+            WHERE network_id = ?
+              AND LOWER(mac) = LOWER(?)
               AND (is_self IS NULL OR is_self = 0)
               AND (is_gateway IS NULL OR is_gateway = 0)
               AND (last_seen IS NULL OR last_seen < datetime('now', 'localtime', '-${OFFLINE_GRACE_SECONDS} seconds'))
@@ -1415,7 +1650,7 @@ export class DatabaseService {
             SET is_online = 0,
                 last_ip = CASE WHEN ip != '' AND ip IS NOT NULL THEN ip ELSE last_ip END,
                 ip = ''
-            WHERE ip = ? AND LOWER(mac) != LOWER(?)
+            WHERE network_id = ? AND ip = ? AND LOWER(mac) != LOWER(?)
         `);
 
         // Eksekusi atomik menggunakan db.transaction native better-sqlite3
@@ -1430,11 +1665,11 @@ export class DatabaseService {
 
                 // Pastikan hanya 1 gateway aktif di jaringan ini
                 if (scanned.is_gateway) {
-                    resetGatewayStmt.run(macKey);
+                    resetGatewayStmt.run(networkId, macKey);
                 }
 
-                // Disosiasikan IP ini dari perangkat lain jika ada yang memegang IP sama
-                disassociateStaleIpStmt.run(scanned.ip, macKey);
+                // Disosiasikan IP ini dari perangkat lain jika ada yang memegang IP sama di jaringan ini
+                disassociateStaleIpStmt.run(networkId, scanned.ip, macKey);
 
                 const existing = existingMap.get(macKey);
                 let isBlocked = existing ? existing.is_blocked : false;
@@ -1485,15 +1720,24 @@ export class DatabaseService {
                     if (bestProfile && bestScore >= 80) {
                         // High Confidence Match (>= 80%): Auto-Link & Auto-Reblock
                         console.log(`🎯 [HIGH CONFIDENCE PROFILE MATCH (${bestScore}%)] Device ${scanned.ip} (${scanned.mac}) matched profile "${bestProfile.alias}" (${bestReasons.join(', ')})`);
-                        isBlocked = Boolean(bestProfile.is_blocked);
+                        // Auto-reblock HANYA bila perangkat dengan profil ini pernah diblokir DI JARINGAN INI!
+                        const wasBlockedInThisNetwork = existingDevices.some(
+                            d => d.network_id === networkId && d.profile_id === bestProfile.id && d.is_blocked
+                        );
+                        isBlocked = wasBlockedInThisNetwork;
                         inheritedAlias = bestProfile.alias;
                         inheritedFirstSeen = bestProfile.created_at || null;
                         profileId = bestProfile.id;
                         matchedBy = 'high_confidence_multi_factor';
                         if (isBlocked) {
                             currentSpeedLimit = 0;
-                        } else if (bestProfile.speed_limit !== undefined && bestProfile.speed_limit < 100) {
-                            currentSpeedLimit = bestProfile.speed_limit;
+                        } else {
+                            const existingNetDev = existingDevices.find(
+                                d => d.network_id === networkId && d.profile_id === bestProfile.id
+                            );
+                            if (existingNetDev && existingNetDev.speed_limit !== undefined && existingNetDev.speed_limit < 100) {
+                                currentSpeedLimit = existingNetDev.speed_limit;
+                            }
                         }
 
                         // Tambahkan MAC baru ke linked_macs (capped max 10 to prevent profile bloat)
@@ -1503,14 +1747,14 @@ export class DatabaseService {
                         const updatedLinked = Array.from(new Set([...currentLinked, macKey])).slice(-10);
                         updateProfileLinkedMacsStmt.run(JSON.stringify(updatedLinked), profileId);
 
-                        // AUTO-ARCHIVE SUPERSEDED OFFLINE MACs FOR THIS PROFILE!
-                        const zombieRows = selectArchivedSessionsStmt.all(profileId, macKey) as any[];
+                        // AUTO-ARCHIVE SUPERSEDED OFFLINE MACs FOR THIS PROFILE IN THIS NETWORK!
+                        const zombieRows = selectArchivedSessionsStmt.all(networkId, profileId, macKey) as any[];
                         for (const r of zombieRows) {
                             if (r.session_id) {
                                 zombieSessionsToStop.push(r.session_id);
                             }
                         }
-                        archiveDevicesStmt.run(profileId, macKey);
+                        archiveDevicesStmt.run(networkId, profileId, macKey);
                     } else if (bestProfile && bestScore >= 50) {
                         console.log(`⚠️ [CANDIDATE PROFILE REVIEW (${bestScore}%)] Device ${scanned.ip} (${scanned.mac}) looks similar to profile "${bestProfile.alias}" (${bestReasons.join(', ')}), marked as candidate without blocking.`);
                         candidateProfileId = bestProfile.id;
@@ -1524,7 +1768,7 @@ export class DatabaseService {
                 // bila engine tak terjangkau, percayai session_id tersimpan (hindari badai reblock palsu).
                 if (liveSessionIds !== undefined && sessionId && !liveSessionIds.has(sessionId)) {
                     sessionId = undefined; // agar #1 menjadikannya target reblock
-                    clearSessionStmt.run(macKey); // #3: nol-kan session_id basi di DB (upsert ON CONFLICT tak menyentuhnya)
+                    clearSessionStmt.run(networkId, macKey); // #3: nol-kan session_id basi di DB (upsert ON CONFLICT tak menyentuhnya)
                 }
                 // Perangkat perlu auto-reblock/auto-throttle HANYA jika belum aktif sesi spoof-nya (baru online / ganti MAC / sesi basi)
                 const needsSpoofSession = !existing || !existing.is_online || !sessionId;
@@ -1532,6 +1776,7 @@ export class DatabaseService {
                 if (isBlocked && currentSpeedLimit === 0 && needsSpoofSession) {
                     autoReblockTargets.push({
                         ...scanned,
+                        network_id: networkId,
                         is_blocked: true,
                         speed_limit: 0,
                         session_id: sessionId
@@ -1539,6 +1784,7 @@ export class DatabaseService {
                 } else if (currentSpeedLimit > 0 && currentSpeedLimit < 100 && needsSpoofSession) {
                     autoThrottleTargets.push({
                         ...scanned,
+                        network_id: networkId,
                         is_blocked: false,
                         speed_limit: currentSpeedLimit,
                         session_id: sessionId
@@ -1559,6 +1805,7 @@ export class DatabaseService {
                     : scanned.device_type || 'Unknown';
 
                 upsertStmt.run(
+                    networkId,
                     scanned.mac,
                     scanned.ip,
                     scanned.ip, // last_ip
@@ -1605,21 +1852,25 @@ export class DatabaseService {
                     scannedAssessment?.profiled_at ?? null,
                     scannedAssessment?.profile_version ?? null
                 );
+
+                if (scanned.is_self) {
+                    clearOtherSelfStmt.run(networkId, scanned.mac);
+                }
             }
 
-            // 2. Tandai perangkat yang tidak tertangkap di scan ini sebagai is_online = 0
+            // 2. Tandai perangkat yang tidak tertangkap di scan ini sebagai is_online = 0 (SCOPED KE network_id)
             // Terapkan grace period (OFFLINE_GRACE_SECONDS): Perangkat yang baru saja terlihat tidak langsung di-offline-kan
             for (const [macKey] of existingMap.entries()) {
                 if (!scannedMacs.has(macKey)) {
-                    setOfflineStmt.run(macKey);
+                    setOfflineStmt.run(networkId, macKey);
                 }
             }
         });
 
         syncTransaction();
 
-        // Ambil data terbaru seluruh perangkat dari database
-        const updatedDevices = await this.getAllDevices();
+        // Ambil data terbaru seluruh perangkat dari database untuk network ini
+        const updatedDevices = await this.getAllDevices(networkId);
         return {
             allDevices: updatedDevices,
             autoReblockTargets,
@@ -1630,6 +1881,7 @@ export class DatabaseService {
 
     private rowToDevice(row: any): Device {
         return {
+            network_id: row.network_id || undefined,
             mac: row.mac,
             ip: row.ip,
             last_ip: row.last_ip || undefined,
@@ -1743,7 +1995,7 @@ export class DatabaseService {
     async getLicenseCache(): Promise<CachedLicense | null> {
         await this.init();
         const row = this.db.prepare(`SELECT * FROM license_cache WHERE id = 'current_license'`).get() as any;
-        if (!row) return null;
+        if (!row || !row.token) return null;
 
         return {
             id: row.id,
@@ -1766,6 +2018,51 @@ export class DatabaseService {
         };
     }
 
+    getCachedLicense(): CachedLicense | null {
+        try {
+            const row = this.db.prepare(`SELECT * FROM license_cache WHERE id = 'current_license'`).get() as any;
+            if (!row) {
+                return {
+                    id: 'current_license',
+                    tier: 'free',
+                    token: '',
+                    max_cuts: 5,
+                    can_throttle: false,
+                    can_gateway: false,
+                    can_autoreblock: false,
+                    can_arsenal: false,
+                    cloud_sync: false
+                };
+            }
+
+            return {
+                id: row.id,
+                user_id: row.user_id || undefined,
+                email: row.email || undefined,
+                name: row.name || undefined,
+                avatar_url: row.avatar_url || undefined,
+                tier: row.tier || 'free',
+                token: row.token || '',
+                max_cuts: row.max_cuts ?? 1,
+                can_throttle: Boolean(row.can_throttle),
+                can_gateway: Boolean(row.can_gateway),
+                can_autoreblock: Boolean(row.can_autoreblock),
+                can_arsenal: Boolean(row.can_arsenal),
+                cloud_sync: Boolean(row.cloud_sync),
+                expires_at: row.expires_at || undefined,
+                grace_period_until: row.grace_period_until || undefined,
+                hwid: row.hwid || undefined,
+                last_synced_at: row.last_synced_at || undefined
+            };
+        } catch {
+            return null;
+        }
+    }
+
+    async saveCachedLicense(lic: CachedLicense): Promise<void> {
+        return this.saveLicenseCache(lic);
+    }
+
     async clearLicenseCache(): Promise<void> {
         await this.init();
         this.db.prepare(`DELETE FROM license_cache WHERE id = 'current_license'`).run();
@@ -1780,3 +2077,5 @@ export class DatabaseService {
         }
     }
 }
+
+export { DatabaseService as SentinelDatabase };

@@ -2,6 +2,92 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.1] - 2026-09-09
+
+### Fix Profile Popover Clipping (Portal) & Complete Ghost Border Elimination
+- **Eliminasi Total Ghost Border & Tooltip "Toggle sidebar" — `frontend-react/src/components/AnimatedSidebar.tsx`**:
+  - Menghapus komponen `<AnimatedSidebarRail />` yang sebelumnya terpasang di samping sidebar. Rail ini memicu garis 1px hover vertikal (`hover:after:bg-border`) dan tooltip browser bawaan `title="Toggle sidebar"` saat kursor mendekati tepi sidebar atau saat melakukan toggle.
+  - Dengan penghapusan ini, tampilan tepi sidebar 100% mulus (*borderless & seamless*) tanpa garis sisa ataupun tooltip yang mengganggu.
+- **Perbaikan Menu Profil Tertimpa / Terpotong (React Portal Rendering) — `frontend-react/src/components/AnimatedSidebar.tsx`**:
+  - Masalah: Saat sidebar dalam status collapsed (lebar 72px), menu popover profil terpotong dan tertimpa batas container induk karena `overflow: hidden` pada aside/panel.
+  - Solusi: Mengalihkan rendering popover profil ke level `document.body` menggunakan `createPortal`.
+  - Mengkalkulasikan posisi floating dinamis (`fixed`, `bottom`, `left`, `width`) berdasarkan `profileTriggerRef.current.getBoundingClientRect()` sehingga menu popover melayang bebas (*unclipped*) di atas seluruh UI dengan lebar penuh (224px pada mode collapsed, atau menyesuaikan kartu profil pada mode expanded).
+  - Dilengkapi event listener `resize`, `scroll`, `mousedown` (click outside), serta tombol `Escape` untuk penutupan menu yang mulus dan responsif.
+- **Verifikasi Kualitas Kode**:
+  - `frontend-react`: `npm run build` berhasil 100% tanpa error (`tsc && vite build`).
+  - `backend-node`: 40/40 test lulus (*100% pass*).
+  - `python-service`: 330/330 test lulus (*100% pass*). Total 370 tests hijau.
+
+## [v2.41.0] - 2026-09-09
+
+### Seamless Borderless Sidebar & Profile Popover Menu Integration
+- **Eliminasi Tombol Expand Duplikat — `frontend-react/src/components/AnimatedSidebar.tsx`**:
+  - Menghapus tombol toggle `PanelLeft` di footer sidebar (di atas profil) untuk menghilangkan redundansi visual. Kontrol ekspansi sidebar tetap dapat diakses melalui header utama `App.tsx` dan shortcut `⌘B` / `Ctrl+B`.
+- **Desain Seamless Tanpa Border (Merged Navigation Look) — `frontend-react/src/components/AnimatedSidebar.tsx`**:
+  - Menghilangkan `border-r` pada container aside dan panel desktop sehingga sidebar dan layar konten utama menyatu mulus tanpa garis batas (`bg-[#090a0c]`).
+  - Menghapus `border-b` pada header sidebar dan border pada ikon container logo Sentinel Ops.
+  - Menghapus `border-t` pada footer sidebar, serta border pada lingkaran avatar profil dan badge lisensi (`FREE`/`PRO`/`VIP`).
+  - Menghapus border pemisah pada `AnimatedSidebarGroupLabel` saat collapsed, serta border pada kartu aktif item saat collapsed.
+- **Relokasi Pengaturan & Dokumentasi ke Menu Popover Profil — `frontend-react/src/components/AnimatedSidebar.tsx`**:
+  - Menghapus grup `PREFERENCES` (Dokumentasi & Settings) dari daftar scrolling menu navigasi utama.
+  - Mengintegrasikan menu popover profil interaktif yang melayang di atas kartu profil pengguna dengan pilihan:
+    - 👤 Identitas Pengguna & Lisensi aktif
+    - ⚙️ **Pengaturan (Settings)** (`onNavSelect("settings")`)
+    - 📖 **Dokumentasi** (`onNavSelect("documentation")`)
+    - ⚡ **Kelola Lisensi & Akun** (`onOpenAuthModal()`)
+  - Dilengkapi deteksi klik di luar popover (*click-outside listener*) untuk menutup menu secara otomatis.
+- **Verifikasi Kualitas Kode**:
+  - `frontend-react`: `npm run build` sukses 100% tanpa error kompilasi TypeScript (`tsc && vite build`).
+  - `backend-node`: 40/40 test lulus (*100% pass*).
+  - `python-service`: 330/330 test lulus (*100% pass*). Total 370 tests hijau.
+
+## [v2.40.0] - 2026-09-09
+
+### Multi-Subnet Scope Isolation, Controller Single-Identity & Zero-Flapping L2 Verification
+- **Integritas Identitas Controller Tunggal & Eliminasi Duplikasi Laptop Operator — `backend-node/src/services/deviceManager.ts` & `database.ts`**:
+  - `DeviceManager.getDevices()` & `scopeForDisplay()`: Mengeliminasi entri usang controller yang berstatus offline (`!dev.is_online && (dev.is_self || dev.hostname === selfHostname)`) dan mendeduplikasi controller aktif dengan kunci deterministik `_operator_controller_`. Menjamin laptop operator (`This PC`) tampil tepat satu baris dan selalu terverifikasi online.
+  - `DeviceManager._scanNetworkImpl`: Memastikan hanya satu MAC fisik controller yang memegang `is_self = true` di memori dan `rawScanned`. MAC lama dari adapter/virtual yang tidak aktif otomatis dibersihkan.
+  - `DatabaseService.init()` & `syncScanResults`: Menambahkan pembersihan otomatis `UPDATE devices SET is_self = 0 WHERE is_self = 1 AND is_online = 0` dan `clearOtherSelfStmt` sehingga SQLite tidak pernah mempertahankan entri controller ganda antar-MAC.
+  - `_handleDhcpEvent`: Menambahkan subnet guard (`isIpInSameSubnet`) dan pemeriksaan paket DHCP DECLINE (`data.is_decline`) agar siaran DHCP dari subnet asing atau penolakan IP tidak memicu fast-revival palsu.
+- **Sinkronisasi Konsistensi Status Badge Frontend — `frontend-react/src/components/DeviceTable.tsx`**:
+  - Mengganti logika pemaksaan `const isOnline = device.is_self ? true : device.is_online;` menjadi `const isOnline = Boolean(device.is_online);`.
+  - Mengeliminasi kontradiksi visual di mana teks sub-nama menampilkan `Offline (10.40.151.187)` namun kolom status menampilkan badge hijau `Online`.
+- **Active Interface Gateway Selection & Multi-Subnet Scope Isolation — `backend-node/src/services/deviceManager.ts`**:
+  - `selectGateway()`: Mengevaluasi kandidat gateway aktif terhadap network interface fisik lokal OS (`os.networkInterfaces()`) menggunakan `isLocalSubnet(gw.ip, iface.address, iface.netmask)`. Mengeliminasi kesalahan penentuan gateway router dari subnet asing (seperti `192.168.0.1` saat adapter terhubung ke `10.40.151.x`).
+  - `getDevices()`: Memfilter perangkat berdasarkan `this.currentNetworkId` agar entri dari jaringan lama/asing tidak bocor ke endpoint REST API dan stream WebSocket.
+  - `scopeForDisplay()`: Memprioritaskan isolasi perangkat berbasis `this.currentNetworkId` dengan fallback aman ke `scopedByNet` apabila kalkulasi prefix subnet bernilai null.
+  - `scanNetwork()`: Saat mendeteksi perpindahan jaringan (`detectedNetId !== this.currentNetworkId`), membersihkan in-memory map dan memuat ulang perangkat khusus jaringan aktif dari SQLite.
+  - `init()`: Mendeteksi network ID aktif langsung dari interface adapter saat startup alih-alih fallback buta ke `net_default`.
+- **Zero-Flapping Active L2 Verification for Dead Hosts & Stale Windows ARP Entries — `python-service/src/core/scanner.py` & `discovery/liveness.py`**:
+  - `scanner.py`: Pada `_build_device`, jika ICMP ping gagal (`ping['alive'] == False`) dan host tidak memiliki traffic masuk aktif (tidak ada mDNS, SSDP, DHCP lease, atau IPv6 NDP), scanner mengeksekusi active unicast ARP probe (`probe_sleeping_host_via_unicast_arp`). Jika host fisik tidak merespons, `is_active_layer2 = False` dan `is_online = False`.
+  - `scanner.py`: Pada `scan_full()`, menyaring hasil akhir sehingga hanya host yang terbukti hidup (`dev.get('is_online', True)`) yang dikembalikan ke Node.js orchestrator. Perangkat hantu/mati seperti `10.40.151.1` tidak lagi dihidupkan palsu.
+  - `liveness.py`: Memperbaiki histeresis event `device_offline_pulse` menjadi tepat saat transisi ambang batas (`misses == self._offline_threshold`), mencegah spamming log dan event tiap 10 detik.
+  - Penambahan analisis mendalam root cause dan solusi arsitektural 3 pilar pada `docs/TROUBLESHOOTING.md` Bagian 6.
+
+## [v2.39.0] - 2026-09-09
+
+### Network-Scoped Isolation & Composite Key Architecture (Option B)
+- **Per-Network Scoped Isolation & Composite Primary Key — `backend-node/src/services/database.ts`**:
+  - Menambahkan tabel `networks` (`network_id TEXT PRIMARY KEY, gateway_mac, gateway_ip, ssid, subnet_cidr, interface_name, first_seen, last_seen`) untuk mencatat metadata tiap jaringan Wi-Fi/Ethernet.
+  - Memperbarui skema tabel `devices` dengan composite primary key `(network_id, mac)` dan default `network_id = 'net_default'`.
+  - Mengimplementasikan dynamic database migration yang mendeteksi skema lama tanpa `network_id`, membaca seluruh kolom secara dinamis, membungkus nilai default ekspresi SQL dalam tanda kurung `(datetime('now', 'localtime'))` agar kompatibel dengan engine SQLite, dan mentransfer data dengan aman tanpa kehilangan metadata apapun.
+  - Memastikan 100% isolasi data: status blokir (`is_blocked`), limit kecepatan (`speed_limit`), status online (`is_online`), dan metadata perangkat kini terisolasi penuh per jaringan fisik (berdasarkan MAC gateway). Perangkat yang diblokir di Rumah tidak akan terblokir saat dibawa ke Kantor.
+  - Menjaga keutuhan tabel `license_cache`: lisensi Pro/VIP dan grace period tersimpan aman tanpa pernah terhapus atau terdegradasi.
+  - Menambahkan utilitas `deriveNetworkId(gateway_mac)` untuk menghasilkan identifier deterministik berformat `net_<hex>`.
+- **Network Scope Awareness & Memory Isolation — `backend-node/src/services/deviceManager.ts`**:
+  - Menambahkan state `currentNetworkId` dan getter `getCurrentNetworkId()`.
+  - Menskupkan seluruh operasi database (`init()`, `clearAllDevices()`, `deleteDevice()`, `setDeviceAlias()`, `setSpeedLimit()`, `unblockDevice()`) berdasarkan `currentNetworkId`.
+  - Memperbaiki penanganan `networkChanged`: membersihkan semua `session_id` usang (`dev.session_id = undefined`) sebelum membersihkan memori perangkat, sehingga sesi cut/limit baru di jaringan tujuan selalu menggunakan session_id fresh.
+  - Memperbaiki bug pada fallback offline `_unblockDeviceImpl` agar menyetel `dbDev.is_blocked = false` dan `dbDev.speed_limit = 100` sebelum mengembalikan objek perangkat ke pemanggil.
+  - Rekonsiliasi scan di Jaringan B diisolasi secara penuh sehingga tidak menandai perangkat milik Jaringan A sebagai offline.
+- **Pembersihan Windows Kernel ARP Neighbor & Propagasi Gateway MAC — `python-service/src/server.py`**:
+  - Pada `network_watchdog_thread`: saat mendeteksi roaming/pergantian jaringan (`scanner.is_network_changed`), memanggil `shield_engine.disable()` secara otomatis sebelum reset spoofer untuk melepaskan entri kernel static neighbor Windows (`_unlock_kernel_neighbor()`), mencegah adapter terkunci pada MAC router lama.
+  - Memperkaya payload event broadcast `network_changed` dengan properti `new_gateway_mac`.
+- **Suite Pengujian Terdedikasi — `backend-node/tests/unit_network_isolation.test.ts` & `run_tests.ts`**:
+  - Membuat test suite baru `unit_network_isolation.test.ts` dengan 6 skenario pengujian komprehensif: normalisasi ID jaringan, persistensi metadata jaringan, composite primary key isolation, isolasi gateway flags, isolasi scan reconciliation, dan preservasi `license_cache`.
+  - Mengintegrasikan suite baru ke dalam runner `npm test`.
+  - Verifikasi menyeluruh: **330 pengujian Python + 40 pengujian Node.js = 370 tests PASS (100%)**.
+
 ## [v2.38.0] - 2026-09-08
 
 ### Security-Aware Presence Tracking & Coherent Alerting

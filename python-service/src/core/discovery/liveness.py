@@ -313,7 +313,7 @@ class LivenessWatchdogDaemon:
                 continue
             misses = self._consecutive_misses.get(ip, 0) + 1
             self._consecutive_misses[ip] = misses
-            if misses >= self._offline_threshold:
+            if misses == self._offline_threshold:
                 logger.info(f"Watchdog detected offline device: {ip} ({misses} miss berturut-turut)")
                 self.event_callback({
                     "event": "device_offline_pulse",

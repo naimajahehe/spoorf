@@ -5,6 +5,7 @@ import { runPythonBridgeTests } from './unit_pythonBridge.test';
 import { runLicenseUnitTests } from './unit_license.test';
 import { runSecurityTests } from './unit_security.test';
 import { runGamingModeTests } from './unit_gamingMode.test';
+import { runNetworkIsolationTests } from './unit_network_isolation.test';
 
 async function main() {
     console.log('=====================================================');
@@ -73,6 +74,14 @@ async function main() {
         failed++;
     }
 
+    try {
+        await runNetworkIsolationTests();
+        passed += 6;
+    } catch (err: any) {
+        console.error('❌ Network Isolation Test Failed:', err);
+        failed++;
+    }
+
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
     console.log('\n=====================================================');
     console.log(`📊 TEST RESULTS: ${passed} PASSED | ${failed} FAILED | ${elapsed}s`);
@@ -82,6 +91,7 @@ async function main() {
         process.exit(1);
     }
     console.log('🎉 ALL NODE.JS TESTS PASSED SUCCESSFULLY!');
+    process.exit(0);
 }
 
 main().catch(err => {

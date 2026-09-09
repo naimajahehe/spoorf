@@ -2,7 +2,7 @@ import os from 'os';
 import * as path from 'path';
 import { EventEmitter } from 'events';
 import { normalizeProfileIpv6Addresses, PythonBridge } from './pythonBridge';
-import { DatabaseService } from './database';
+import { DatabaseService, deriveNetworkId } from './database';
 import { LicenseManager, FeatureLimitError, FeatureLockedError } from './licenseManager';
 import { Device, CutStatus, ProfileAssessment, ProfileRefreshResult } from '../types';
 import type { ScanOptions } from './pythonBridge';
@@ -215,14 +215,43 @@ export function scopeDevicesToActiveSubnet(devices: Device[], gatewayIp?: string
  * agar operasi spoofing gagal aman ("Gateway not found") ketimbang meracuni perangkat acak.
  */
 export function selectGateway(devices: Device[]): Device | undefined {
-    // Prefer an ONLINE gateway first, so after a network switch a stale offline gateway
-    // (from the previous network, still flagged is_gateway in SQLite) can't win and cause
-    // the subnet filter to discard every device on the new network.
+    const ifaces: NetIfaceLike[] = [];
+    try {
+        for (const addrs of Object.values(os.networkInterfaces())) {
+            for (const a of addrs || []) {
+                if (a.family === 'IPv4' && !a.internal) {
+                    ifaces.push({ address: a.address, netmask: a.netmask, family: a.family, internal: a.internal });
+                }
+            }
+        }
+    } catch {}
+
+    const isLocalSubnet = (ip: string): boolean => {
+        if (!ip) return false;
+        if (ifaces.length === 0) return true;
+        return ifaces.some(iface => {
+            const prefix = resolveActivePrefix(iface.address, ifaces);
+            return prefix !== null && isIpInSameSubnet(ip, iface.address);
+        });
+    };
+
+    // 1. Prioritaskan gateway ONLINE yang berada dalam subnet adapter lokal aktif
+    for (const d of devices) {
+        if (d.is_gateway && d.is_online && isLocalSubnet(d.ip)) return d;
+    }
+    // 2. Gateway online lainnya
     for (const d of devices) {
         if (d.is_gateway && d.is_online) return d;
     }
+    // 3. Gateway offline yang cocok dengan subnet lokal
+    for (const d of devices) {
+        if (d.is_gateway && isLocalSubnet(d.ip)) return d;
+    }
     for (const d of devices) {
         if (d.is_gateway) return d;
+    }
+    for (const d of devices) {
+        if (!d.is_self && isLocalSubnet(d.ip) && (d.ip.endsWith('.1') || d.ip.endsWith('.254'))) return d;
     }
     for (const d of devices) {
         if (!d.is_self && (d.ip.endsWith('.1') || d.ip.endsWith('.254'))) return d;
@@ -253,6 +282,7 @@ interface PendingGamingDisable {
 
 export class DeviceManager extends EventEmitter {
     private devices: Map<string, Device> = new Map();
+    private currentNetworkId: string = 'net_default';
     private scanning: boolean = false;
     // Auto Scan sebagai fitur NYATA (bukan kosmetik): saat false ("Scan saja"), tak ada scan
     // otomatis latar (watchdog) maupun scan susulan saat perangkat baru masuk. Hanya scan
@@ -318,7 +348,7 @@ export class DeviceManager extends EventEmitter {
             this.reconcileBlocksWithPython().catch(err => console.warn('Notice reconcile on reconnect:', err?.message));
         });
 
-        this.python.on('networkChanged', (data) => {
+        this.python.on('networkChanged', async (data) => {
             this.dhcpOptimizationGeneration++;
             this.lastDhcpOptimization = null;
             this.profileRefreshGeneration++;
@@ -329,14 +359,34 @@ export class DeviceManager extends EventEmitter {
                 clearTimeout(this.profileEnrichmentTimer);
                 this.profileEnrichmentTimer = null;
             }
-            // Python's watchdog already ran spoofer.stop_all() on the network change, so every
-            // session_id we still hold is now dead. Clear them (the block intent in is_blocked
-            // stays) so cut/limit start a FRESH session and auto-reblock is not skipped by a
-            // stale session_id — otherwise those ops silently address a session that no longer
-            // exists (Python returns success:false under an HTTP 200) until the app restarts.
+
+            const newGwMac = data?.gateway_mac || data?.new_gateway_mac;
+            if (newGwMac) {
+                this.currentNetworkId = deriveNetworkId(newGwMac);
+                console.log(`🌐 [DeviceManager] networkChanged: scoped to ${this.currentNetworkId}`);
+            }
+
             for (const dev of this.devices.values()) {
                 if (dev.session_id) dev.session_id = undefined;
             }
+
+            this.devices.clear();
+            this.gamingManaged.clear();
+
+            if (typeof this.db?.getAllDevices === 'function') {
+                try {
+                    const storedDevices = await this.db.getAllDevices(this.currentNetworkId);
+                    const sorted = [...storedDevices].sort((a, b) => (a.is_online === b.is_online ? 0 : a.is_online ? 1 : -1));
+                    for (const device of sorted) {
+                        if (device.session_id) device.session_id = undefined;
+                        this.devices.set(deviceMemKey(device), device);
+                    }
+                    this.emit('devicesUpdated', Array.from(this.devices.values()));
+                } catch (err: any) {
+                    console.warn('Notice reloading devices on networkChanged:', err?.message);
+                }
+            }
+
             this.emit('networkChanged', data);
             this.scanNetwork().catch(console.error);
         });
@@ -521,7 +571,7 @@ export class DeviceManager extends EventEmitter {
                         // scanNetwork (BUG-17). Tanpa ini, RELEASE membuat perangkat hilang dari UI
                         // sampai rescan berikutnya.
                         this.devices.set(deviceMemKey(dev), dev);
-                        this.db.setDeviceOnlineStatus(dev.mac, false).catch(console.warn);
+                        this.db.setDeviceOnlineStatus(dev.mac, false, this.currentNetworkId).catch(console.warn);
                         this.emit('deviceUpdated', dev);
                         this.emit('deviceDisconnected', dev);
                         updatedAny = true;
@@ -532,6 +582,14 @@ export class DeviceManager extends EventEmitter {
                 }
                 this.emit('dhcpActivity', { kind: 'release', mac: data.mac, ip: data.ip });
             } else if (data && data.mac && data.ip) {
+                // Abaikan jika DHCP event membawa IP di luar subnet gateway aktif atau pesan DHCP DECLINE
+                const activeGw = this.findGateway();
+                if (activeGw && !isIpInSameSubnet(data.ip, activeGw.ip)) {
+                    return;
+                }
+                if (data.is_decline) {
+                    return;
+                }
                 // Instant Online State Transition from Passive DHCP Discovery (MAC-First Identity)
                 const normMac = data.mac.toLowerCase();
 
@@ -561,7 +619,7 @@ export class DeviceManager extends EventEmitter {
                     console.log(`🔄 [DHCP IP Churn] IP ${data.ip} berpindah kepemilikan dari ${occupantOfNewIp.mac} ke ${normMac}`);
                     occupantOfNewIp.is_online = false;
                     this.devices.delete(data.ip);
-                    this.db.setDeviceOnlineStatus(occupantOfNewIp.mac, false).catch(console.warn);
+                    this.db.setDeviceOnlineStatus(occupantOfNewIp.mac, false, this.currentNetworkId).catch(console.warn);
                     this.emit('deviceUpdated', occupantOfNewIp);
                     this.emit('deviceDisconnected', occupantOfNewIp);
                 }
@@ -604,7 +662,7 @@ export class DeviceManager extends EventEmitter {
                         fingerprint: data.dhcp_fingerprint,
                         clientId: data.client_id,
                         fqdn: data.fqdn
-                    });
+                    }, this.currentNetworkId);
                     this.emit('deviceUpdated', dev);
                     this.emit('devicesUpdated', Array.from(this.devices.values()));
                     // Perangkat aktif kembali via DHCP selagi Gaming Mode aktif -> ikut di-throttle.
@@ -642,7 +700,7 @@ export class DeviceManager extends EventEmitter {
                     // Auto Scan. Rate-limited agar rotasi agresif tak memicu badai scan. Unblock-safe:
                     // pencocokan menuntut is_blocked=1 → perangkat yang di-unblock tak lagi cocok.
                     try {
-                        if (typeof this.db.hasBlockedIdentityMatch === 'function' && this.db.hasBlockedIdentityMatch(data)) {
+                        if (typeof this.db.hasBlockedIdentityMatch === 'function' && this.db.hasBlockedIdentityMatch(data, this.currentNetworkId)) {
                             const now = Date.now();
                             if (now - this.lastIdentityReblockAt >= IDENTITY_REBLOCK_MIN_INTERVAL_MS) {
                                 this.lastIdentityReblockAt = now;
@@ -693,7 +751,7 @@ export class DeviceManager extends EventEmitter {
             dev.is_online = isOnline;
             if (data.rtt_ms !== undefined) dev.rtt_ms = data.rtt_ms;
             this.devices.set(dev.ip, dev);
-            await this.db.setDeviceOnlineStatus(dev.mac, isOnline).catch(console.warn);
+            await this.db.setDeviceOnlineStatus(dev.mac, isOnline, this.currentNetworkId).catch(console.warn);
             this.emit('deviceUpdated', dev);
 
             if (wasOnline && !isOnline) {
@@ -741,7 +799,7 @@ export class DeviceManager extends EventEmitter {
                         device.ip = migratedIp;
                         device.is_online = true;
                         this.devices.set(migratedIp, device);
-                        await this.db.updateDeviceIp(device.mac, migratedIp).catch(console.warn);
+                        await this.db.updateDeviceIp(device.mac, migratedIp, this.currentNetworkId).catch(console.warn);
                         this.emit('deviceUpdated', device);
                         this.emit('devicesUpdated', Array.from(this.devices.values()));
                         return;
@@ -764,7 +822,7 @@ export class DeviceManager extends EventEmitter {
                 const normMac = device.mac.toLowerCase();
                 device.is_online = false;
                 this.devices.set(device.ip, device);
-                await this.db.setDeviceOnlineStatus(device.mac, false).catch(console.warn);
+                await this.db.setDeviceOnlineStatus(device.mac, false, this.currentNetworkId).catch(console.warn);
                 this.emit('deviceUpdated', device);
                 this.emit('deviceDisconnected', device);
                 this.emit('devicesUpdated', Array.from(this.devices.values()));
@@ -795,7 +853,30 @@ export class DeviceManager extends EventEmitter {
         // Sembuhkan profil yang namanya generik/'Unknown' dari hostname personal perangkatnya, agar
         // MAC hasil rotasi tak lagi mewarisi nama "Unknown" (idempoten, hanya naik generik→personal).
         try { if (typeof this.db.backfillProfileNames === "function") await this.db.backfillProfileNames(); } catch (e: any) { console.warn('Notice profile name backfill:', e?.message); }
-        const storedDevices = await this.db.getAllDevices();
+
+        if (this.currentNetworkId === 'net_default' && typeof this.db?.getAllNetworks === 'function') {
+            try {
+                const ifaces = os.networkInterfaces();
+                const networks = this.db.getAllNetworks();
+                for (const net of networks) {
+                    if (net.gateway_ip && net.gateway_ip !== '0.0.0.0') {
+                        for (const addrs of Object.values(ifaces)) {
+                            for (const a of addrs || []) {
+                                if (a.family === 'IPv4' && !a.internal && isIpInSameSubnet(net.gateway_ip, a.address)) {
+                                    this.currentNetworkId = net.id;
+                                    console.log(`🌐 [DeviceManager] Initialized network scope from local adapter: ${this.currentNetworkId} (${net.gateway_ip})`);
+                                    break;
+                                }
+                            }
+                            if (this.currentNetworkId !== 'net_default') break;
+                        }
+                    }
+                    if (this.currentNetworkId !== 'net_default') break;
+                }
+            } catch {}
+        }
+
+        const storedDevices = await this.db.getAllDevices(this.currentNetworkId);
         this.devices.clear();
         // Load in reverse (offline first, online last) so online devices cleanly overwrite any legacy stale IP duplicates
         const sorted = [...storedDevices].sort((a, b) => (a.is_online === b.is_online ? 0 : a.is_online ? 1 : -1));
@@ -803,6 +884,10 @@ export class DeviceManager extends EventEmitter {
             // Python fresh saat boot: session_id dari DB pasti basi (sesi spoof tak dipersistkan).
             // Bersihkan agar auto-reblock membangun ulang sesi, bukan mengira sesinya hidup (SP-2).
             if (device.session_id) device.session_id = undefined;
+            // INTEGRITAS CONTROLLER: Abaikan riwayat controller offline dari DB agar tidak menjadi entri hantu saat startup
+            const selfHostname = os.hostname().toLowerCase();
+            const devHost = (device.hostname || '').trim().toLowerCase();
+            if (!device.is_online && (device.is_self || (devHost && devHost === selfHostname))) continue;
             // Offline devices (ip='') keyed by identity so they don't collapse onto '' (BUG-17).
             this.devices.set(deviceMemKey(device), device);
         }
@@ -833,7 +918,7 @@ export class DeviceManager extends EventEmitter {
     private async _runRetentionSweep(): Promise<void> {
         const archived = await this.db.archiveStaleDevices(STALE_DEVICE_RETENTION_DAYS);
         if (archived > 0) {
-            const fresh = await this.db.getAllDevices();
+            const fresh = await this.db.getAllDevices(this.currentNetworkId);
             const freshMacs = new Set(fresh.map(d => d.mac.toLowerCase()));
             for (const [ipKey, dev] of this.devices.entries()) {
                 if (!freshMacs.has(dev.mac.toLowerCase())) this.devices.delete(ipKey);
@@ -903,6 +988,10 @@ export class DeviceManager extends EventEmitter {
 
     isScanning(): boolean {
         return this.scanning;
+    }
+
+    getCurrentNetworkId(): string {
+        return this.currentNetworkId;
     }
 
     /** True bila DB memakai fallback in-memory (data tidak tersimpan permanen) — P3. */
@@ -1060,9 +1149,59 @@ export class DeviceManager extends EventEmitter {
                 console.warn('Notice ensuring self device:', err);
             }
 
+            // INTEGRITAS CONTROLLER: Pastikan hanya ada 1 perangkat controller (is_self) aktif di jaringan ini
+            const activeSelf = rawScanned.find(d => d.is_self);
+            if (activeSelf) {
+                for (const d of rawScanned) {
+                    if (d !== activeSelf && d.is_self) {
+                        d.is_self = false;
+                    }
+                }
+                for (const [k, d] of this.devices.entries()) {
+                    if (d.is_self && d.mac.toLowerCase() !== activeSelf.mac.toLowerCase()) {
+                        d.is_self = false;
+                        if (!d.is_online) {
+                            this.devices.delete(k);
+                        }
+                    }
+                }
+            }
+
             // Saring rawScanned: Hanya proses perangkat yang berada dalam satu subnet dengan gateway aktif
             if (activeGwForFilter) {
                 rawScanned = rawScanned.filter(d => isIpInSameSubnet(d.ip, activeGwForFilter.ip));
+                if (activeGwForFilter.mac) {
+                    const detectedNetId = deriveNetworkId(activeGwForFilter.mac);
+                    if (detectedNetId !== this.currentNetworkId) {
+                        console.log(`🌐 [DeviceManager] Network shift detected during scan: ${this.currentNetworkId} -> ${detectedNetId}`);
+                        this.currentNetworkId = detectedNetId;
+                        this.devices.clear();
+                        if (typeof this.db?.getAllDevices === 'function') {
+                            try {
+                                const stored = await this.db.getAllDevices(this.currentNetworkId);
+                                for (const d of stored) {
+                                    this.devices.set(deviceMemKey(d), d);
+                                }
+                            } catch (e: any) {
+                                console.warn('Notice loading devices on network shift:', e?.message);
+                            }
+                        }
+                    }
+                    if (typeof this.db?.ensureNetwork === 'function') {
+                        this.db.ensureNetwork({
+                            id: detectedNetId,
+                            ssid: 'Network ' + (activeGwForFilter.ip || 'LAN'),
+                            gateway_ip: activeGwForFilter.ip || '0.0.0.0',
+                            gateway_mac: activeGwForFilter.mac,
+                            subnet: (activeGwForFilter.ip ? activeGwForFilter.ip.substring(0, activeGwForFilter.ip.lastIndexOf('.')) + '.0/24' : '0.0.0.0/0')
+                        });
+                    }
+                }
+            }
+
+            // Tag each scanned device with currentNetworkId
+            for (const dev of rawScanned) {
+                dev.network_id = this.currentNetworkId;
             }
 
             // Sinkronkan ke SQLite:
@@ -1263,8 +1402,8 @@ export class DeviceManager extends EventEmitter {
                         currentDev.is_blocked = true;
                         currentDev.speed_limit = 0;
                         currentDev.session_id = sessionId;
-                        await this.db.setDeviceBlocked(currentDev.mac, true, sessionId);
-                        await this.db.setDeviceSpeedLimit(currentDev.mac, 0);
+                        await this.db.setDeviceBlocked(currentDev.mac, true, sessionId, this.currentNetworkId);
+                        await this.db.setDeviceSpeedLimit(currentDev.mac, 0, this.currentNetworkId);
 
                         this.devices.set(currentDev.ip, currentDev);
                         this.emit('deviceUpdated', currentDev);
@@ -1307,8 +1446,8 @@ export class DeviceManager extends EventEmitter {
                         currentDev.is_blocked = false;
                         currentDev.speed_limit = limit;
                         currentDev.session_id = sessionId;
-                        await this.db.setDeviceBlocked(currentDev.mac, false, sessionId);
-                        await this.db.setDeviceSpeedLimit(currentDev.mac, limit);
+                        await this.db.setDeviceBlocked(currentDev.mac, false, sessionId, this.currentNetworkId);
+                        await this.db.setDeviceSpeedLimit(currentDev.mac, limit, this.currentNetworkId);
 
                         this.devices.set(currentDev.ip, currentDev);
                         this.emit('deviceUpdated', currentDev);
@@ -1403,9 +1542,9 @@ export class DeviceManager extends EventEmitter {
         this.devices.set(ip, device);
 
         // Simpan status blokir secara persisten di SQLite
-        await this.db.setDeviceBlocked(device.mac, true, sessionId);
-        await this.db.setDeviceSpeedLimit(device.mac, 0);
-        await this.db.setDeviceOnlineStatus(device.mac, true);
+        await this.db.setDeviceBlocked(device.mac, true, sessionId, this.currentNetworkId);
+        await this.db.setDeviceSpeedLimit(device.mac, 0, this.currentNetworkId);
+        await this.db.setDeviceOnlineStatus(device.mac, true, this.currentNetworkId);
 
         this.emit('deviceUpdated', device);
         this.emit('devicesUpdated', Array.from(this.devices.values()));
@@ -1415,16 +1554,16 @@ export class DeviceManager extends EventEmitter {
     /**
      * Hentikan sesi spoof lama pada perangkat (dari sebelum offline / IP lama) sebelum
      * membangun sesi fresh. Kegagalan stopSpoof diabaikan: sesi lama mungkin sudah mati
-     * di Python. Dipakai oleh jalur auto-reblock dan auto-throttle.
+     * di engine (404), yang penting ID-nya dinolkan agar tak membingungkan state.
      */
-    private async _clearStaleSpoofSession(dev: Device): Promise<void> {
-        if (dev.session_id) {
-            try {
-                await this.python.stopSpoof(dev.session_id);
-            } catch (e) {
-                // Sesi lama mungkin sudah mati di Python
-            }
-            dev.session_id = undefined;
+    private async _clearStaleSpoofSession(device: Device): Promise<void> {
+        if (!device.session_id) return;
+        const oldSessionId = device.session_id;
+        device.session_id = undefined;
+        try {
+            await this.python.stopSpoof(oldSessionId);
+        } catch {
+            // Engine mungkin sudah menghapus sesi ini (mis. restart/timeout) — aman diabaikan
         }
     }
 
@@ -1433,35 +1572,25 @@ export class DeviceManager extends EventEmitter {
     }
 
     private async _unblockDeviceImpl(identifier: string): Promise<Device> {
-        // ULTRAREVIEW #2: tolak identifier kosong. Tanpa ini, loop fallback di bawah mencocokkan
-        // perangkat arsip pertama dengan ip='' / profile_id='' dan melepas blokirnya secara keliru.
-        if (!identifier || identifier.trim() === '') {
-            throw new Error('unblockDevice: identifier (ip/mac/profile_id) kosong tidak diperbolehkan');
-        }
-        let device = this.devices.get(identifier);
+        const device = this._findDeviceByMac(identifier) || this.devices.get(identifier);
         if (!device) {
-            const norm = identifier.toLowerCase();
-            for (const d of this.devices.values()) {
-                if (d.ip === identifier || d.mac?.toLowerCase() === norm || d.profile_id === identifier) {
-                    device = d;
-                    break;
-                }
+            const dbDev = await this.db.getDeviceByMac(identifier, this.currentNetworkId);
+            if (!dbDev) {
+                throw new Error(`Device ${identifier} not found`);
             }
+            // Device exists in DB but not in active memory
+            dbDev.is_blocked = false;
+            dbDev.speed_limit = 100;
+            await this.db.setDeviceBlocked(dbDev.mac, false, undefined, this.currentNetworkId);
+            await this.db.setDeviceSpeedLimit(dbDev.mac, 100, this.currentNetworkId);
+            return dbDev;
         }
-        if (!device) {
-            // Cek SQLite database untuk perangkat offline yang mungkin belum dimuat di memori
-            const dbDev = await this.db.getDeviceByMac(identifier);
-            if (dbDev) {
-                device = dbDev;
-                this.devices.set(deviceMemKey(device), device);
-            }
-        }
-        if (!device) {
-            throw new Error(`Device ${identifier} not found`);
-        }
+
         this._assertNoPendingGamingRecoveryConflict([device]);
 
-        if (device.session_id) {
+        if (device.is_redirected) {
+            await this.python.stopRedirect(device.ip);
+        } else if (device.session_id) {
             await this.python.stopSpoof(device.session_id);
         }
 
@@ -1476,10 +1605,10 @@ export class DeviceManager extends EventEmitter {
         this.devices.set(deviceMemKey(device), device);
 
         // Hapus status blokir dan pulihkan speed limit ke 100% di SQLite
-        await this.db.setDeviceBlocked(device.mac, false, undefined);
-        await this.db.setDeviceSpeedLimit(device.mac, 100);
+        await this.db.setDeviceBlocked(device.mac, false, undefined, this.currentNetworkId);
+        await this.db.setDeviceSpeedLimit(device.mac, 100, this.currentNetworkId);
         if (device.is_online) {
-            await this.db.setDeviceOnlineStatus(device.mac, true);
+            await this.db.setDeviceOnlineStatus(device.mac, true, this.currentNetworkId);
         }
 
         this.emit('deviceUpdated', device);
@@ -1512,8 +1641,8 @@ export class DeviceManager extends EventEmitter {
             device.is_blocked = false;
             device.speed_limit = 100;
             device.session_id = undefined;
-            await this.db.setDeviceBlocked(device.mac, false);
-            await this.db.setDeviceSpeedLimit(device.mac, 100);
+            await this.db.setDeviceBlocked(device.mac, false, undefined, this.currentNetworkId);
+            await this.db.setDeviceSpeedLimit(device.mac, 100, this.currentNetworkId);
         }
 
         const gw = (gatewayIp ? this.devices.get(gatewayIp) : null) || this.findGateway();
@@ -1538,7 +1667,7 @@ export class DeviceManager extends EventEmitter {
         }
 
         this.devices.set(ip, device);
-        await this.db.setDeviceOnlineStatus(device.mac, true);
+        await this.db.setDeviceOnlineStatus(device.mac, true, this.currentNetworkId);
         this.emit('deviceUpdated', device);
         this.emit('devicesUpdated', Array.from(this.devices.values()));
         return device;
@@ -1563,7 +1692,7 @@ export class DeviceManager extends EventEmitter {
         device.is_online = true;
 
         this.devices.set(ip, device);
-        await this.db.setDeviceOnlineStatus(device.mac, true);
+        await this.db.setDeviceOnlineStatus(device.mac, true, this.currentNetworkId);
         this.emit('deviceUpdated', device);
         this.emit('devicesUpdated', Array.from(this.devices.values()));
         return device;
@@ -1585,7 +1714,7 @@ export class DeviceManager extends EventEmitter {
             : requestedDevice ? [requestedDevice] : [];
         this._assertNoPendingGamingRecoveryConflict(inMemoryTargets);
 
-        const existing = await this.db.getDeviceByMac(normMac);
+        const existing = await this.db.getDeviceByMac(normMac, this.currentNetworkId);
         const profileId = requestedProfileId || existing?.profile_id;
 
         const devicesToDelete: Array<[string, Device]> = [];
@@ -1604,7 +1733,7 @@ export class DeviceManager extends EventEmitter {
             }
         }
 
-        await this.db.deleteDevice(mac);
+        await this.db.deleteDevice(mac, this.currentNetworkId);
         for (const [ip] of devicesToDelete) {
             this.devices.delete(ip);
         }
@@ -1620,13 +1749,13 @@ export class DeviceManager extends EventEmitter {
         if (this.pendingGamingDisable) {
             throw this._pendingGamingRecoveryError();
         }
-        await this.db.clearAllDevices();
+        await this.db.clearAllDevices(this.currentNetworkId);
         this.devices.clear();
         this.emit('devicesUpdated', []);
     }
 
     async setDeviceAlias(mac: string, alias: string): Promise<Device> {
-        const updated = await this.db.setDeviceAlias(mac, alias);
+        const updated = await this.db.setDeviceAlias(mac, alias, this.currentNetworkId);
         const normMac = mac.toLowerCase();
         let found = false;
         for (const [ip, dev] of this.devices.entries()) {
@@ -1643,16 +1772,16 @@ export class DeviceManager extends EventEmitter {
             updated.is_online = true;
             this.devices.set(updated.ip, updated);
         }
-        await this.db.setDeviceOnlineStatus(mac, true);
+        await this.db.setDeviceOnlineStatus(mac, true, this.currentNetworkId);
         this.emit('devicesUpdated', Array.from(this.devices.values()));
         return { ...updated, is_online: true };
     }
 
-    async setSpeedLimit(ip: string, limit: number): Promise<Device> {
-        return this.runExclusive(() => this._setSpeedLimitImpl(ip, limit));
+    async setSpeedLimit(ip: string, limit: number, gatewayIp?: string): Promise<Device> {
+        return this.runExclusive(() => this._setSpeedLimitImpl(ip, limit, gatewayIp));
     }
 
-    private async _setSpeedLimitImpl(ip: string, limit: number): Promise<Device> {
+    private async _setSpeedLimitImpl(ip: string, limit: number, gatewayIp?: string): Promise<Device> {
         const device = this.devices.get(ip);
         if (!device) {
             throw new Error(`Device with IP ${ip} not found`);
@@ -1672,7 +1801,7 @@ export class DeviceManager extends EventEmitter {
             }
         }
 
-        const gateway = this.findGateway();
+        const gateway = (gatewayIp ? this.devices.get(gatewayIp) : undefined) || this.findGateway();
         if (!gateway) {
             throw new Error('Gateway not found');
         }
@@ -1686,15 +1815,15 @@ export class DeviceManager extends EventEmitter {
             // Pulihkan kecepatan penuh (100%): stop spoof jika ada
             if (device.session_id) {
                 await this.python.stopSpoof(device.session_id);
+                device.session_id = undefined;
             }
             device.is_blocked = false;
-            device.session_id = undefined;
             device.speed_limit = 100;
-            await this.db.setDeviceBlocked(device.mac, false, undefined);
-            await this.db.setDeviceSpeedLimit(device.mac, 100);
-            await this.db.setDeviceOnlineStatus(device.mac, true);
+            await this.db.setDeviceBlocked(device.mac, false, undefined, this.currentNetworkId);
+            await this.db.setDeviceSpeedLimit(device.mac, 100, this.currentNetworkId);
+            await this.db.setDeviceOnlineStatus(device.mac, true, this.currentNetworkId);
         } else if (cleanLimit === 0) {
-            // Cut off total (0%): Blokir penuh
+            // Mode Blokir Penuh (0%): Setara cut-off
             if (!device.session_id) {
                 const sessionId = await this.python.startSpoof(
                     device.ip,
@@ -1711,9 +1840,9 @@ export class DeviceManager extends EventEmitter {
             }
             device.is_blocked = true;
             device.speed_limit = 0;
-            await this.db.setDeviceBlocked(device.mac, true, device.session_id);
-            await this.db.setDeviceSpeedLimit(device.mac, 0);
-            await this.db.setDeviceOnlineStatus(device.mac, true);
+            await this.db.setDeviceBlocked(device.mac, true, device.session_id, this.currentNetworkId);
+            await this.db.setDeviceSpeedLimit(device.mac, 0, this.currentNetworkId);
+            await this.db.setDeviceOnlineStatus(device.mac, true, this.currentNetworkId);
         } else {
             // Mode Throttle (1% - 99%): Duty cycle PWM
             if (!device.session_id) {
@@ -1733,9 +1862,9 @@ export class DeviceManager extends EventEmitter {
             // Penting: Perangkat TIDAK diblokir total, hanya di-throttle
             device.is_blocked = false;
             device.speed_limit = cleanLimit;
-            await this.db.setDeviceBlocked(device.mac, false, device.session_id);
-            await this.db.setDeviceSpeedLimit(device.mac, cleanLimit);
-            await this.db.setDeviceOnlineStatus(device.mac, true);
+            await this.db.setDeviceBlocked(device.mac, false, device.session_id, this.currentNetworkId);
+            await this.db.setDeviceSpeedLimit(device.mac, cleanLimit, this.currentNetworkId);
+            await this.db.setDeviceOnlineStatus(device.mac, true, this.currentNetworkId);
         }
 
         device.is_online = true;
@@ -1751,8 +1880,20 @@ export class DeviceManager extends EventEmitter {
 
     getDevices(): Device[] {
         const dedup = new Map<string, Device>();
+        const selfHostname = os.hostname().toLowerCase();
         for (const dev of this.devices.values()) {
-            const key = (dev.profile_id && dev.profile_id !== '') ? dev.profile_id : dev.mac.toLowerCase();
+            if (dev.network_id && dev.network_id !== this.currentNetworkId) {
+                continue;
+            }
+            const devHost = (dev.hostname || '').trim().toLowerCase();
+            // INTEGRITAS CONTROLLER: Komputer operator (is_self atau hostname This PC) yang offline adalah entri MAC usang.
+            // Jangan pernah tampilkan entri controller offline.
+            if (!dev.is_online && (dev.is_self || (devHost && devHost === selfHostname))) {
+                continue;
+            }
+            const key = (dev.is_self || (devHost && devHost === selfHostname))
+                ? '_operator_controller_' 
+                : ((dev.profile_id && dev.profile_id !== '') ? dev.profile_id : dev.mac.toLowerCase());
             const existing = dedup.get(key);
             if (!existing || (!existing.is_online && dev.is_online)) {
                 dedup.set(key, dev);
@@ -1774,8 +1915,15 @@ export class DeviceManager extends EventEmitter {
      * jalur enforcement/hitung lisensi (yang membaca map mentah).
      */
     scopeForDisplay(devices: Device[]): Device[] {
+        const selfHostname = os.hostname().toLowerCase();
+        const scopedByNet = devices.filter(d => {
+            if (d.network_id && d.network_id !== this.currentNetworkId) return false;
+            const devHost = (d.hostname || '').trim().toLowerCase();
+            if (!d.is_online && (d.is_self || (devHost && devHost === selfHostname))) return false;
+            return true;
+        });
         const gw = this.findGateway()?.ip;
-        if (!gw) return devices;
+        if (!gw) return scopedByNet;
         const ifaces: NetIfaceLike[] = [];
         for (const addrs of Object.values(os.networkInterfaces())) {
             for (const a of addrs || []) {
@@ -1783,8 +1931,8 @@ export class DeviceManager extends EventEmitter {
             }
         }
         const prefix = resolveActivePrefix(gw, ifaces);
-        if (prefix === null) return devices;
-        return scopeDevicesToActiveSubnet(devices, gw, prefix);
+        if (prefix === null) return scopedByNet;
+        return scopeDevicesToActiveSubnet(scopedByNet, gw, prefix);
     }
 
     findGateway(): Device | undefined {
@@ -2204,7 +2352,7 @@ export class DeviceManager extends EventEmitter {
             await this.db.updateDeviceProfileAssessment({
                 ...assessment,
                 ip: currentIp
-            });
+            }, this.currentNetworkId);
             this.assertProfileRefreshGeneration(generation);
             persistedIp = currentIp;
 
