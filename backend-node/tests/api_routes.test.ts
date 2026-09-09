@@ -242,6 +242,7 @@ export async function runApiRoutesTests() {
     {
         class FakeDeviceManager extends EventEmitter {
             getDevices() { return []; }
+            scopeForDisplay(devices: any[]) { return devices; }
             isScanning() { return false; }
             async getWifiInfo() { return null; }
             async getTelemetry() { return null; }

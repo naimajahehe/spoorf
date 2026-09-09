@@ -101,9 +101,9 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
         }
     });
 
-    // Get devices (persisted + live cached)
+    // Get devices (persisted + live cached), disaring ke subnet aktif untuk tampilan
     router.get('/api/devices', (req: Request, res: Response) => {
-        const devices = deviceManager.getDevices();
+        const devices = deviceManager.scopeForDisplay(deviceManager.getDevices());
         res.json({
             success: true,
             devices,

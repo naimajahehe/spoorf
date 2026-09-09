@@ -2,7 +2,7 @@ import assert from 'assert';
 import { EventEmitter } from 'events';
 import { Device, ProfileAssessment, ProfileRefreshResponse, ProfileRefreshResult } from '../src/types';
 import { OFFLINE_GRACE_SECONDS } from '../src/services/database';
-import { DeviceManager } from '../src/services/deviceManager';
+import { DeviceManager, scopeDevicesToActiveSubnet, ipv4ToInt, netmaskToPrefix, isSameSubnetMasked, resolveActivePrefix } from '../src/services/deviceManager';
 
 function makeStateRetentionDevice(over: Partial<Device> = {}): Device {
     return {
@@ -2470,6 +2470,95 @@ export async function runDeviceManagerTests() {
         assert.strictEqual(threw, true, 'unblockDevice("") harus ditolak, bukan mencocokkan perangkat arsip sembarang');
         assert.strictEqual(blockedCleared, false, 'identifier kosong tidak boleh melepas blokir perangkat mana pun');
         console.log('  ✓ ULTRAREVIEW #2: unblockDevice("") ditolak, tidak melepas blokir perangkat arsip acak');
+    }
+
+    // ============================================================
+    // TAHAP 0a: scoping tampilan per-subnet aktif — pakai SUBNET MASK asli (bukan tebakan)
+    // ============================================================
+
+    // Test: ipv4ToInt mengubah dotted-quad ke integer 32-bit tak-bertanda
+    {
+        assert.strictEqual(ipv4ToInt('0.0.0.0'), 0);
+        assert.strictEqual(ipv4ToInt('10.40.151.67'), (((10 * 256 + 40) * 256 + 151) * 256 + 67));
+        assert.strictEqual(ipv4ToInt('255.255.255.255'), 4294967295);
+        assert.strictEqual(ipv4ToInt('10.0.0.256'), null, 'oktet > 255 tidak valid');
+        assert.strictEqual(ipv4ToInt(''), null);
+        console.log('  ✓ TAHAP-0a: ipv4ToInt benar (unsigned 32-bit)');
+    }
+
+    // Test: netmaskToPrefix menghitung prefix dari netmask & menolak mask non-kontigu
+    {
+        assert.strictEqual(netmaskToPrefix('255.255.255.0'), 24);
+        assert.strictEqual(netmaskToPrefix('255.255.0.0'), 16);
+        assert.strictEqual(netmaskToPrefix('255.255.255.252'), 30);
+        assert.strictEqual(netmaskToPrefix('0.0.0.0'), 0);
+        assert.strictEqual(netmaskToPrefix('255.0.255.0'), null, 'mask non-kontigu ditolak');
+        console.log('  ✓ TAHAP-0a: netmaskToPrefix benar + tolak mask non-kontigu');
+    }
+
+    // Test: isSameSubnetMasked memakai mask NYATA — inti perbaikan (tanpa tebakan)
+    {
+        assert.strictEqual(isSameSubnetMasked('10.40.151.10', '10.40.151.67', 24), true);
+        // KUNCI: /24 → 10.40.200.x BUKAN satu subnet dengan 10.40.151.x (tebakan /16 lama keliru bilang true)
+        assert.strictEqual(isSameSubnetMasked('10.40.200.10', '10.40.151.67', 24), false,
+            'mask /24 memisahkan 10.40.200.x dari 10.40.151.x');
+        assert.strictEqual(isSameSubnetMasked('10.40.200.10', '10.40.151.67', 16), true, 'mask menentukan: /16 menyatukan');
+        assert.strictEqual(isSameSubnetMasked('10.40.151.67', '10.40.151.67', 32), true);
+        assert.strictEqual(isSameSubnetMasked('10.40.151.68', '10.40.151.67', 32), false);
+        assert.strictEqual(isSameSubnetMasked('1.2.3.4', '9.9.9.9', 0), true, '/0 = semua satu jaringan');
+        assert.strictEqual(isSameSubnetMasked('', '10.40.151.67', 24), false, 'ip invalid → false');
+        console.log('  ✓ TAHAP-0a: isSameSubnetMasked pakai mask nyata (/24 memisah 10.40.200.x)');
+    }
+
+    // Test: scopeDevicesToActiveSubnet(devices, gatewayIp, prefix) dengan /24 nyata
+    {
+        const gwActive   = makeStateRetentionDevice({ ip: '10.40.151.67',  mac: 'de:ad:be:ef:00:01', is_gateway: true, hostname: 'Router' });
+        const selfActive = makeStateRetentionDevice({ ip: '10.40.151.145', mac: 'de:ad:be:ef:00:02', is_self: true,    hostname: 'Controller' });
+        const peer       = makeStateRetentionDevice({ ip: '10.40.151.30',  mac: 'de:ad:be:ef:00:03', hostname: 'Peer' });
+        const peerOffl   = makeStateRetentionDevice({ ip: '', last_ip: '10.40.151.99', mac: 'de:ad:be:ef:00:04', is_online: false });
+        const wideGuess  = makeStateRetentionDevice({ ip: '10.40.200.9',   mac: 'de:ad:be:ef:00:05', hostname: 'Beda-subnet-sama-/16' });
+        const staleSelf  = makeStateRetentionDevice({ ip: '10.27.2.57',    mac: 'de:ad:be:ef:00:06', is_self: true,    hostname: 'Self-basi' });
+        const staleGw    = makeStateRetentionDevice({ ip: '192.168.0.1',   mac: 'de:ad:be:ef:00:07', is_gateway: true, hostname: 'GW-basi' });
+        const all = [gwActive, selfActive, peer, peerOffl, wideGuess, staleSelf, staleGw];
+
+        // Hanya 10.40.151.0/24 yang lolos (gateway/self aktif ikut karena memang di subnet, bukan karena bypass)
+        {
+            const macs = scopeDevicesToActiveSubnet(all, '10.40.151.67', 24).map(d => d.mac).sort();
+            assert.deepStrictEqual(
+                macs,
+                ['de:ad:be:ef:00:01', 'de:ad:be:ef:00:02', 'de:ad:be:ef:00:03', 'de:ad:be:ef:00:04'].sort(),
+                'hanya 10.40.151.x yang lolos'
+            );
+            console.log('  ✓ TAHAP-0a: scope /24 nyata hanya meloloskan 10.40.151.x');
+        }
+
+        // PERBAIKAN: flag is_self/is_gateway BASI lintas-subnet HARUS DIBUANG (dulu bocor lewat bypass)
+        {
+            const scoped = scopeDevicesToActiveSubnet(all, '10.40.151.67', 24);
+            assert.ok(!scoped.some(d => d.mac === 'de:ad:be:ef:00:06'), 'is_self basi (10.27.2.57) dibuang');
+            assert.ok(!scoped.some(d => d.mac === 'de:ad:be:ef:00:07'), 'is_gateway basi (192.168.0.1) dibuang');
+            assert.ok(!scoped.some(d => d.mac === 'de:ad:be:ef:00:05'), '10.40.200.9 dibuang oleh mask /24 (bukan /16)');
+            console.log('  ✓ TAHAP-0a: flag is_self/is_gateway basi lintas-subnet dibuang');
+        }
+
+        // Fallback: gateway/prefix tak diketahui → kembalikan semua (jangan sembunyikan apa pun)
+        {
+            assert.strictEqual(scopeDevicesToActiveSubnet(all, undefined, 24).length, all.length, 'gateway undefined → semua');
+            assert.strictEqual(scopeDevicesToActiveSubnet(all, '10.40.151.67', undefined).length, all.length, 'prefix undefined → semua');
+            console.log('  ✓ TAHAP-0a: fallback (gateway/prefix tak diketahui) menampilkan semua');
+        }
+    }
+
+    // Test: resolveActivePrefix memilih netmask adapter OS yang jaringannya memuat gateway aktif
+    {
+        const ifaces = [
+            { address: '127.0.0.1',     netmask: '255.0.0.0',     family: 'IPv4', internal: true  },
+            { address: '192.168.56.1',  netmask: '255.255.255.0', family: 'IPv4', internal: false }, // vEthernet lain
+            { address: '10.40.151.145', netmask: '255.255.255.0', family: 'IPv4', internal: false }, // Wi-Fi aktif
+        ];
+        assert.strictEqual(resolveActivePrefix('10.40.151.67', ifaces), 24, 'pilih /24 dari adapter yang memuat gateway');
+        assert.strictEqual(resolveActivePrefix('172.31.9.9', ifaces), null, 'tak ada adapter memuat gateway → null (fallback aman)');
+        console.log('  ✓ TAHAP-0a: resolveActivePrefix memakai netmask OS yang benar');
     }
 
 }

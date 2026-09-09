@@ -119,6 +119,95 @@ export function isIpInSameSubnet(ip: string, gatewayIp: string): boolean {
 }
 
 /**
+ * Ubah IPv4 dotted-quad menjadi integer 32-bit TAK-bertanda. Null jika tak valid.
+ */
+export function ipv4ToInt(ip: string): number | null {
+    const parts = (ip || '').trim().split('.');
+    if (parts.length !== 4) return null;
+    let acc = 0;
+    for (const p of parts) {
+        if (!/^\d{1,3}$/.test(p)) return null;
+        const n = Number(p);
+        if (n > 255) return null;
+        acc = acc * 256 + n;
+    }
+    return acc >>> 0;
+}
+
+/**
+ * Netmask dotted-quad ('255.255.255.0') → panjang prefix (24). Null bila mask tak
+ * valid atau bit-1 tidak kontigu (mis. '255.0.255.0' — bukan mask sah).
+ */
+export function netmaskToPrefix(netmask: string): number | null {
+    const n = ipv4ToInt(netmask);
+    if (n === null) return null;
+    let prefix = 0;
+    let seenZero = false;
+    for (let i = 31; i >= 0; i--) {
+        const bit = (n >>> i) & 1;
+        if (bit === 1) {
+            if (seenZero) return null; // ada bit-1 setelah bit-0 → mask tidak kontigu
+            prefix++;
+        } else {
+            seenZero = true;
+        }
+    }
+    return prefix;
+}
+
+/**
+ * True bila `ip` satu jaringan dengan `gatewayIp` untuk panjang prefix tertentu,
+ * memakai aritmetika mask NYATA: (ip & mask) === (gw & mask). Tanpa tebakan
+ * berbasis kelas alamat (classful sudah usang sejak CIDR / RFC 1519).
+ */
+export function isSameSubnetMasked(ip: string, gatewayIp: string, prefixLen: number): boolean {
+    const a = ipv4ToInt(ip);
+    const g = ipv4ToInt(gatewayIp);
+    if (a === null || g === null) return false;
+    if (prefixLen <= 0) return true;        // /0 → semua satu jaringan
+    if (prefixLen >= 32) return a === g;     // /32 → host tunggal
+    const mask = (0xFFFFFFFF << (32 - prefixLen)) >>> 0;
+    return ((a & mask) >>> 0) === ((g & mask) >>> 0);
+}
+
+/** Bentuk minimal entri adapter jaringan yang diperlukan resolver prefix. */
+export interface NetIfaceLike { address: string; netmask: string; family: string | number; internal: boolean; }
+
+/**
+ * Cari panjang prefix adapter OS (IPv4, non-internal) yang jaringannya MEMUAT
+ * `gatewayIp` aktif. Inilah sumber mask yang benar (bukan tebakan). Null bila tak
+ * ada adapter cocok → pemanggil memilih fallback aman (tampilkan semua).
+ */
+export function resolveActivePrefix(gatewayIp: string, ifaces: NetIfaceLike[]): number | null {
+    if (ipv4ToInt(gatewayIp) === null) return null;
+    for (const a of ifaces) {
+        const isV4 = a.family === 'IPv4' || a.family === 4;
+        if (!isV4 || a.internal) continue;
+        const prefix = netmaskToPrefix(a.netmask);
+        if (prefix === null) continue;
+        if (isSameSubnetMasked(a.address, gatewayIp, prefix)) return prefix;
+    }
+    return null;
+}
+
+/**
+ * Saring daftar perangkat HANYA untuk tampilan: hanya perangkat di subnet gateway
+ * aktif (ditentukan SUBNET MASK nyata, bukan tebakan). Perangkat offline ber-`ip`
+ * kosong diklasifikasi lewat `last_ip`. Bila gateway/prefix belum diketahui,
+ * kembalikan apa adanya (fallback aman — tak pernah menyembunyikan semua).
+ *
+ * Sengaja TIDAK mem-bypass is_gateway/is_self: gateway & host aktif sudah berada di
+ * subnet aktif sehingga tetap lolos lewat mask; sebaliknya flag is_gateway/is_self
+ * BASI dari jaringan lama justru harus dibuang dari tampilan.
+ *
+ * CATATAN: murni presentasi. JANGAN dipakai di jalur enforcement / hitung lisensi.
+ */
+export function scopeDevicesToActiveSubnet(devices: Device[], gatewayIp?: string, prefixLen?: number): Device[] {
+    if (!gatewayIp || prefixLen === undefined || prefixLen === null) return devices;
+    return devices.filter(d => isSameSubnetMasked(d.ip || d.last_ip || '', gatewayIp, prefixLen));
+}
+
+/**
  * Pilih gateway dari daftar perangkat dengan aman:
  *   1. Perangkat yang di-flag is_gateway (otoritatif dari scanner).
  *   2. Fallback heuristik: perangkat non-self ber-IP .1 / .254.
@@ -1674,6 +1763,28 @@ export class DeviceManager extends EventEmitter {
 
     getDevice(ip: string): Device | undefined {
         return this.devices.get(ip);
+    }
+
+    /**
+     * Saring daftar perangkat untuk TAMPILAN: hanya subnet gateway aktif, dengan
+     * SUBNET MASK nyata dari OS (os.networkInterfaces → netmask adapter yang memuat
+     * gateway), bukan tebakan. Titik-choke tunggal yang dipakai bridge WebSocket &
+     * REST. Fallback bertingkat: bila gateway ATAU mask aktif belum diketahui,
+     * kembalikan apa adanya (tak pernah menyembunyikan semua). Jangan dipakai di
+     * jalur enforcement/hitung lisensi (yang membaca map mentah).
+     */
+    scopeForDisplay(devices: Device[]): Device[] {
+        const gw = this.findGateway()?.ip;
+        if (!gw) return devices;
+        const ifaces: NetIfaceLike[] = [];
+        for (const addrs of Object.values(os.networkInterfaces())) {
+            for (const a of addrs || []) {
+                ifaces.push({ address: a.address, netmask: a.netmask, family: a.family, internal: a.internal });
+            }
+        }
+        const prefix = resolveActivePrefix(gw, ifaces);
+        if (prefix === null) return devices;
+        return scopeDevicesToActiveSubnet(devices, gw, prefix);
     }
 
     findGateway(): Device | undefined {

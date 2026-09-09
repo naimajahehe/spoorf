@@ -57,11 +57,11 @@ export class WebSocketManager {
         });
 
         this.deviceManager.on('scanComplete', (devices) => {
-            this.io.emit('scanComplete', devices);
+            this.io.emit('scanComplete', this.deviceManager.scopeForDisplay(devices));
         });
 
         this.deviceManager.on('devicesUpdated', (devices) => {
-            this.io.emit('devicesUpdate', devices);
+            this.io.emit('devicesUpdate', this.deviceManager.scopeForDisplay(devices));
         });
 
         this.deviceManager.on('autoScanChanged', (data) => {
@@ -162,8 +162,8 @@ export class WebSocketManager {
     private handleConnection(socket: any) {
             console.log(`Client connected: ${socket.id}`);
 
-            // Send initial devices from database & memory
-            socket.emit('devices', this.deviceManager.getDevices());
+            // Send initial devices from database & memory (disaring ke subnet aktif)
+            socket.emit('devices', this.deviceManager.scopeForDisplay(this.deviceManager.getDevices()));
             if (this.licenseManager) {
                 socket.emit('licenseStatus', this.licenseManager.getStatus());
             }
