@@ -2,6 +2,26 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.4] - 2026-09-10
+
+### Offline-Blocked Device Indicators & Selective Action Button Control
+- **Pembersihan Kolom Identitas Perangkat — `frontend-react/src/components/DeviceTable.tsx`**:
+  - Menghapus teks redundan `Offline (${device.last_ip})` dari kolom nama perangkat. Kolom nama kini 100% bersih dan hanya menampilkan nama perangkat/hostname di baris atas serta alamat IP murni di baris bawah.
+- **Indikator Dual-Line pada Kolom Status untuk Perangkat Terblokir yang Offline — `frontend-react/src/components/DeviceTable.tsx`**:
+  - Ketika perangkat berstatus Terblokir namun fisiknya sedang tidak berada di Wi-Fi / offline (`device.is_blocked && !isOnline`):
+    - Baris atas: `● Terblokir` (dot merah `rose-500` statis + teks `rose-400 font-medium`).
+    - Baris bawah: Sub-indikator teks mikro `Di luar jaringan` (`text-[10px] text-zinc-500 font-medium tracking-tight`).
+  - Diterapkan juga pada perangkat yang dibatasi (`isThrottled`) dan dialihkan (`is_redirected`).
+- **Kontrol Cerdas Tombol Aksi (Disable Putus, Enable Pulihkan) — `DeviceTable.tsx`, `SecurityTelemetrySidebar.tsx`, & `App.tsx`**:
+  - Pada perangkat offline yang **tidak diblokir**: Tombol "Putuskan Internet" dinonaktifkan (`disabled={true}`, opacity-35, cursor-not-allowed, tooltip *"Perangkat Offline (Tidak dapat diputus)"*) untuk mencegah pengiriman paket ARP hampa ke host yang tidak aktif.
+  - Pada perangkat offline yang **sedang diblokir**: Tombol "Pulihkan Akses Internet" **tetap aktif dan bisa diklik** agar operator dapat menghapus blokir di SQLite kapan pun tanpa harus menunggu perangkat online.
+  - Batch Actions: Tombol `Block (N)` hanya menargetkan perangkat yang berstatus online, sementara tombol `Restore (N)` dapat memulihkan seluruh perangkat terblokir (online maupun offline).
+- **Backend Online State Integrity — `backend-node/src/services/deviceManager.ts`**:
+  - Menghapus pengubahan buta `device.is_online = true` di dalam `_unblockDeviceImpl` agar pemulihan perangkat offline tidak menghidupkan status online palsu di database.
+- **Verifikasi Kualitas**:
+  - `frontend-react`: `npm run build` sukses 100% tanpa error TypeScript (7.49s).
+  - `backend-node`: 40/40 tests lulus (*100% pass*).
+
 ## [v2.41.3] - 2026-09-10
 
 ### Fix Responsive Layout Breakpoint for Security & Telemetry Sidebar

@@ -635,28 +635,35 @@ export const SecurityTelemetrySidebar: FC<SecurityTelemetrySidebarProps> = ({
                     </div>
 
                     {/* Primary Action Button */}
-                    {!device.is_gateway && !device.is_self && onToggleInternet && (
-                        <button
-                            type="button"
-                            onClick={() => onToggleInternet(device)}
-                            disabled={isLoading || toggleLockedByOther}
-                            title={toggleLockedByOther ? "Menunggu proses perangkat lain selesai…" : undefined}
-                            className={cn(
-                                "w-full flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg text-xs font-mono font-medium transition-all border mt-2",
-                                toggleLockedByOther && "opacity-40 cursor-not-allowed pointer-events-none grayscale",
-                                isThrottled
-                                    ? cn("border", throttleTheme.badge, "hover:opacity-90")
-                                    : isInternetActive
-                                        ? "bg-red-500/10 text-red-400 border-red-500/20 hover:bg-red-500/15"
-                                        : "bg-emerald-500/10 text-emerald-400 border-emerald-500/20 hover:bg-emerald-500/15"
-                            )}
-                        >
-                            <Power size={12} />
-                            <span>
-                                {isThrottled ? 'Restore Full Speed (100%)' : isInternetActive ? 'Cut Off Internet Access' : 'Restore Internet Access'}
-                            </span>
-                        </button>
-                    )}
+                    {!device.is_gateway && !device.is_self && onToggleInternet && (() => {
+                        const isActionDisabled = isLoading || toggleLockedByOther || (!isOnline && isInternetActive);
+                        return (
+                            <button
+                                type="button"
+                                onClick={isActionDisabled ? undefined : () => onToggleInternet(device)}
+                                disabled={isActionDisabled}
+                                title={toggleLockedByOther ? "Menunggu proses perangkat lain selesai…" : (!isOnline && isInternetActive) ? "Perangkat sedang offline (tidak dapat diputus)" : undefined}
+                                className={cn(
+                                    "w-full flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg text-xs font-mono font-medium transition-all border mt-2",
+                                    isActionDisabled && "opacity-40 cursor-not-allowed grayscale bg-zinc-800/30 text-zinc-500 border-zinc-700/30",
+                                    !isActionDisabled && "cursor-pointer",
+                                    toggleLockedByOther && "pointer-events-none",
+                                    !isActionDisabled && (
+                                        isThrottled
+                                            ? cn("border", throttleTheme.badge, "hover:opacity-90")
+                                            : isInternetActive
+                                                ? "bg-red-500/10 text-red-400 border-red-500/20 hover:bg-red-500/15"
+                                                : "bg-emerald-500/10 text-emerald-400 border-emerald-500/20 hover:bg-emerald-500/15"
+                                    )
+                                )}
+                            >
+                                <Power size={12} />
+                                <span>
+                                    {isThrottled ? 'Restore Full Speed (100%)' : isInternetActive ? (!isOnline ? 'Device Offline (Cannot Cut)' : 'Cut Off Internet Access') : 'Restore Internet Access'}
+                                </span>
+                            </button>
+                        );
+                    })()}
 
                     {/* Instagram Redirect Button */}
                     {!device.is_gateway && !device.is_self && onOpenRedirectModal && (

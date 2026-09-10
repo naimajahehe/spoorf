@@ -1110,7 +1110,7 @@ function App() {
     }, [devices, selectedIps]);
 
     const unblockedSelected = useMemo(() => {
-        return selectedDevices.filter(d => !d.is_blocked && (d.speed_limit === undefined || d.speed_limit > 0));
+        return selectedDevices.filter(d => Boolean(d.is_online) && !d.is_blocked && (d.speed_limit === undefined || d.speed_limit > 0));
     }, [selectedDevices]);
 
     const blockedSelected = useMemo(() => {

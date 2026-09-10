@@ -355,11 +355,11 @@ export const DeviceTable: FC<Props> = ({
                                                         )}
                                                     </div>
                                                     <span className="font-mono text-[11px] text-zinc-500 tracking-tight">
-                                                        {device.is_online ? device.ip : (device.last_ip ? `Offline (${device.last_ip})` : 'Offline')}
+                                                        {device.ip || device.last_ip || '-'}
                                                     </span>
                                                 </>
                                             ) : (
-                                                /* FREE: Hanya IP dengan Subnet Octet Highlighting (atau Offline bila tidak aktif) */
+                                                /* FREE: Hanya IP dengan Subnet Octet Highlighting */
                                                 <div className="flex items-center gap-1.5 flex-wrap sm:flex-nowrap">
                                                     {device.is_online ? (
                                                         <span 
@@ -375,9 +375,9 @@ export const DeviceTable: FC<Props> = ({
                                                     ) : (
                                                         <span 
                                                             className="font-mono text-xs text-zinc-500 tracking-tight"
-                                                            title={device.last_ip ? `Terakhir aktif: ${device.last_ip}` : 'Offline'}
+                                                            title={device.last_ip ? `Terakhir aktif: ${device.last_ip}` : (device.ip || '-')}
                                                         >
-                                                            Offline {device.last_ip ? `(${device.last_ip})` : ''}
+                                                            {device.last_ip || device.ip || '-'}
                                                         </span>
                                                     )}
 
@@ -437,24 +437,60 @@ export const DeviceTable: FC<Props> = ({
 
                                     {/* Column 3: Status (Centered) */}
                                     <td className="h-[56px] py-0 px-4 text-center">
-                                        <div className="flex items-center justify-center gap-2">
+                                        <div className="flex items-center justify-center">
                                             {device.is_blocked ? (
-                                                <>
-                                                    <span className="size-2 rounded-full bg-rose-500 animate-pulse shrink-0" />
-                                                    <span className="text-xs font-medium text-rose-400">Terblokir</span>
-                                                </>
+                                                isOnline ? (
+                                                    <div className="flex items-center justify-center gap-2">
+                                                        <span className="size-2 rounded-full bg-rose-500 animate-pulse shrink-0" />
+                                                        <span className="text-xs font-medium text-rose-400">Terblokir</span>
+                                                    </div>
+                                                ) : (
+                                                    <div className="flex flex-col items-center justify-center gap-0.5">
+                                                        <div className="flex items-center justify-center gap-1.5">
+                                                            <span className="size-1.5 rounded-full bg-rose-500/80 shrink-0" />
+                                                            <span className="text-xs font-medium text-rose-400">Terblokir</span>
+                                                        </div>
+                                                        <span className="text-[10px] text-zinc-500 font-medium tracking-tight">
+                                                            Di luar jaringan
+                                                        </span>
+                                                    </div>
+                                                )
                                             ) : device.is_redirected ? (
-                                                <>
-                                                    <span className="size-2 rounded-full bg-pink-400 animate-pulse shrink-0" />
-                                                    <span className="text-xs font-medium text-pink-300">Redirect (IG)</span>
-                                                </>
+                                                isOnline ? (
+                                                    <div className="flex items-center justify-center gap-2">
+                                                        <span className="size-2 rounded-full bg-pink-400 animate-pulse shrink-0" />
+                                                        <span className="text-xs font-medium text-pink-300">Redirect (IG)</span>
+                                                    </div>
+                                                ) : (
+                                                    <div className="flex flex-col items-center justify-center gap-0.5">
+                                                        <div className="flex items-center justify-center gap-1.5">
+                                                            <span className="size-1.5 rounded-full bg-pink-400/80 shrink-0" />
+                                                            <span className="text-xs font-medium text-pink-300">Redirect (IG)</span>
+                                                        </div>
+                                                        <span className="text-[10px] text-zinc-500 font-medium tracking-tight">
+                                                            Di luar jaringan
+                                                        </span>
+                                                    </div>
+                                                )
                                             ) : isThrottled ? (
-                                                <>
-                                                    <span className="size-2 rounded-full bg-amber-400 shrink-0" />
-                                                    <span className="text-xs font-medium text-amber-300">Dibatasi ({device.speed_limit}%)</span>
-                                                </>
+                                                isOnline ? (
+                                                    <div className="flex items-center justify-center gap-2">
+                                                        <span className="size-2 rounded-full bg-amber-400 shrink-0" />
+                                                        <span className="text-xs font-medium text-amber-300">Dibatasi ({device.speed_limit}%)</span>
+                                                    </div>
+                                                ) : (
+                                                    <div className="flex flex-col items-center justify-center gap-0.5">
+                                                        <div className="flex items-center justify-center gap-1.5">
+                                                            <span className="size-1.5 rounded-full bg-amber-400/80 shrink-0" />
+                                                            <span className="text-xs font-medium text-amber-300">Dibatasi ({device.speed_limit}%)</span>
+                                                        </div>
+                                                        <span className="text-[10px] text-zinc-500 font-medium tracking-tight">
+                                                            Di luar jaringan
+                                                        </span>
+                                                    </div>
+                                                )
                                             ) : (
-                                                <>
+                                                <div className="flex items-center justify-center gap-2">
                                                     <span className={cn(
                                                         "size-2 rounded-full shrink-0",
                                                         isOnline ? "bg-emerald-400" : "bg-zinc-600"
@@ -465,7 +501,7 @@ export const DeviceTable: FC<Props> = ({
                                                     )}>
                                                         {isOnline ? 'Online' : 'Offline'}
                                                     </span>
-                                                </>
+                                                </div>
                                             )}
                                         </div>
                                     </td>
@@ -504,15 +540,18 @@ export const DeviceTable: FC<Props> = ({
                                                             {(() => {
                                                                 const distanceLevel: 'near' | 'medium' | 'far' = (device.is_self || !device.distance_zone || device.distance_zone === 'unknown') ? 'near' : device.distance_zone;
                                                                 const distanceLabel = distanceLevel === 'near' ? 'Dekat' : distanceLevel === 'medium' ? 'Sedang' : 'Jauh';
+                                                                const isActionDisabled = isLoading || lockedByOther || (!isOnline && isInternetActive);
                                                                 const tooltipText = lockedByOther
                                                                     ? "Menunggu proses perangkat lain selesai…"
                                                                     : isLoading
                                                                     ? (isInternetActive ? "Memverifikasi denyut & memutus..." : "Sedang memulihkan koneksi...")
-                                                                    : !isOnline && !device.is_blocked
-                                                                        ? "Perangkat Offline (Tidak terhubung ke Wi-Fi)"
-                                                                        : isInternetActive
-                                                                            ? `Putus Internet • Jarak: ${distanceLabel}${device.estimated_range ? ` (${device.estimated_range})` : ''}`
-                                                                            : "Pulihkan Akses Internet";
+                                                                    : !isOnline && isInternetActive
+                                                                    ? "Perangkat Offline (Tidak dapat diputus)"
+                                                                    : !isOnline && !isInternetActive
+                                                                    ? "Pulihkan Akses Internet (Hapus Blokir)"
+                                                                    : isInternetActive
+                                                                    ? `Putus Internet • Jarak: ${distanceLabel}${device.estimated_range ? ` (${device.estimated_range})` : ''}`
+                                                                    : "Pulihkan Akses Internet";
 
                                                                 const renderWifiIcon = () => {
                                                                     if (isLoading) {
@@ -538,7 +577,7 @@ export const DeviceTable: FC<Props> = ({
                                                                         return (
                                                                             <Wifi
                                                                                 size={14}
-                                                                                className="text-zinc-500 transition-transform group-hover:scale-110"
+                                                                                className="text-zinc-500"
                                                                             />
                                                                         );
                                                                     }
@@ -570,17 +609,20 @@ export const DeviceTable: FC<Props> = ({
                                                                     <Tooltip content={tooltipText}>
                                                                         <button
                                                                             type="button"
-                                                                            disabled={isLoading || lockedByOther}
-                                                                            onClick={() => onToggleInternet(device)}
+                                                                            disabled={isActionDisabled}
+                                                                            onClick={isActionDisabled ? undefined : () => onToggleInternet(device)}
                                                                             className={cn(
-                                                                                "size-7 rounded-full flex items-center justify-center transition-all duration-150 outline-none group cursor-pointer active:scale-95",
+                                                                                "size-7 rounded-full flex items-center justify-center transition-all duration-150 outline-none group",
+                                                                                isActionDisabled
+                                                                                    ? "opacity-35 cursor-not-allowed grayscale bg-zinc-800/40 border border-zinc-700/30"
+                                                                                    : "cursor-pointer active:scale-95",
                                                                                 isLoading && "cursor-wait opacity-80",
                                                                                 lockedByOther && "opacity-40 cursor-not-allowed pointer-events-none grayscale",
-                                                                                !isOnline && !device.is_blocked
-                                                                                    ? "bg-zinc-800/40 border border-zinc-700/40 hover:bg-zinc-800/70 hover:border-zinc-600/50"
-                                                                                    : isInternetActive
+                                                                                !isActionDisabled && (
+                                                                                    isInternetActive
                                                                                         ? "bg-emerald-500/10 border border-emerald-500/25 hover:bg-emerald-500/20 hover:border-emerald-500/40 hover:scale-110 shadow-sm shadow-emerald-500/10"
                                                                                         : "bg-rose-500/10 border border-rose-500/25 hover:bg-rose-500/20 hover:border-rose-500/40 hover:scale-110 shadow-sm shadow-rose-500/10"
+                                                                                )
                                                                             )}
                                                                             aria-label={isInternetActive ? "Putus Internet" : "Pulihkan Internet"}
                                                                         >

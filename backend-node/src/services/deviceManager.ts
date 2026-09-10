@@ -1599,9 +1599,6 @@ export class DeviceManager extends EventEmitter {
         device.redirect_url = undefined;
         device.speed_limit = 100;
         device.session_id = undefined;
-        if (device.ip && device.ip.trim() !== '') {
-            device.is_online = true;
-        }
         this.devices.set(deviceMemKey(device), device);
 
         // Hapus status blokir dan pulihkan speed limit ke 100% di SQLite
