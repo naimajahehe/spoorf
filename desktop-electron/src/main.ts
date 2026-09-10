@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, Menu, Tray, dialog, shell } from 'electron';
+import { app, BrowserWindow, ipcMain, Menu, Tray, dialog, shell, nativeTheme } from 'electron';
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
@@ -13,6 +13,9 @@ import { shouldRespawnAfterExit, buildTreeKillArgs, isAllowedNavigation } from '
 // (:5000 & :8001) dari proses lokal lain di mesin yang sama.
 const SENTINEL_API_TOKEN = crypto.randomBytes(32).toString('hex');
 process.env.SENTINEL_API_TOKEN = SENTINEL_API_TOKEN;
+
+// Inisialisasi tema dark native agar seluruh frame dan context menu selaras dengan UI
+nativeTheme.themeSource = 'dark';
 
 let mainWindow: BrowserWindow | null = null;
 let pythonProcess: ChildProcess | null = null;
@@ -351,7 +354,13 @@ function createMainWindow() {
         minWidth: 1080,
         minHeight: 720,
         backgroundColor: '#090a0c',
-        title: 'Spoorf Sentinel',
+        title: 'Sentinel Ops - Network LAN Shield',
+        titleBarStyle: 'hidden',
+        titleBarOverlay: {
+            color: '#090a0c',
+            symbolColor: '#a1a1aa',
+            height: 32
+        },
         webPreferences: {
             preload: path.join(__dirname, 'preload.js'),
             contextIsolation: true,
@@ -460,6 +469,30 @@ ipcMain.on('confirm-app-close', () => {
 // Restart engine Python dari UI (preload mengekspos electronAPI.restartEngine()).
 ipcMain.on('engine-restart', () => {
     restartPythonEngine();
+});
+
+// Penyesuaian tema TitleBar Overlay dinamis (Dark / Light) agar selaras dengan UI
+ipcMain.on('set-titlebar-theme', (_event, theme: 'dark' | 'light') => {
+    if (!mainWindow) return;
+    if (theme === 'light') {
+        nativeTheme.themeSource = 'light';
+        try {
+            mainWindow.setTitleBarOverlay({
+                color: '#f8fafc',
+                symbolColor: '#334155',
+                height: 32
+            });
+        } catch {}
+    } else {
+        nativeTheme.themeSource = 'dark';
+        try {
+            mainWindow.setTitleBarOverlay({
+                color: '#090a0c',
+                symbolColor: '#a1a1aa',
+                height: 32
+            });
+        } catch {}
+    }
 });
 
 // Sediakan token API lokal ke renderer (fallback bila process.env tak terpropagasi).

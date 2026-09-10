@@ -32,5 +32,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
             ipcRenderer.removeListener('request-app-close', handler);
         };
     },
-    restartEngine: () => ipcRenderer.send('engine-restart')
+    restartEngine: () => ipcRenderer.send('engine-restart'),
+    setTitleBarTheme: (theme: 'dark' | 'light') => ipcRenderer.send('set-titlebar-theme', theme)
 });

@@ -2,6 +2,28 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.7] - 2026-09-10
+
+### Cyber-Dark Titlebar & Harmonized Window Controls Overlay (WCO)
+- **Eliminasi Titlebar Biru Native Windows — `desktop-electron/src/main.ts` & `preload.ts`**:
+  - Mengonfigurasi `titleBarStyle: 'hidden'` dan Window Controls Overlay `titleBarOverlay: { color: '#090a0c', symbolColor: '#a1a1aa', height: 32 }` sehingga bilah biru aksen OS Windows (`#0078D7`) digantikan 100% oleh warna latar belakang gelap aplikasi (`#090a0c`).
+  - Menginisialisasi `nativeTheme.themeSource = 'dark'` agar seluruh frame dan context menu native Windows beradaptasi ke dark mode.
+  - Menyediakan IPC handler `set-titlebar-theme` dan bridge `electronAPI.setTitleBarTheme` untuk sinkronisasi dinamis warna titlebar saat beralih antara Mode Malam dan Mode Siang.
+- **Komponen TitleBar Khas Spoorf Sentinel — `frontend-react/src/components/TitleBar.tsx`**:
+  - Menggantikan tampilan native dan ikon atom default dengan branding terstandar yang selaras dengan antarmuka:
+    - Ikon Brand: Badge `<Command size={10} className="stroke-[2.5]" />` berbalut kontainer `bg-emerald-500/15 text-emerald-400`.
+    - Teks Judul: *"Sentinel Ops"* (`font-semibold text-[11px] text-zinc-200 tracking-tight`) dan *"Network LAN Shield"* (`text-[11px] font-medium text-zinc-400`).
+    - Dukungan Drag Window: Memanfaatkan `-webkit-app-region: drag` agar window dapat digeser secara alami serta mendukung double-click maximize/restore dan klik kanan context menu.
+    - Spacer Window Controls Overlay: Mengalokasikan spacer `w-36` di sisi kanan sehingga tombol native OS (minimize, maximize, close) tidak bertabrakan dengan teks.
+- **Integrasi Antarmuka Desktop — `frontend-react/src/App.tsx` & `types/electron.d.ts`**:
+  - Menyematkan `<TitleBar theme={theme} />` pada layout utama dan pre-flight gate.
+  - Menjaga perilaku fleksibel: bilah judul desktop hanya dirender pada mode desktop Electron (`window.electronAPI?.isDesktop`), tidak membebani browser web standar.
+- **Verifikasi Kualitas**:
+  - `python-service`: 330/330 unit tests lulus (*100% pass*).
+  - `backend-node`: 40/40 tests lulus (*100% pass*). Total: 370 unit tests lulus.
+  - `frontend-react`: `npm run build` sukses 100% tanpa error TypeScript (9.84s).
+  - `desktop-electron`: `npm run build:ts` sukses 100%.
+
 ## [v2.41.6] - 2026-09-10
 
 ### App Close Confirmation Dialog (Shadcn Alert-Dialog & Electron IPC Interception)

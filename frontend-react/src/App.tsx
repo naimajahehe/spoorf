@@ -62,6 +62,7 @@ import { GamingModeWidget } from './components/GamingModeWidget';
 import { LoginModal } from './components/LoginModal';
 import { UpgradeProModal } from './components/UpgradeProModal';
 import { ConfirmExitDialog } from './components/ConfirmExitDialog';
+import { TitleBar } from './components/TitleBar';
 import { EngineReadinessGateContent } from './components/EngineReadinessGate';
 import { AuthPage } from './components/ui/auth-page';
 import { NeonMesh } from './components/ui/neon-mesh';
@@ -255,6 +256,7 @@ function App() {
 
     useEffect(() => {
         applyTheme(theme);
+        window.electronAPI?.setTitleBarTheme?.(theme);
     }, [theme]);
 
     useEffect(() => {
@@ -1261,7 +1263,10 @@ function App() {
     // 1. Initial Pre-Flight Engine Initialization & Login Gates with Smooth Horizontal Slide Transition
     if (!isEngineReady || (authStatus && !authStatus.isAuthenticated)) {
         return (
-            <NeonMesh className="w-full min-h-screen flex items-center justify-center font-sans p-4 select-none overflow-hidden">
+            <div className="flex flex-col w-full h-screen overflow-hidden bg-[#090a0c]">
+                <TitleBar theme={theme} />
+                <div className="flex-1 flex min-h-0 overflow-hidden">
+                    <NeonMesh className="w-full h-full flex items-center justify-center font-sans p-4 select-none overflow-hidden">
                 <AnimatePresence mode="wait" initial={false}>
                     {!isEngineReady ? (
                         <motion.div
@@ -1293,6 +1298,8 @@ function App() {
                     )}
                 </AnimatePresence>
             </NeonMesh>
+        </div>
+    </div>
         );
     }
 
@@ -1303,8 +1310,10 @@ function App() {
             openMobile={mobileMenuOpen}
             onOpenMobileChange={setMobileMenuOpen}
         >
-            <div className="flex w-full h-screen overflow-hidden bg-[#090a0c] text-zinc-100 antialiased">
-                {/* Mobile Sidebar Backdrop Overlay */}
+            <div className="flex flex-col w-full h-screen overflow-hidden bg-[#090a0c] text-zinc-100 antialiased">
+                <TitleBar theme={theme} />
+                <div className="flex flex-1 w-full min-h-0 overflow-hidden">
+                    {/* Mobile Sidebar Backdrop Overlay */}
                 <AnimatePresence>
                     {mobileMenuOpen && (
                         <motion.div
@@ -1336,7 +1345,7 @@ function App() {
                 />
 
                 {/* Main Content Area */}
-                <div className="flex-1 flex flex-col min-w-0 h-screen overflow-hidden">
+                <div className="flex-1 flex flex-col min-w-0 h-full overflow-hidden">
                     {/* Topbar Header - Matched height h-16 pt-2 with sidebar header for perfect alignment */}
                     <header className="h-16 flex items-center justify-between w-full px-6 lg:px-8 bg-[#090a0c] shrink-0 gap-4 pt-2">
                         <div className="flex items-center gap-3">
@@ -2126,6 +2135,7 @@ function App() {
                         </>
                     )}
                 </main>
+                </div>
                 </div>
             </div>
 

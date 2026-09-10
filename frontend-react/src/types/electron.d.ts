@@ -16,6 +16,7 @@ declare global {
         confirmClose?: () => void;
         onCloseRequested?: (callback: () => void) => () => void;
         restartEngine?: () => void;
+        setTitleBarTheme?: (theme: 'dark' | 'light') => void;
     }
 
     interface Window {
