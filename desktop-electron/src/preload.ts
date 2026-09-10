@@ -24,5 +24,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     minimizeWindow: () => ipcRenderer.send('window-minimize'),
     maximizeWindow: () => ipcRenderer.send('window-maximize'),
     closeWindow: () => ipcRenderer.send('window-close'),
+    confirmClose: () => ipcRenderer.send('confirm-app-close'),
+    onCloseRequested: (callback: () => void) => {
+        const handler = () => callback();
+        ipcRenderer.on('request-app-close', handler);
+        return () => {
+            ipcRenderer.removeListener('request-app-close', handler);
+        };
+    },
     restartEngine: () => ipcRenderer.send('engine-restart')
 });

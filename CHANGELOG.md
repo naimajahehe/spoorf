@@ -2,6 +2,32 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.6] - 2026-09-10
+
+### App Close Confirmation Dialog (Shadcn Alert-Dialog & Electron IPC Interception)
+- **Komponen Standar Shadcn UI — `frontend-react/src/components/ui/alert-dialog.tsx`**:
+  - Mengintegrasikan arsitektur `@radix-ui/react-alert-dialog` standar shadcn dengan penyesuaian visual dark cyber khas Spoorf Sentinel (`bg-black/80 backdrop-blur-sm`, `bg-[#0d0f14]/98`, border `white/10`).
+  - Kompatibel penuh dengan Tailwind CSS dan TypeScript.
+- **Komponen Dialog Konfirmasi Keluar — `frontend-react/src/components/ConfirmExitDialog.tsx`**:
+  - Dialog interaktif dengan icon peringatan `<ShieldAlert />` dan tipografi presisi:
+    - Judul: *"Keluar dari Spoorf Sentinel?"*
+    - Deskripsi: *"Aktivitas pemantauan jaringan, proteksi ARP, dan pembatasan bandwidth yang sedang aktif akan dihentikan saat aplikasi ditutup. Apakah Anda yakin ingin keluar?"*
+    - Tombol Aksi: *"Batal"* (outline) dan *"Keluar & Tutup"* (destructive rose variant dengan ikon `<LogOut />`).
+- **Intersepsi OS Window Close pada Main Process Electron — `desktop-electron/src/main.ts`**:
+  - Mencegah penutupan seketika saat tombol "X" jendela atau shortcut OS (Alt+F4) ditekan melalui `event.preventDefault()` pada `mainWindow.on('close')`.
+  - Mengirim IPC event `request-app-close` ke renderer window agar React dapat menampilkan konfirmasi.
+  - Menyediakan handler IPC `confirm-app-close` yang menandai flag `isForceClosing = true` lalu memanggil `mainWindow.close()`, memastikan seluruh proses teardown jaringan (pemulihan ARP) berjalan tertib.
+- **Preload Context Bridge & Typings — `desktop-electron/src/preload.ts` & `frontend-react/src/types/electron.d.ts`**:
+  - Mengekspos method aman `confirmClose: () => void` dan `onCloseRequested: (cb) => () => void` tanpa membocorkan `ipcRenderer` mentah.
+- **Integrasi Lifecycle & Command Palette — `frontend-react/src/App.tsx`**:
+  - Mengaitkan state `isExitDialogOpen` ke listener event Electron `onCloseRequested`.
+  - Menambahkan aksi *"Keluar dari Spoorf Sentinel"* ke Command Palette (Ctrl+K / Cmd+K).
+- **Verifikasi Kualitas**:
+  - `python-service`: 330/330 unit tests lulus (*100% pass*).
+  - `backend-node`: 40/40 tests lulus (*100% pass*).
+  - `frontend-react`: `npm run build` sukses 100% tanpa error TypeScript (10.16s).
+  - `desktop-electron`: `npm run build:ts` sukses 100%.
+
 ## [v2.41.5] - 2026-09-10
 
 ### Branded OS Identity Badges & Eliminasi Ambigu "Android / Linux"

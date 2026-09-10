@@ -13,6 +13,8 @@ declare global {
         minimizeWindow?: () => void;
         maximizeWindow?: () => void;
         closeWindow?: () => void;
+        confirmClose?: () => void;
+        onCloseRequested?: (callback: () => void) => () => void;
         restartEngine?: () => void;
     }
 

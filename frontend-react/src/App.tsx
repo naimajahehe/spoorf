@@ -31,7 +31,8 @@ import {
     CheckCircle2,
     BookOpen,
     Sun,
-    Moon
+    Moon,
+    LogOut
 } from 'lucide-react';
 import { Select, SelectTrigger, SelectContent, SelectItem } from './components/motion/select';
 import { AnimatedSidebar, AnimatedSidebarProvider } from './components/AnimatedSidebar';
@@ -60,6 +61,7 @@ import { DashboardWelcomeView } from './components/DashboardWelcomeView';
 import { GamingModeWidget } from './components/GamingModeWidget';
 import { LoginModal } from './components/LoginModal';
 import { UpgradeProModal } from './components/UpgradeProModal';
+import { ConfirmExitDialog } from './components/ConfirmExitDialog';
 import { EngineReadinessGateContent } from './components/EngineReadinessGate';
 import { AuthPage } from './components/ui/auth-page';
 import { NeonMesh } from './components/ui/neon-mesh';
@@ -157,6 +159,7 @@ function App() {
     const [isCheckingWifi, setIsCheckingWifi] = useState(false);
     const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
     const [upgradeModalState, setUpgradeModalState] = useState<{ isOpen: boolean; reason?: string }>({ isOpen: false });
+    const [isExitDialogOpen, setIsExitDialogOpen] = useState(false);
 
     const [activeTab, setActiveTab] = useState<FilterTab>('all');
     const [searchQuery, setSearchQuery] = useState('');
@@ -317,6 +320,28 @@ function App() {
         return () => window.removeEventListener('keydown', handleKeyDown);
     }, []);
 
+    // Intersepsi penutupan aplikasi Desktop Electron -> Buka dialog konfirmasi
+    useEffect(() => {
+        if (!window.electronAPI?.onCloseRequested) return;
+        const unsubscribe = window.electronAPI.onCloseRequested(() => {
+            setIsExitDialogOpen(true);
+        });
+        return () => {
+            if (typeof unsubscribe === 'function') {
+                unsubscribe();
+            }
+        };
+    }, []);
+
+    const handleConfirmExit = () => {
+        setIsExitDialogOpen(false);
+        if (window.electronAPI?.confirmClose) {
+            window.electronAPI.confirmClose();
+        } else {
+            window.close();
+        }
+    };
+
     // Assemble Command Palette items
     const commandPaletteItems = useMemo<CommandItem[]>(() => {
         const items: CommandItem[] = [
@@ -439,6 +464,15 @@ function App() {
                 hint: theme === 'dark' ? 'Day Mode' : 'Night Mode',
                 keywords: ['theme', 'dark', 'light', 'white', 'day', 'night', 'mode', 'tema', 'siang', 'malam', 'terang', 'gelap'],
                 onSelect: () => handleToggleTheme()
+            },
+            {
+                id: 'action-exit-app',
+                label: 'Keluar dari Spoorf Sentinel',
+                group: 'Aksi Cepat',
+                icon: LogOut,
+                hint: 'Tutup & Keluar',
+                keywords: ['keluar', 'exit', 'quit', 'close', 'tutup', 'shutdown'],
+                onSelect: () => setIsExitDialogOpen(true)
             }
         ];
 
@@ -2222,6 +2256,13 @@ function App() {
                 isOpen={isCommandPaletteOpen}
                 onClose={() => setIsCommandPaletteOpen(false)}
                 items={commandPaletteItems}
+            />
+
+            {/* Confirm Exit Dialog (Intersepsi Tutup Aplikasi) */}
+            <ConfirmExitDialog
+                open={isExitDialogOpen}
+                onOpenChange={setIsExitDialogOpen}
+                onConfirm={handleConfirmExit}
             />
         </AnimatedSidebarProvider>
     );

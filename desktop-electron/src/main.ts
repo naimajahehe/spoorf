@@ -18,6 +18,7 @@ let mainWindow: BrowserWindow | null = null;
 let pythonProcess: ChildProcess | null = null;
 let tray: Tray | null = null;
 let isQuitting = false;
+let isForceClosing = false;
 
 // Supervisor auto-respawn: batasi restart agar tidak crash-loop.
 const ENGINE_MAX_RESTARTS = 5;
@@ -412,6 +413,13 @@ function createMainWindow() {
         }
     }
 
+    mainWindow.on('close', (event) => {
+        if (!isForceClosing) {
+            event.preventDefault();
+            mainWindow?.webContents.send('request-app-close');
+        }
+    });
+
     mainWindow.on('closed', () => {
         mainWindow = null;
     });
@@ -433,7 +441,20 @@ ipcMain.on('window-maximize', () => {
 });
 
 ipcMain.on('window-close', () => {
-    if (mainWindow) mainWindow.close();
+    if (!isForceClosing && mainWindow) {
+        mainWindow.webContents.send('request-app-close');
+    } else if (mainWindow) {
+        mainWindow.close();
+    }
+});
+
+ipcMain.on('confirm-app-close', () => {
+    isForceClosing = true;
+    if (mainWindow) {
+        mainWindow.close();
+    } else {
+        app.quit();
+    }
 });
 
 // Restart engine Python dari UI (preload mengekspos electronAPI.restartEngine()).
@@ -461,6 +482,7 @@ app.whenReady().then(() => {
 });
 
 app.on('before-quit', async (e) => {
+    isForceClosing = true;
     if (!isQuitting) {
         isQuitting = true;
         e.preventDefault();
