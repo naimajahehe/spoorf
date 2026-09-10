@@ -632,6 +632,9 @@ export class DatabaseService {
             // Pembersihan Integritas Controller: Perangkat yang offline tidak boleh memiliki flag is_self = 1
             this.db.exec("UPDATE devices SET is_self = 0 WHERE is_self = 1 AND is_online = 0;");
 
+            // Normalisasi data OS: bersihkan legacy string seperti 'Android / Linux' atau 'Android OS' menjadi 'Android'
+            this.db.exec("UPDATE devices SET os = 'Android' WHERE os IN ('Android / Linux', 'Android OS');");
+
             console.log(`✅ SQLite connected & schema initialized (${this.dbPath})`);
             this.initialized = true;
         } catch (error) {

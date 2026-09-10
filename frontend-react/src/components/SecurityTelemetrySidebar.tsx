@@ -26,6 +26,7 @@ import { NetworkBandwidthLineChart, BandwidthDataPoint } from './NetworkBandwidt
 import { DualStackKillStatus } from './DualStackKillStatus';
 import { InstagramIcon } from './icons/InstagramIcon';
 import { getResolvedDeviceName } from '../lib/deviceSort';
+import { DeviceOsBadge, formatDeviceOs } from './DeviceOsBadge';
 import { cn } from '../lib/utils';
 
 interface SecurityTelemetrySidebarProps {
@@ -104,8 +105,8 @@ export const SecurityTelemetrySidebar: FC<SecurityTelemetrySidebarProps> = ({
 
     const isOnline = device.is_self ? true : device.is_online;
     const isInternetActive = !device.is_blocked && (device.speed_limit === undefined || device.speed_limit > 0);
-    const ttlValue = device.ttl || (device.os === 'Windows' ? 128 : 64);
-    const ttlDesc = ttlValue >= 100 ? 'Windows NT' : ttlValue <= 75 ? 'Linux / Android / Darwin' : 'Network Appliance';
+    const ttlValue = device.ttl || (device.os?.includes('Windows') ? 128 : 64);
+    const ttlDesc = ttlValue >= 100 ? 'Windows NT' : ttlValue <= 75 ? (device.os ? formatDeviceOs(device.os, device.is_gateway, device.vendor) : 'Mobile / POSIX') : 'Network Appliance';
     const isThrottled = (device.speed_limit ?? 100) > 0 && (device.speed_limit ?? 100) < 100;
     const speedLimit = device.speed_limit ?? 100;
 
@@ -377,9 +378,15 @@ export const SecurityTelemetrySidebar: FC<SecurityTelemetrySidebarProps> = ({
 
                     <div className="flex items-center justify-between text-xs pt-1 border-t border-white/[0.04]">
                         <span className="text-zinc-400">Sistem Operasi</span>
-                        <span className="font-mono text-zinc-200 text-[11px] truncate max-w-[160px] text-right" title={device.os}>
-                            {device.os || 'Unknown OS'}
-                        </span>
+                        <DeviceOsBadge
+                            os={device.os}
+                            vendor={device.vendor}
+                            deviceType={device.device_type}
+                            isGateway={device.is_gateway}
+                            isSelf={device.is_self}
+                            iconSize={13}
+                            textClassName="font-mono text-zinc-200 text-[11px] truncate max-w-[150px] text-right"
+                        />
                     </div>
 
                     {/* Estimasi Jarak & Proximity Sensor */}

@@ -221,7 +221,7 @@ def _infer_os(
     if any(token in identity for token in ("iphone", "ipad", "apple ios")):
         return "iOS (Apple)"
     if device_type == "Smartphone / Tablet" and vendor != "Apple":
-        return "Android OS"
+        return "Android"
     if device_type == "PC / Laptop" and (
         445 in open_ports
         or any(service.casefold() in {"smb", "microsoft-ds"} for service in services)

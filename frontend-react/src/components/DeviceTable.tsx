@@ -38,6 +38,7 @@ import { Dock, DockItem, DockSeparator } from './motion/dock';
 import { InstagramIcon } from './icons/InstagramIcon';
 import { Device, AuthStatusResponse } from '../types';
 import { sortDevicesByField, SortField, SortOrder, formatLastSeen, getResolvedDeviceName } from '../lib/deviceSort';
+import { DeviceOsBadge, formatDeviceOs } from './DeviceOsBadge';
 import { cn } from '../lib/utils';
 
 interface Props {
@@ -256,8 +257,8 @@ export const DeviceTable: FC<Props> = ({
                         const ipPrefix = lastDotIdx !== -1 ? activeIpForSplit.slice(0, lastDotIdx + 1) : '';
                         const ipHost = lastDotIdx !== -1 ? activeIpForSplit.slice(lastDotIdx + 1) : (device.is_online ? device.ip : 'Offline');
 
-                        const ttlValue = device.ttl || (device.os === 'Windows' ? 128 : 64);
-                        const ttlDesc = ttlValue >= 100 ? 'Windows NT' : ttlValue <= 75 ? 'Linux / Android / Darwin' : 'Network Appliance';
+                        const ttlValue = device.ttl || (device.os?.includes('Windows') ? 128 : 64);
+                        const ttlDesc = ttlValue >= 100 ? 'Windows NT' : ttlValue <= 75 ? (device.os ? formatDeviceOs(device.os, device.is_gateway, device.vendor) : 'Mobile / POSIX') : 'Network Appliance';
 
                         return (
                             <React.Fragment key={device.mac || device.ip}>
@@ -424,9 +425,13 @@ export const DeviceTable: FC<Props> = ({
                                     {/* Column 2: Perangkat (Semua tertulis Terkunci untuk Free) */}
                                     <td className="h-[56px] py-0 px-4">
                                         {isDeepFingerprintEnabled ? (
-                                            <span className="text-xs text-zinc-300 font-medium truncate block">
-                                                {device.os || device.vendor || '-'}
-                                            </span>
+                                            <DeviceOsBadge
+                                                os={device.os}
+                                                vendor={device.vendor}
+                                                deviceType={device.device_type}
+                                                isGateway={device.is_gateway}
+                                                isSelf={device.is_self}
+                                            />
                                         ) : (
                                             <div className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-white/[0.03] border border-white/[0.06] text-zinc-500 select-none" title="Deteksi detail perangkat terkunci di versi Free. Upgrade ke PRO untuk membuka!">
                                                 <Lock size={11} className="text-zinc-500 shrink-0" />
@@ -898,7 +903,15 @@ export const DeviceTable: FC<Props> = ({
                                                                                     <Terminal size={12} className="text-zinc-400" />
                                                                                     OS & Identity
                                                                                 </span>
-                                                                                <span className="text-xs font-semibold text-zinc-200 block truncate">{device.os || 'Unknown OS'}</span>
+                                                                                <DeviceOsBadge
+                                                                                    os={device.os}
+                                                                                    vendor={device.vendor}
+                                                                                    deviceType={device.device_type}
+                                                                                    isGateway={device.is_gateway}
+                                                                                    isSelf={device.is_self}
+                                                                                    iconSize={14}
+                                                                                    textClassName="text-xs font-semibold text-zinc-200"
+                                                                                />
                                                                             </div>
                                                                             <div className="text-[11px] font-mono text-zinc-400 block truncate mt-1">
                                                                                 {device.user_name ? (

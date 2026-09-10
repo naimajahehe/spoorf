@@ -2,7 +2,35 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
-## [v2.41.4] - 2026-09-10
+## [v2.41.5] - 2026-09-10
+
+### Branded OS Identity Badges & Eliminasi Ambigu "Android / Linux"
+- **Standardisasi Deteksi OS ("Android / Linux" ➔ "Android") — `python-service/src/core/fingerprint/os_detect.py` & `ensemble.py`**:
+  - Menghapus output ambigu `"Android / Linux"` pada heuristik TTL 1..64. Jika perangkat adalah client consumer tanpa port Linux khusus (port 22) dan tanpa indikasi distro server, disimpulkan murni sebagai `"Android"`.
+  - Menambahkan deteksi eksplisit untuk distro dan vendor Linux (`raspberry`, `canonical`, `debian`, `redhat`, `ubuntu`, port 22/SSH).
+  - Di `ensemble.py`, string `"Android OS"` distandarkan menjadi `"Android"`.
+- **Migrasi Data Persisten SQLite — `backend-node/src/services/database.ts`**:
+  - Menjalankan migrasi pembersihan otomatis saat database diinisialisasi:
+    `UPDATE devices SET os = 'Android' WHERE os IN ('Android / Linux', 'Android OS');`
+  - Seluruh 29 data perangkat lama yang sebelumnya berlabel `'Android / Linux'` di `sentinel.db` langsung dimigrasikan ke `'Android'`.
+- **Komponen Ikon Brand Resmi & Warna Khas — `frontend-react/src/components/DeviceOsBadge.tsx`**:
+  - Mengintegrasikan library `react-icons` (`react-icons/si` dan `react-icons/bs`) untuk menyajikan ikon vektor brand resmi dengan ciri khas warna otentik:
+    - **Android**: Ikon resmi `<SiAndroid />` dengan warna hijau khas Android (`#3DDC84`).
+    - **Windows**: Ikon resmi Microsoft Windows modern `<BsWindows />` dengan warna biru khas Windows (`#0078D4`).
+    - **Apple (iOS / macOS)**: Ikon resmi `<SiApple />` dengan warna silver/putih khas Apple (`text-zinc-200`).
+    - **Linux**: Ikon resmi `<SiLinux />` dengan warna kuning/amber khas Tux (`#FCC624`), serta `<SiUbuntu />`, `<SiDebian />`, `<SiRaspberrypi />`.
+    - **Router / Gateway**: Ikon `<Router />` dengan warna cyan khas network (`text-cyan-400`).
+    - **Unknown / Generic**: Fallback `<HelpCircle />` atau `<Laptop />` / `<Smartphone />` dengan warna abu-abu netral (`text-zinc-500`).
+- **Integrasi Antarmuka — `DeviceTable.tsx` & `SecurityTelemetrySidebar.tsx`**:
+  - Kolom **"Perangkat"** pada tabel utama menampilkan `DeviceOsBadge` (ikon brand + nama OS).
+  - Bento tile **"OS & Identity"** di accordion detail baris menampilkan `DeviceOsBadge` yang presisi.
+  - Sidebar **"Sistem Operasi"** menampilkan `DeviceOsBadge` yang selaras.
+  - Membersihkan teks stack TTL dari label ambigu `Linux / Android / Darwin` menjadi nama stack OS murni.
+- **Verifikasi Kualitas**:
+  - `python-service`: 330/330 unit tests lulus (*100% pass*).
+  - `backend-node`: 40/40 tests lulus (*100% pass*).
+  - `frontend-react`: `npm run build` sukses 100% tanpa error TypeScript (9.04s).
+
 
 ### Offline-Blocked Device Indicators & Selective Action Button Control
 - **Pembersihan Kolom Identitas Perangkat — `frontend-react/src/components/DeviceTable.tsx`**:

@@ -228,7 +228,7 @@ class TestCoreFingerprint(unittest.TestCase):
             mdns_discovered={}
         )
         self.assertEqual(host, "Infinix-HOT-10")
-        self.assertEqual(os_name, "Android OS")
+        self.assertEqual(os_name, "Android")
         self.assertEqual(dev_type, "Smartphone / Tablet")
 
     def test_extract_mobile_brand_from_hostname_patterns(self):

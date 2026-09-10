@@ -35,10 +35,14 @@ def detect_os(ping_info: Dict[str, Any], open_ports: Dict[int, str], vendor: str
         return "Android"
 
     # 4. Linux / Embedded
+    if any(k in v for k in ['raspberry', 'canonical', 'debian', 'redhat']):
+        return "Linux"
+    if any(k in h for k in ['linux', 'ubuntu', 'debian', 'raspberry', 'raspi', 'pi']):
+        return "Linux"
     if 22 in ports:
         return "Linux"
     if 1 <= ttl <= 64:
-        return "Android / Linux"
+        return "Android"
 
     return "Unknown OS"
 
