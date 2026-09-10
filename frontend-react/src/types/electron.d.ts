@@ -15,6 +15,8 @@ declare global {
         closeWindow?: () => void;
         confirmClose?: () => void;
         onCloseRequested?: (callback: () => void) => () => void;
+        focusWindow?: () => void;
+        isWindowMinimized?: () => boolean;
         restartEngine?: () => void;
         setTitleBarTheme?: (theme: 'dark' | 'light') => void;
     }

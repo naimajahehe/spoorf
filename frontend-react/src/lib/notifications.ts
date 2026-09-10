@@ -118,8 +118,34 @@ export async function requestNotificationPermission(): Promise<boolean> {
 }
 
 /**
- * Send a native OS desktop notification (e.g. Windows Action Center banner)
- * Works even when the browser tab is minimized or in the background!
+ * Periksa apakah jendela aplikasi sedang di-minimize atau disembunyikan di background.
+ * Digunakan untuk memastikan notifikasi desktop native (OS banner) HANYA muncul
+ * saat aplikasi di-minimize, sesuai permintaan UX pengguna.
+ */
+export function isAppMinimized(): boolean {
+    if (typeof window === 'undefined') return false;
+
+    // 1. Cek dari Desktop Electron jika berjalan sebagai aplikasi desktop
+    if (window.electronAPI?.isWindowMinimized) {
+        try {
+            return Boolean(window.electronAPI.isWindowMinimized());
+        } catch {
+            // fallback ke document visibility
+        }
+    }
+
+    // 2. Standar Web: document.hidden / visibilityState
+    if (typeof document !== 'undefined') {
+        return document.hidden || document.visibilityState === 'hidden';
+    }
+
+    return false;
+}
+
+/**
+ * Send a native OS desktop notification (e.g. Windows Action Center banner).
+ * ATURAN UX: HANYA muncul saat jendela aplikasi sedang di-minimize.
+ * Saat aplikasi aktif/terbuka, cukup gunakan floating toast in-app.
  */
 export function sendDesktopNotification(
     title: string,
@@ -128,9 +154,15 @@ export function sendDesktopNotification(
         icon?: string;
         tag?: string;
         onClick?: () => void;
+        force?: boolean;
     }
 ): Notification | null {
     if (isNotificationMuted()) {
+        return null;
+    }
+
+    // Jika aplikasi TIDAK di-minimize, jangan munculkan notifikasi desktop native OS
+    if (!options.force && !isAppMinimized()) {
         return null;
     }
 
@@ -151,7 +183,11 @@ export function sendDesktopNotification(
         });
 
         notif.onclick = () => {
-            window.focus();
+            if (window.electronAPI?.focusWindow) {
+                window.electronAPI.focusWindow();
+            } else {
+                window.focus();
+            }
             if (options.onClick) {
                 options.onClick();
             }

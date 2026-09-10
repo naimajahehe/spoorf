@@ -429,12 +429,44 @@ function createMainWindow() {
         }
     });
 
+    mainWindow.on('minimize', () => {
+        mainWindow?.webContents.send('window-minimize-state', true);
+    });
+
+    mainWindow.on('restore', () => {
+        mainWindow?.webContents.send('window-minimize-state', false);
+    });
+
+    mainWindow.on('show', () => {
+        mainWindow?.webContents.send('window-minimize-state', false);
+    });
+
+    mainWindow.on('hide', () => {
+        mainWindow?.webContents.send('window-minimize-state', true);
+    });
+
     mainWindow.on('closed', () => {
         mainWindow = null;
     });
 }
 
 // IPC Handlers
+ipcMain.on('is-window-minimized-sync', (event) => {
+    event.returnValue = mainWindow ? mainWindow.isMinimized() : false;
+});
+
+ipcMain.handle('is-window-minimized', () => {
+    return mainWindow ? mainWindow.isMinimized() : false;
+});
+
+ipcMain.on('window-focus', () => {
+    if (mainWindow) {
+        if (mainWindow.isMinimized()) mainWindow.restore();
+        mainWindow.show();
+        mainWindow.focus();
+    }
+});
+
 ipcMain.on('window-minimize', () => {
     if (mainWindow) mainWindow.minimize();
 });

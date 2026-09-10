@@ -2,6 +2,23 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.8] - 2026-09-10
+
+### Context-Aware Desktop Notifications (Suppression when Visible, Active when Minimized)
+- **Logika Notifikasi Kontekstual — `frontend-react/src/lib/notifications.ts`**:
+  - Menambahkan fungsi deteksi `isAppMinimized(): boolean` yang mengevaluasi status minimize dari `window.electronAPI.isWindowMinimized()` dan fallback standar web `document.hidden / visibilityState === 'hidden'`.
+  - Memperbarui `sendDesktopNotification()` agar **hanya** memunculkan banner notifikasi desktop OS Windows jika aplikasi sedang di-minimize.
+  - Saat jendela aplikasi aktif/terbuka (tidak di-minimize), notifikasi sistem Windows otomatis ditekan (*suppressed*); pengguna cukup melihat floating toast interaktif di dalam aplikasi (`NewDeviceToast`, `OnlineDeviceToast`, `DisconnectedDeviceToast`).
+- **Peningkatan IPC Main & Preload Electron — `desktop-electron/src/main.ts`, `preload.ts`, & `types/electron.d.ts`**:
+  - Memantau event `'minimize'`, `'restore'`, `'show'`, dan `'hide'` pada `mainWindow` dan menyiarkannya via event `window-minimize-state`.
+  - Mengekspos method `isWindowMinimized: () => boolean` dan `focusWindow: () => void` ke renderer.
+  - Saat banner notifikasi Windows diklik (ketika aplikasi sedang di-minimize), jendela Spoorf Sentinel kini otomatis di-restore dan dibawa ke latar depan (`mainWindow.restore() + mainWindow.focus()`).
+- **Verifikasi Kualitas**:
+  - `python-service`: 330/330 unit tests lulus (*100% pass*).
+  - `backend-node`: 40/40 tests lulus (*100% pass*). Total: 370 unit tests lulus.
+  - `frontend-react`: `npm run build` sukses 100% tanpa error TypeScript (9.61s).
+  - `desktop-electron`: `npm run package` sukses mengemas build dan installer baru.
+
 ## [v2.41.7] - 2026-09-10
 
 ### Cyber-Dark Titlebar & Harmonized Window Controls Overlay (WCO)

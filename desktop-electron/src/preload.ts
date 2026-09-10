@@ -15,6 +15,11 @@ function getInitialToken(): string {
     }
 }
 
+let cachedIsMinimized = false;
+ipcRenderer.on('window-minimize-state', (_event, isMin) => {
+    cachedIsMinimized = Boolean(isMin);
+});
+
 contextBridge.exposeInMainWorld('electronAPI', {
     isDesktop: true,
     appVersion: '2.35.0',
@@ -25,6 +30,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
     maximizeWindow: () => ipcRenderer.send('window-maximize'),
     closeWindow: () => ipcRenderer.send('window-close'),
     confirmClose: () => ipcRenderer.send('confirm-app-close'),
+    focusWindow: () => ipcRenderer.send('window-focus'),
+    isWindowMinimized: () => {
+        try {
+            return ipcRenderer.sendSync('is-window-minimized-sync');
+        } catch {
+            return cachedIsMinimized;
+        }
+    },
     onCloseRequested: (callback: () => void) => {
         const handler = () => callback();
         ipcRenderer.on('request-app-close', handler);
