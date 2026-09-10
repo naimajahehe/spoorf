@@ -77,7 +77,8 @@ export class WebSocketManager {
         });
 
         this.deviceManager.on('telemetry', (telemetry) => {
-            this.io.emit('telemetryStream', telemetry);
+            // On-demand telemetry: stream hanya dipancarkan ke client di room 'telemetry_subscribers'
+            this.io.to('telemetry_subscribers').emit('telemetryStream', telemetry);
         });
 
         this.deviceManager.on('autoReblocked', (device: any) => {
@@ -183,6 +184,21 @@ export class WebSocketManager {
             this.deviceManager.getGamingStatus().then(gaming => {
                 if (gaming) socket.emit('gamingStatus', gaming);
             }).catch(() => {});
+
+            // On-demand telemetry subscription (menghemat CPU & WS broadcast saat di tabel utama)
+            socket.on('subscribeTelemetry', async () => {
+                socket.join('telemetry_subscribers');
+                try {
+                    const telemetry = await this.deviceManager.getTelemetry();
+                    if (telemetry) {
+                        socket.emit('telemetryStream', telemetry);
+                    }
+                } catch {}
+            });
+
+            socket.on('unsubscribeTelemetry', () => {
+                socket.leave('telemetry_subscribers');
+            });
 
             // Handle scan request
             socket.on('scan', async () => {

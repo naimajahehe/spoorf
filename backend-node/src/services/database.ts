@@ -105,7 +105,8 @@ export function isUsableClientId(cid: string | undefined | null): boolean {
 export function calculateProfileMatchScore(
     scanned: Device,
     profile: any,
-    existingDevices: Device[] = []
+    existingDevices: Device[] = [],
+    allScannedMacSet?: Set<string>
 ): { score: number; reasons: string[] } {
     const sCid = (scanned.dhcp_client_id || '').trim().toLowerCase();
 
@@ -190,7 +191,8 @@ export function calculateProfileMatchScore(
     // 4. Offline Timing Window Continuity (Maks 15 Poin)
     if (Array.isArray(profile.linked_macs) && profile.linked_macs.length > 0) {
         const matchingLinked = existingDevices.find(
-            d => profile.linked_macs.map((m: string) => m.toLowerCase()).includes(d.mac.toLowerCase()) && !d.is_online
+            d => profile.linked_macs.map((m: string) => m.toLowerCase()).includes(d.mac.toLowerCase()) &&
+                 (!d.is_online || (allScannedMacSet && !allScannedMacSet.has(d.mac.toLowerCase())))
         );
         if (matchingLinked && matchingLinked.last_seen) {
             const lastSeenTime = new Date(matchingLinked.last_seen).getTime();
@@ -439,6 +441,13 @@ export class DatabaseService {
         } catch {
             return 'unknown';
         }
+    }
+
+    checkpointWal(): void {
+        if (!this.db || this.dbPath === ':memory:') return;
+        try {
+            this.db.pragma('wal_checkpoint(PASSIVE)');
+        } catch {}
     }
 
     async init(): Promise<void> {
@@ -923,6 +932,33 @@ export class DatabaseService {
         });
 
         repairTransaction();
+
+        // REPAIR STALE BLOCKED ARTIFACTS:
+        // Jika suatu profil memiliki perangkat aktif/online yang TIDAK diblokir (is_blocked=0) di suatu jaringan,
+        // maka seluruh entri historis/offline milik profil tersebut di jaringan yang sama harus diselaraskan
+        // ke is_blocked = 0 dan speed_limit = 100.
+        // Mencegah bug rotasi MAC di mana entri offline basi menyebabkan auto-reblock membangkitkan blokir palsu.
+        try {
+            this.db.prepare(`
+                UPDATE devices 
+                SET is_blocked = 0, session_id = NULL, speed_limit = 100
+                WHERE profile_id IN (
+                    SELECT DISTINCT profile_id 
+                    FROM devices 
+                    WHERE is_online = 1 AND is_blocked = 0 AND profile_id IS NOT NULL
+                ) AND is_blocked = 1
+            `).run();
+        } catch (err) {
+            console.warn('Notice repair stale blocked profile rows:', err);
+        }
+
+        // PEMBERSIHAN OTOMATIS (GARBAGE COLLECTOR):
+        // Bersihkan MAC acak usang yang terarsipkan atau offline > 2 hari saat startup
+        try {
+            this.pruneStaleRandomizedMacs(2);
+        } catch (err) {
+            console.warn('Notice prune stale randomized MACs on init:', err);
+        }
     }
 
     /**
@@ -958,6 +994,65 @@ export class DatabaseService {
             console.log(`🧹 [Retention] Mengarsipkan ${result.changes} perangkat tamu yang offline > ${thresholdDays} hari.`);
         }
         return result.changes;
+    }
+
+    /**
+     * Pembersihan Otomatis (Garbage Collection):
+     * Membersihkan entri MAC acak (Randomized MAC) usang yang terbukti sudah offline
+     * lebih dari thresholdDays atau terarsipkan, serta profil duplikat 'Target Device' yang tidak memiliki perangkat aktif.
+     * PROTEKSI KETAT:
+     *   - Perangkat dengan alias kustom pengguna (alias != '' DAN alias != 'Target Device') TIDAK PERNAH DIHAPUS.
+     *   - Perangkat fisik asli (is_randomized_mac = 0) TIDAK PERNAH DIHAPUS.
+     *   - Komputer Operator (is_self = 1) dan Gateway Router (is_gateway = 1) KEBAL 100%.
+     *   - Perangkat yang saat ini ONLINE (is_online = 1) TIDAK PERNAH DIHAPUS.
+     *   - Perangkat ber-sesi aktif (session_id IS NOT NULL) TIDAK PERNAH DIHAPUS.
+     */
+    pruneStaleRandomizedMacs(thresholdDays: number = 2): { deletedDevices: number; deletedProfiles: number } {
+        if (!this.db) return { deletedDevices: 0, deletedProfiles: 0 };
+        const days = Math.max(1, Math.floor(thresholdDays));
+
+        // 1. Hapus entri MAC acak offline usang (> thresholdDays) yang tidak ber-alias personal dan bukan self/gateway
+        const deleteDevicesStmt = this.db.prepare(`
+            DELETE FROM devices
+            WHERE (is_online = 0 OR is_online IS NULL)
+              AND is_randomized_mac = 1
+              AND session_id IS NULL
+              AND (is_self IS NULL OR is_self = 0)
+              AND (is_gateway IS NULL OR is_gateway = 0)
+              AND (alias IS NULL OR alias = '' OR alias = 'Target Device')
+              AND last_seen IS NOT NULL
+              AND last_seen < datetime('now', 'localtime', '-${days} days')
+        `);
+        const devResult = deleteDevicesStmt.run();
+
+        // 2. Hapus entri MAC acak yang sudah terarsipkan (is_archived = 1) dan offline > 1 jam
+        const deleteArchivedStmt = this.db.prepare(`
+            DELETE FROM devices
+            WHERE is_archived = 1
+              AND (is_online = 0 OR is_online IS NULL)
+              AND is_randomized_mac = 1
+              AND session_id IS NULL
+              AND (is_self IS NULL OR is_self = 0)
+              AND (is_gateway IS NULL OR is_gateway = 0)
+              AND (alias IS NULL OR alias = '' OR alias = 'Target Device')
+              AND last_seen IS NOT NULL
+              AND last_seen < datetime('now', 'localtime', '-1 hours')
+        `);
+        const archResult = deleteArchivedStmt.run();
+
+        // 3. Bersihkan profil duplikat 'Target Device' yang tidak memiliki perangkat aktif lagi di tabel devices
+        const deleteOrphanProfilesStmt = this.db.prepare(`
+            DELETE FROM device_profiles
+            WHERE alias = 'Target Device'
+              AND id NOT IN (SELECT DISTINCT profile_id FROM devices WHERE profile_id IS NOT NULL)
+        `);
+        const profResult = deleteOrphanProfilesStmt.run();
+
+        const totalDeletedDevices = devResult.changes + archResult.changes;
+        if (totalDeletedDevices > 0 || profResult.changes > 0) {
+            console.log(`🧹 [Garbage Collector] Berhasil membersihkan ${totalDeletedDevices} MAC acak usang dan ${profResult.changes} profil duplikat.`);
+        }
+        return { deletedDevices: totalDeletedDevices, deletedProfiles: profResult.changes };
     }
 
     private async getDevices(includeArchived: boolean, networkId?: string): Promise<Device[]> {
@@ -1168,7 +1263,7 @@ export class DatabaseService {
 
         const dev = this.db.prepare(`SELECT * FROM devices WHERE LOWER(mac) = LOWER(?) AND network_id = ?`).get(normMac, networkId) as any;
         if (dev) {
-            const pId = dev.profile_id || deriveProfileId(dev.mac);
+            const pId = dev.profile_id || dev.candidate_profile_id || deriveProfileId(dev.mac);
 
             // Dapatkan linked_macs + nama profil yang ada
             const existingProf = this.db.prepare(`SELECT linked_macs, alias, hostname FROM device_profiles WHERE id = ?`).get(pId) as any;
@@ -1177,6 +1272,27 @@ export class DatabaseService {
                 const parsed = safeParseJson<string[]>(existingProf.linked_macs, []);
                 linkedMacs = Array.from(new Set([...parsed, normMac]));
             }
+
+            // Sinkronkan status blokir dan speed limit untuk SELURUH entri yang terafiliasi dengan profil ini di jaringan ini.
+            // Saat unblock (!isBlocked): bersihkan is_blocked = 0, session_id = NULL, dan speed_limit = 100 pada semua MAC
+            // (termasuk MAC historis/acak yang diarsipkan) agar mesin auto-reblock dan identity-match tidak menganggap
+            // profil ini masih berstatus blokir.
+            // Saat block (isBlocked): tandai seluruh entri di bawah profil ini di jaringan ini sebagai diblokir (is_blocked = 1, speed_limit = 0).
+            const placeholders = linkedMacs.map(() => '?').join(',');
+            if (!isBlocked) {
+                this.db.prepare(`
+                    UPDATE devices 
+                    SET is_blocked = 0, session_id = NULL, speed_limit = 100 
+                    WHERE (profile_id = ? OR LOWER(mac) IN (${placeholders})) AND network_id = ?
+                `).run(pId, ...linkedMacs.map(m => m.toLowerCase()), networkId);
+            } else {
+                this.db.prepare(`
+                    UPDATE devices 
+                    SET is_blocked = 1, speed_limit = 0 
+                    WHERE (profile_id = ? OR LOWER(mac) IN (${placeholders})) AND network_id = ?
+                `).run(pId, ...linkedMacs.map(m => m.toLowerCase()), networkId);
+            }
+
             // Naikkan nama profil ke hostname PERSONAL bila ada; jangan biarkan 'Unknown'/generik
             // menetap (akar bug "nama jadi Unknown" saat MAC rotasi mewarisi alias profil).
             const candidate = dev.alias || dev.hostname || '';
@@ -1229,6 +1345,10 @@ export class DatabaseService {
         if (info.changes === 0) throw new Error(`Device with MAC ${mac} not found in network ${networkId}`);
 
         const dev = this.db.prepare(`SELECT * FROM devices WHERE LOWER(mac) = LOWER(?) AND network_id = ?`).get(normMac, networkId) as any;
+        const pId = dev?.profile_id || dev?.candidate_profile_id;
+        if (pId) {
+            this.db.prepare(`UPDATE devices SET speed_limit = ?, profile_id = COALESCE(profile_id, ?) WHERE (profile_id = ? OR LOWER(mac) = LOWER(?)) AND network_id = ?`).run(speedLimit, pId, pId, normMac, networkId);
+        }
         return this.rowToDevice(dev);
     }
 
@@ -1285,30 +1405,41 @@ export class DatabaseService {
         await this.init();
         const normMac = mac.toLowerCase();
         const existing = await this.getDeviceByMac(normMac, networkId);
+        const profileId = existing?.profile_id;
 
         if (networkId) {
-            if (existing?.profile_id) {
-                this.db.prepare(`DELETE FROM devices WHERE (profile_id = ? OR LOWER(mac) = LOWER(?)) AND network_id = ?`).run(existing.profile_id, normMac, networkId);
+            if (profileId) {
+                this.db.prepare(`DELETE FROM devices WHERE (profile_id = ? OR LOWER(mac) = LOWER(?)) AND network_id = ?`).run(profileId, normMac, networkId);
             } else {
                 this.db.prepare(`DELETE FROM devices WHERE LOWER(mac) = LOWER(?) AND network_id = ?`).run(normMac, networkId);
             }
         } else {
-            if (existing?.profile_id) {
-                this.db.prepare(`DELETE FROM devices WHERE profile_id = ? OR LOWER(mac) = LOWER(?)`).run(existing.profile_id, normMac);
-                this.db.prepare(`DELETE FROM device_profiles WHERE id = ?`).run(existing.profile_id);
+            if (profileId) {
+                this.db.prepare(`DELETE FROM devices WHERE profile_id = ? OR LOWER(mac) = LOWER(?)`).run(profileId, normMac);
             } else {
                 this.db.prepare(`DELETE FROM devices WHERE LOWER(mac) = LOWER(?)`).run(normMac);
-                const allProfiles = this.db.prepare(`SELECT * FROM device_profiles`).all() as any[];
-                for (const p of allProfiles) {
-                    const linked = safeParseJson<string[]>(p.linked_macs, []);
-                    if (linked.map(m => m.toLowerCase()).includes(normMac)) {
-                        const nextLinked = linked.filter(m => m.toLowerCase() !== normMac);
-                        if (nextLinked.length === 0) {
-                            this.db.prepare(`DELETE FROM device_profiles WHERE id = ?`).run(p.id);
-                        } else {
-                            this.db.prepare(`UPDATE device_profiles SET linked_macs = ? WHERE id = ?`).run(JSON.stringify(nextLinked), p.id);
-                        }
-                    }
+            }
+        }
+
+        // Garbage collection: Bersihkan normMac dari linked_macs dan hapus profil yatim tanpa perangkat tersisa
+        if (profileId) {
+            const remaining = this.db.prepare(`SELECT count(*) as count FROM devices WHERE profile_id = ?`).get(profileId) as { count: number };
+            if (remaining.count === 0) {
+                this.db.prepare(`DELETE FROM device_profiles WHERE id = ?`).run(profileId);
+            }
+        }
+
+        const allProfiles = this.db.prepare(`SELECT * FROM device_profiles`).all() as any[];
+        for (const p of allProfiles) {
+            const linked = safeParseJson<string[]>(p.linked_macs, []);
+            const hasNormMac = linked.some(m => m.toLowerCase() === normMac);
+            if (hasNormMac) {
+                const nextLinked = linked.filter(m => m.toLowerCase() !== normMac);
+                const remainingDevs = this.db.prepare(`SELECT count(*) as count FROM devices WHERE profile_id = ?`).get(p.id) as { count: number };
+                if (nextLinked.length === 0 || remainingDevs.count === 0) {
+                    this.db.prepare(`DELETE FROM device_profiles WHERE id = ?`).run(p.id);
+                } else {
+                    this.db.prepare(`UPDATE device_profiles SET linked_macs = ? WHERE id = ?`).run(JSON.stringify(nextLinked), p.id);
                 }
             }
         }
@@ -1388,38 +1519,58 @@ export class DatabaseService {
     }, networkId: string = 'net_default'): Promise<void> {
         await this.init();
         const normMac = profile.mac.toLowerCase();
-        const cleanIp = profile.ip.trim();
+        const cleanIp = profile.ip ? profile.ip.trim() : '';
         const updateTransaction = this.db.transaction(() => {
-            this.db.prepare(`
-                UPDATE devices
-                SET is_online = 0,
-                    last_ip = CASE WHEN ip != '' AND ip IS NOT NULL THEN ip ELSE last_ip END,
-                    ip = ''
-                WHERE network_id = ? AND ip = ? AND LOWER(mac) != LOWER(?)
-            `).run(networkId, cleanIp, normMac);
-            this.db.prepare(`
-                UPDATE devices SET
-                    ip = ?,
-                    last_ip = ?,
-                    is_online = 1,
-                    hostname = CASE WHEN ? != '' THEN ? ELSE hostname END,
-                    dhcp_vendor_class = CASE WHEN ? != '' THEN ? ELSE dhcp_vendor_class END,
-                    dhcp_fingerprint = CASE WHEN ? != '' THEN ? ELSE dhcp_fingerprint END,
-                    dhcp_client_id = CASE WHEN ? != '' THEN ? ELSE dhcp_client_id END,
-                    dhcp_fqdn = CASE WHEN ? != '' THEN ? ELSE dhcp_fqdn END,
-                    last_seen = datetime('now', 'localtime')
-                WHERE LOWER(mac) = LOWER(?) AND network_id = ?
-            `).run(
-                cleanIp,
-                cleanIp,
-                profile.hostname || '', profile.hostname || '',
-                profile.vendorClass || '', profile.vendorClass || '',
-                profile.fingerprint || '', profile.fingerprint || '',
-                profile.clientId || '', profile.clientId || '',
-                profile.fqdn || '', profile.fqdn || '',
-                normMac,
-                networkId
-            );
+            if (cleanIp) {
+                this.db.prepare(`
+                    UPDATE devices
+                    SET is_online = 0,
+                        last_ip = CASE WHEN ip != '' AND ip IS NOT NULL THEN ip ELSE last_ip END,
+                        ip = ''
+                    WHERE network_id = ? AND ip = ? AND LOWER(mac) != LOWER(?)
+                `).run(networkId, cleanIp, normMac);
+                this.db.prepare(`
+                    UPDATE devices SET
+                        ip = ?,
+                        last_ip = ?,
+                        is_online = 1,
+                        hostname = CASE WHEN ? != '' THEN ? ELSE hostname END,
+                        dhcp_vendor_class = CASE WHEN ? != '' THEN ? ELSE dhcp_vendor_class END,
+                        dhcp_fingerprint = CASE WHEN ? != '' THEN ? ELSE dhcp_fingerprint END,
+                        dhcp_client_id = CASE WHEN ? != '' THEN ? ELSE dhcp_client_id END,
+                        dhcp_fqdn = CASE WHEN ? != '' THEN ? ELSE dhcp_fqdn END,
+                        last_seen = datetime('now', 'localtime')
+                    WHERE LOWER(mac) = LOWER(?) AND network_id = ?
+                `).run(
+                    cleanIp,
+                    cleanIp,
+                    profile.hostname || '', profile.hostname || '',
+                    profile.vendorClass || '', profile.vendorClass || '',
+                    profile.fingerprint || '', profile.fingerprint || '',
+                    profile.clientId || '', profile.clientId || '',
+                    profile.fqdn || '', profile.fqdn || '',
+                    normMac,
+                    networkId
+                );
+            } else {
+                this.db.prepare(`
+                    UPDATE devices SET
+                        hostname = CASE WHEN ? != '' THEN ? ELSE hostname END,
+                        dhcp_vendor_class = CASE WHEN ? != '' THEN ? ELSE dhcp_vendor_class END,
+                        dhcp_fingerprint = CASE WHEN ? != '' THEN ? ELSE dhcp_fingerprint END,
+                        dhcp_client_id = CASE WHEN ? != '' THEN ? ELSE dhcp_client_id END,
+                        dhcp_fqdn = CASE WHEN ? != '' THEN ? ELSE dhcp_fqdn END
+                    WHERE LOWER(mac) = LOWER(?) AND network_id = ?
+                `).run(
+                    profile.hostname || '', profile.hostname || '',
+                    profile.vendorClass || '', profile.vendorClass || '',
+                    profile.fingerprint || '', profile.fingerprint || '',
+                    profile.clientId || '', profile.clientId || '',
+                    profile.fqdn || '', profile.fqdn || '',
+                    normMac,
+                    networkId
+                );
+            }
         });
         updateTransaction();
     }
@@ -1535,6 +1686,9 @@ export class DatabaseService {
         const autoThrottleTargets: Device[] = [];
         const zombieSessionsToStop: string[] = [];
         const scannedMacs = new Set<string>();
+        const allScannedMacSet = new Set<string>(
+            scannedDevices.map(d => normalizeMacAddress(d.mac))
+        );
 
         // Load active profiles for heuristic matching
         const rawProfiles = this.db.prepare('SELECT * FROM device_profiles').all() as any[];
@@ -1552,7 +1706,9 @@ export class DatabaseService {
         `);
         const archiveDevicesStmt = this.db.prepare(`
             UPDATE devices
-            SET is_archived = 1, is_online = 0, session_id = NULL
+            SET is_archived = 1, is_online = 0, session_id = NULL,
+                last_ip = CASE WHEN ip != '' AND ip IS NOT NULL THEN ip ELSE last_ip END,
+                ip = ''
             WHERE network_id = ? AND profile_id = ? AND LOWER(mac) != LOWER(?)
         `);
         const selectArchivedSessionsStmt = this.db.prepare(`
@@ -1710,7 +1866,7 @@ export class DatabaseService {
                     let bestReasons: string[] = [];
 
                     for (const prof of profiles) {
-                        const result = calculateProfileMatchScore(scanned, prof, existingDevices);
+                        const result = calculateProfileMatchScore(scanned, prof, existingDevices, allScannedMacSet);
                         if (result.score > bestScore) {
                             bestScore = result.score;
                             bestProfile = prof;
@@ -1720,9 +1876,30 @@ export class DatabaseService {
 
                     matchScore = bestScore;
 
-                    if (bestProfile && bestScore >= 80) {
-                        // High Confidence Match (>= 80%): Auto-Link & Auto-Reblock
-                        console.log(`🎯 [HIGH CONFIDENCE PROFILE MATCH (${bestScore}%)] Device ${scanned.ip} (${scanned.mac}) matched profile "${bestProfile.alias}" (${bestReasons.join(', ')})`);
+                    const isHighConfidence = bestScore >= 80;
+                    const hasOtherOnlineInProfile = bestProfile ? existingDevices.some(
+                        d => d.network_id === networkId &&
+                             d.profile_id === bestProfile.id &&
+                             d.is_online &&
+                             allScannedMacSet.has(d.mac.toLowerCase()) &&
+                             d.mac.toLowerCase() !== macKey
+                    ) : false;
+                    const isContinuityFusing = Boolean(
+                        bestProfile &&
+                        !isHighConfidence &&
+                        bestScore >= 60 &&
+                        !hasOtherOnlineInProfile &&
+                        scanned.is_randomized_mac &&
+                        bestReasons.includes('recent_disconnect_continuity (+15)') &&
+                        (bestReasons.includes('dhcp_prl_signature_match (+30)') || bestReasons.includes('generic_factory_hostname_match (+20)'))
+                    );
+
+                    if (bestProfile && (isHighConfidence || isContinuityFusing)) {
+                        // High Confidence (>= 80%) or Verified Continuity Fusing (>= 60%): Auto-Link & Auto-Reblock
+                        const matchTypeLabel = isHighConfidence
+                            ? `HIGH CONFIDENCE (${bestScore}%)`
+                            : `CONTINUITY FUSING (${bestScore}%)`;
+                        console.log(`🎯 [${matchTypeLabel}] Device ${scanned.ip} (${scanned.mac}) matched profile "${bestProfile.alias}" (${bestReasons.join(', ')})`);
                         // Auto-reblock HANYA bila perangkat dengan profil ini pernah diblokir DI JARINGAN INI!
                         const wasBlockedInThisNetwork = existingDevices.some(
                             d => d.network_id === networkId && d.profile_id === bestProfile.id && d.is_blocked
@@ -1731,7 +1908,7 @@ export class DatabaseService {
                         inheritedAlias = bestProfile.alias;
                         inheritedFirstSeen = bestProfile.created_at || null;
                         profileId = bestProfile.id;
-                        matchedBy = 'high_confidence_multi_factor';
+                        matchedBy = isHighConfidence ? 'high_confidence_multi_factor' : 'continuity_randomized_mac_fusing';
                         if (isBlocked) {
                             currentSpeedLimit = 0;
                         } else {

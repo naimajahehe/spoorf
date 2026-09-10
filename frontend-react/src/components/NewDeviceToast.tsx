@@ -1,4 +1,5 @@
 import type { FC } from 'react';
+import { useEffect, useRef } from 'react';
 import { motion } from 'framer-motion';
 import {
     Smartphone,
@@ -84,6 +85,17 @@ export const NewDeviceToast: FC<Props> = ({
 }) => {
     const deviceName = getResolvedDeviceName(device);
     const isReconnected = toastType === 'reconnected';
+
+    const onDismissRef = useRef(onDismiss);
+    onDismissRef.current = onDismiss;
+
+    // Auto dismiss after 8 seconds so it does not block the screen indefinitely
+    useEffect(() => {
+        const timer = setTimeout(() => {
+            onDismissRef.current(device.mac);
+        }, 8000);
+        return () => clearTimeout(timer);
+    }, [device.mac]);
 
     return (
         <motion.div

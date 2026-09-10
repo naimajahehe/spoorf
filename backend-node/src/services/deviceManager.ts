@@ -728,6 +728,48 @@ export class DeviceManager extends EventEmitter {
                 if (isNewDevice && this.autoScanEnabled && !this.inFlightDhcpOptimization) {
                     this.debouncedScan();
                 }
+            } else if (data && data.mac && !data.ip) {
+                // Event DHCP tanpa IP sah (DHCPDISCOVER / DHCPREQUEST: klien meminta IP lama via Option 50 belum disetujui router)
+                const normMac = data.mac.toLowerCase();
+                for (const d of this.devices.values()) {
+                    if (d.mac.toLowerCase() === normMac) {
+                        if (data.hostname && (!d.hostname || d.hostname.toLowerCase().startsWith('unknown'))) {
+                            d.hostname = data.hostname;
+                        }
+                        if (data.vendor_class) d.dhcp_vendor_class = data.vendor_class;
+                        if (data.dhcp_fingerprint) d.dhcp_fingerprint = data.dhcp_fingerprint;
+                        if (data.client_id) d.dhcp_client_id = data.client_id;
+                        if (data.fqdn) d.dhcp_fqdn = data.fqdn;
+                        this.emit('deviceUpdated', d);
+                        break;
+                    }
+                }
+                await this.db.updateDeviceDhcpProfile({
+                    mac: normMac,
+                    ip: '',
+                    hostname: data.hostname,
+                    vendorClass: data.vendor_class,
+                    fingerprint: data.dhcp_fingerprint,
+                    clientId: data.client_id,
+                    fqdn: data.fqdn
+                }, this.currentNetworkId).catch(console.warn);
+
+                // Periksa apakah MAC ini cocok dengan perangkat terblokir untuk picu re-block cepat
+                try {
+                    if (typeof this.db.hasBlockedIdentityMatch === 'function' && this.db.hasBlockedIdentityMatch(data, this.currentNetworkId)) {
+                        const now = Date.now();
+                        if (now - this.lastIdentityReblockAt >= IDENTITY_REBLOCK_MIN_INTERVAL_MS) {
+                            this.lastIdentityReblockAt = now;
+                            console.log(`🔒 [Identity Re-Block] DHCP discovery MAC ${normMac} cocok identitas terblokir → picu scan seketika.`);
+                            this.scanNetwork().catch(err => console.warn('Notice identity re-block scan:', err?.message));
+                        }
+                    }
+                } catch (e: any) {
+                    console.warn('Notice identity re-block check:', e?.message);
+                }
+
+                // Picu micro-scan agar IP fisik sebenarnya segera diverifikasi via Layer 2 ARP
+                this.debouncedScan(1000);
             }
         }
     }
@@ -780,23 +822,37 @@ export class DeviceManager extends EventEmitter {
             if (targetPulse && targetPulse.is_alive === false) {
                 // Cek apakah perangkat baru saja bermigrasi ke IP lain sebelum menyatakan offline
                 let migratedIp: string | undefined;
+                let migratedMac = device.mac;
                 for (const [ipKey, d] of this.devices.entries()) {
                     if (d.mac.toLowerCase() === device.mac.toLowerCase() && ipKey !== device.ip && d.is_online) {
                         migratedIp = ipKey;
+                        migratedMac = d.mac;
                         break;
                     }
                 }
 
+                // Cek profil yang sama jika MAC sudah berotasi (misal Android / iOS MAC acak)
+                if (!migratedIp && device.profile_id) {
+                    for (const [ipKey, d] of this.devices.entries()) {
+                        if (d.profile_id === device.profile_id && ipKey !== device.ip && d.is_online) {
+                            migratedIp = ipKey;
+                            migratedMac = d.mac;
+                            break;
+                        }
+                    }
+                }
+
                 if (migratedIp) {
-                    console.log(`⚡ [Pre-Flight Auto-Migration] Target ${device.mac} berpindah dari ${device.ip} ke ${migratedIp}, memverifikasi IP baru...`);
+                    console.log(`⚡ [Pre-Flight Auto-Migration] Target ${device.mac} berpindah dari ${device.ip} ke ${migratedIp} (MAC: ${migratedMac}), memverifikasi IP baru...`);
                     const reCheck = await this.python.pulseLiveness(
-                        [{ ip: migratedIp, mac: device.mac }],
+                        [{ ip: migratedIp, mac: migratedMac }],
                         gatewayIp
                     );
                     if (reCheck && reCheck[migratedIp] && reCheck[migratedIp].is_alive) {
-                        console.log(`✅ [Pre-Flight Auto-Migration] Target ${device.mac} TERBUKTI HIDUP di IP baru ${migratedIp}!`);
-                        this.devices.delete(device.ip);
+                        console.log(`✅ [Pre-Flight Auto-Migration] Target ${migratedMac} TERBUKTI HIDUP di IP baru ${migratedIp}!`);
+                        if (device.ip) this.devices.delete(device.ip);
                         device.ip = migratedIp;
+                        device.mac = migratedMac;
                         device.is_online = true;
                         this.devices.set(migratedIp, device);
                         await this.db.updateDeviceIp(device.mac, migratedIp, this.currentNetworkId).catch(console.warn);
@@ -913,11 +969,18 @@ export class DeviceManager extends EventEmitter {
 
     /**
      * Arsipkan perangkat basi via DB (berpagar: hanya tamu anonim yang lama offline),
-     * lalu segarkan memori & UI bila ada yang terarsip agar daftar tak menampilkan hantu.
+     * bersihkan MAC acak usang & profil duplikat secara berkala, checkpoint WAL SQLite,
+     * lalu segarkan memori & UI bila ada perubahan agar database dan tabel tetap ramping.
      */
     private async _runRetentionSweep(): Promise<void> {
         const archived = await this.db.archiveStaleDevices(STALE_DEVICE_RETENTION_DAYS);
-        if (archived > 0) {
+        const pruned = typeof this.db.pruneStaleRandomizedMacs === 'function'
+            ? this.db.pruneStaleRandomizedMacs(2)
+            : { deletedDevices: 0, deletedProfiles: 0 };
+        if (typeof this.db.checkpointWal === 'function') {
+            this.db.checkpointWal();
+        }
+        if (archived > 0 || pruned.deletedDevices > 0) {
             const fresh = await this.db.getAllDevices(this.currentNetworkId);
             const freshMacs = new Set(fresh.map(d => d.mac.toLowerCase()));
             for (const [ipKey, dev] of this.devices.entries()) {
@@ -1485,11 +1548,22 @@ export class DeviceManager extends EventEmitter {
     }
 
     private async _blockDeviceImpl(ip: string, gatewayIp: string): Promise<Device> {
-        const device = this.devices.get(ip);
+        let device = this.devices.get(ip) || this._findDeviceByMac(ip);
         if (!device) {
             throw new Error(`Device ${ip} not found`);
         }
         this._assertNoPendingGamingRecoveryConflict([device]);
+
+        // Jika IP perangkat kosong (perangkat offline / rotasi MAC), cari IP aktif via MAC atau profil
+        if (!device.ip) {
+            for (const d of this.devices.values()) {
+                if ((d.mac.toLowerCase() === device.mac.toLowerCase() || (device.profile_id && d.profile_id === device.profile_id)) && d.ip && d.is_online) {
+                    device.ip = d.ip;
+                    device.mac = d.mac;
+                    break;
+                }
+            }
+        }
 
         if (device.is_self) {
             throw new Error(`Cannot block operator host / This PC (${ip})`);
@@ -1541,6 +1615,17 @@ export class DeviceManager extends EventEmitter {
         device.is_online = true;
         this.devices.set(ip, device);
 
+        // Sinkronkan juga perangkat lain di memori yang berbagi profile_id sama
+        if (device.profile_id) {
+            for (const [key, d] of this.devices.entries()) {
+                if (d.profile_id === device.profile_id && d.mac.toLowerCase() !== device.mac.toLowerCase()) {
+                    d.is_blocked = true;
+                    d.speed_limit = 0;
+                    this.devices.set(key, d);
+                }
+            }
+        }
+
         // Simpan status blokir secara persisten di SQLite
         await this.db.setDeviceBlocked(device.mac, true, sessionId, this.currentNetworkId);
         await this.db.setDeviceSpeedLimit(device.mac, 0, this.currentNetworkId);
@@ -1581,8 +1666,28 @@ export class DeviceManager extends EventEmitter {
             // Device exists in DB but not in active memory
             dbDev.is_blocked = false;
             dbDev.speed_limit = 100;
+
+            // Sinkronkan juga perangkat lain di memori yang berbagi profile_id sama
+            if (dbDev.profile_id) {
+                for (const [key, d] of this.devices.entries()) {
+                    if (d.profile_id === dbDev.profile_id) {
+                        if (d.session_id) {
+                            try { await this.python.stopSpoof(d.session_id); } catch {}
+                        }
+                        d.is_blocked = false;
+                        d.is_redirected = false;
+                        d.redirect_url = undefined;
+                        d.speed_limit = 100;
+                        d.session_id = undefined;
+                        this.devices.set(key, d);
+                    }
+                }
+            }
+
             await this.db.setDeviceBlocked(dbDev.mac, false, undefined, this.currentNetworkId);
             await this.db.setDeviceSpeedLimit(dbDev.mac, 100, this.currentNetworkId);
+            this.emit('deviceUpdated', dbDev);
+            this.emit('devicesUpdated', Array.from(this.devices.values()));
             return dbDev;
         }
 
@@ -1600,6 +1705,23 @@ export class DeviceManager extends EventEmitter {
         device.speed_limit = 100;
         device.session_id = undefined;
         this.devices.set(deviceMemKey(device), device);
+
+        // Sinkronkan juga perangkat lain di memori yang berbagi profile_id sama
+        if (device.profile_id) {
+            for (const [key, d] of this.devices.entries()) {
+                if (d.profile_id === device.profile_id && d.mac.toLowerCase() !== device.mac.toLowerCase()) {
+                    if (d.session_id) {
+                        try { await this.python.stopSpoof(d.session_id); } catch {}
+                    }
+                    d.is_blocked = false;
+                    d.is_redirected = false;
+                    d.redirect_url = undefined;
+                    d.speed_limit = 100;
+                    d.session_id = undefined;
+                    this.devices.set(key, d);
+                }
+            }
+        }
 
         // Hapus status blokir dan pulihkan speed limit ke 100% di SQLite
         await this.db.setDeviceBlocked(device.mac, false, undefined, this.currentNetworkId);
@@ -1816,6 +1938,21 @@ export class DeviceManager extends EventEmitter {
             }
             device.is_blocked = false;
             device.speed_limit = 100;
+            if (device.profile_id) {
+                for (const [key, d] of this.devices.entries()) {
+                    if (d.profile_id === device.profile_id && d.mac.toLowerCase() !== device.mac.toLowerCase()) {
+                        if (d.session_id) {
+                            try { await this.python.stopSpoof(d.session_id); } catch {}
+                        }
+                        d.is_blocked = false;
+                        d.is_redirected = false;
+                        d.redirect_url = undefined;
+                        d.speed_limit = 100;
+                        d.session_id = undefined;
+                        this.devices.set(key, d);
+                    }
+                }
+            }
             await this.db.setDeviceBlocked(device.mac, false, undefined, this.currentNetworkId);
             await this.db.setDeviceSpeedLimit(device.mac, 100, this.currentNetworkId);
             await this.db.setDeviceOnlineStatus(device.mac, true, this.currentNetworkId);
@@ -1837,6 +1974,15 @@ export class DeviceManager extends EventEmitter {
             }
             device.is_blocked = true;
             device.speed_limit = 0;
+            if (device.profile_id) {
+                for (const [key, d] of this.devices.entries()) {
+                    if (d.profile_id === device.profile_id && d.mac.toLowerCase() !== device.mac.toLowerCase()) {
+                        d.is_blocked = true;
+                        d.speed_limit = 0;
+                        this.devices.set(key, d);
+                    }
+                }
+            }
             await this.db.setDeviceBlocked(device.mac, true, device.session_id, this.currentNetworkId);
             await this.db.setDeviceSpeedLimit(device.mac, 0, this.currentNetworkId);
             await this.db.setDeviceOnlineStatus(device.mac, true, this.currentNetworkId);
@@ -1859,6 +2005,15 @@ export class DeviceManager extends EventEmitter {
             // Penting: Perangkat TIDAK diblokir total, hanya di-throttle
             device.is_blocked = false;
             device.speed_limit = cleanLimit;
+            if (device.profile_id) {
+                for (const [key, d] of this.devices.entries()) {
+                    if (d.profile_id === device.profile_id && d.mac.toLowerCase() !== device.mac.toLowerCase()) {
+                        d.is_blocked = false;
+                        d.speed_limit = cleanLimit;
+                        this.devices.set(key, d);
+                    }
+                }
+            }
             await this.db.setDeviceBlocked(device.mac, false, device.session_id, this.currentNetworkId);
             await this.db.setDeviceSpeedLimit(device.mac, cleanLimit, this.currentNetworkId);
             await this.db.setDeviceOnlineStatus(device.mac, true, this.currentNetworkId);
@@ -2728,8 +2883,9 @@ export class DeviceManager extends EventEmitter {
     }
 
     private _findDeviceByMac(macKey: string): Device | undefined {
+        const norm = (macKey || '').toLowerCase();
         for (const device of this.devices.values()) {
-            if (device.mac.toLowerCase() === macKey) return device;
+            if (device.mac.toLowerCase() === norm) return device;
         }
         return undefined;
     }

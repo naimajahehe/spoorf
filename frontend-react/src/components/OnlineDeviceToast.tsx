@@ -1,5 +1,5 @@
 import type { FC } from 'react';
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { Wifi, X } from 'lucide-react';
 import { Device } from '../types';
 import { getResolvedDeviceName } from '../lib/deviceSort';
@@ -11,13 +11,16 @@ interface Props {
 }
 
 export const OnlineDeviceToast: FC<Props> = ({ device, onInspect, onDismiss }) => {
+    const onDismissRef = useRef(onDismiss);
+    onDismissRef.current = onDismiss;
+
     // Auto dismiss after 5 seconds
     useEffect(() => {
         const timer = setTimeout(() => {
-            onDismiss(device.mac);
+            onDismissRef.current(device.mac);
         }, 5000);
         return () => clearTimeout(timer);
-    }, [device.mac, onDismiss]);
+    }, [device.mac]);
 
     const deviceName = getResolvedDeviceName(device);
 

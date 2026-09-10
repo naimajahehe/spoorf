@@ -155,6 +155,11 @@ export function sendDesktopNotification(
         tag?: string;
         onClick?: () => void;
         force?: boolean;
+        ip?: string;
+        mac?: string;
+        is_gateway?: boolean;
+        is_self?: boolean;
+        toastType?: 'new_device' | 'reconnected';
     }
 ): Notification | null {
     if (isNotificationMuted()) {
@@ -166,6 +171,25 @@ export function sendDesktopNotification(
         return null;
     }
 
+    // 1. Electron Native Interactive Notification (Windows Toast XML dengan Tombol Aksi)
+    if (window.electronAPI?.showInteractiveNotification) {
+        try {
+            window.electronAPI.showInteractiveNotification({
+                title,
+                body: options.body,
+                ip: options.ip,
+                mac: options.mac,
+                is_gateway: options.is_gateway,
+                is_self: options.is_self,
+                toastType: options.toastType
+            });
+            return null;
+        } catch (e) {
+            console.warn('Failed to send interactive desktop notification via Electron:', e);
+        }
+    }
+
+    // 2. Fallback Standar HTML5 Web Notification API
     if (typeof window === 'undefined' || !('Notification' in window)) {
         return null;
     }

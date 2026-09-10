@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef, useDeferredValue } from 'react';
+import { useState, useEffect, useMemo, useRef, useDeferredValue, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
     Menu,
@@ -96,8 +96,6 @@ function App() {
         isScanning,
         error,
         clearError,
-        autoReblockedEvent,
-        clearAutoReblocked,
         disconnectedDeviceEvent,
         clearDisconnectedDeviceEvent,
         rogueDhcpAlert,
@@ -111,6 +109,8 @@ function App() {
         setSpeedLimit,
         wifiInfo,
         telemetry,
+        subscribeTelemetry,
+        unsubscribeTelemetry,
         checkWifi,
         gatewayStatus,
         gatewayDnsLogs,
@@ -203,6 +203,17 @@ function App() {
     }, [sidebarCollapsed]);
 
     const [selectedInspectorIp, setSelectedInspectorIp] = useState<string | null>(null);
+
+    // On-Demand Telemetry: aktifkan stream hanya saat panel detail dibuka atau di tab gaming / gateway
+    const isTelemetryActive = Boolean(selectedInspectorIp) || activeNav === 'gaming' || activeNav === 'gateway';
+    useEffect(() => {
+        if (isTelemetryActive) {
+            subscribeTelemetry();
+            return () => {
+                unsubscribeTelemetry();
+            };
+        }
+    }, [isTelemetryActive, subscribeTelemetry, unsubscribeTelemetry]);
     const [isEngineReady, setIsEngineReady] = useState<boolean>(false);
     const [redirectModalDevice, setRedirectModalDevice] = useState<Device | null>(null);
     const [activeToasts, setActiveToasts] = useState<ActiveToastItem[]>([]);
@@ -233,6 +244,36 @@ function App() {
     const isInitialScanDoneRef = useRef<boolean>(false);
     // Kunci jaringan terakhir (SSID) untuk mendeteksi pindah jaringan → baseline ulang tracking.
     const lastNetworkKeyRef = useRef<string | null>(null);
+    // Anti-flapping debounce cooldown per device profile/MAC (15s)
+    const lastAlertTimestampRef = useRef<Map<string, number>>(new Map());
+
+    // Deduplicate device list by profile_id / MAC (preferring active online entries & recent timestamps)
+    // Di-hoist ke atas agar aman diakses oleh seluruh hook presence detection tanpa Temporal Dead Zone
+    const dedupedDevices = useMemo(() => {
+        const uniqueMap = new Map<string, Device>();
+        for (const dev of devices) {
+            const key = (dev.profile_id && dev.profile_id !== '') ? dev.profile_id : (dev.mac ? dev.mac.toLowerCase() : dev.ip);
+            const existing = uniqueMap.get(key);
+            if (!existing) {
+                uniqueMap.set(key, dev);
+            } else {
+                // If existing is offline but incoming dev is online, prefer online
+                if (!existing.is_online && dev.is_online) {
+                    uniqueMap.set(key, dev);
+                } else if (existing.is_online && !dev.is_online) {
+                    // Retain online existing
+                } else {
+                    // If same online status, prefer the one with active session, non-default speed limit, or newer last_seen
+                    const existingTime = existing.last_seen ? new Date(existing.last_seen).getTime() : 0;
+                    const devTime = dev.last_seen ? new Date(dev.last_seen).getTime() : 0;
+                    if ((dev.speed_limit !== undefined && dev.speed_limit < 100) || dev.is_blocked || devTime >= existingTime) {
+                        uniqueMap.set(key, dev);
+                    }
+                }
+            }
+        }
+        return Array.from(uniqueMap.values());
+    }, [devices]);
 
     // Synchronize mute state across tabs/windows or custom events
     useEffect(() => {
@@ -537,10 +578,14 @@ function App() {
         }
     }, [selectedInspectorIp, devices]);
 
-    const handleCloseInspector = () => {
+    const handleCloseInspector = useCallback(() => {
         selectedInspectorMacRef.current = null;
         setSelectedInspectorIp(null);
-    };
+    }, []);
+
+    const handleSelectForInspect = useCallback((ip: string) => {
+        setSelectedInspectorIp(prev => (prev === ip ? null : ip));
+    }, []);
 
     const inspectorDevice = useMemo(() => {
         if (!selectedInspectorIp) return null;
@@ -630,11 +675,11 @@ function App() {
 
     // Detect newly connected devices AND reconnected devices on Wi-Fi and trigger actionable Toast + Desktop Notification + History
     useEffect(() => {
-        if (devices.length === 0) return;
+        if (dedupedDevices.length === 0) return;
 
         if (!isInitialScanDoneRef.current) {
             // First load: populate known device online statuses without firing alerts
-            devices.forEach(d => {
+            dedupedDevices.forEach(d => {
                 if (d.mac) {
                     const macLower = d.mac.toLowerCase();
                     const isOnline = Boolean(d.is_online);
@@ -650,8 +695,10 @@ function App() {
 
         const toastsToFire: ToastDeviceItem[] = [];
         const historyToFire: NotificationItem[] = [];
+        const now = Date.now();
+        const PRESENCE_COOLDOWN_MS = 15_000; // 15 detik anti-flapping guard
 
-        devices.forEach(dev => {
+        dedupedDevices.forEach(dev => {
             if (!dev.mac || dev.is_gateway || dev.is_self) return;
             const macLower = dev.mac.toLowerCase();
             const profKey = (dev.profile_id && dev.profile_id.trim() !== '') ? `prof:${dev.profile_id.trim()}` : null;
@@ -713,6 +760,16 @@ function App() {
             } else if (prevStatus === false && isCurrentlyOnline === true) {
                 // Perangkat yang sebelumnya offline kini KEMBALI ONLINE / RECONNECTED!
                 updateStatusRef(true);
+
+                // Anti-Flapping Cooldown Check (15s):
+                const alertKey = profKey || macLower;
+                const lastAlert = lastAlertTimestampRef.current.get(alertKey) || 0;
+                if (now - lastAlert < PRESENCE_COOLDOWN_MS) {
+                    // Masih dalam jendela cooldown anti-flapping (mis. sinyal lemah), abaikan alert berulang
+                    return;
+                }
+                lastAlertTimestampRef.current.set(alertKey, now);
+
                 toastsToFire.push({ device: dev, toastType: 'reconnected' });
                 historyToFire.push({
                     id: `reconnect-${dev.mac}-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
@@ -788,6 +845,11 @@ function App() {
                             body: isReconnected
                                 ? `${devName} [${dev.ip}] baru saja kembali online ke Wi-Fi${rangeText}.`
                                 : `${devName} [${dev.ip}] baru saja terhubung ke Wi-Fi${rangeText}.`,
+                            ip: dev.ip,
+                            mac: dev.mac,
+                            is_gateway: dev.is_gateway,
+                            is_self: dev.is_self,
+                            toastType: item.toastType,
                             onClick: () => {
                                 setSelectedInspectorIp(dev.ip);
                             }
@@ -796,7 +858,7 @@ function App() {
                 });
             }
         }
-    }, [devices, isMuted]);
+    }, [dedupedDevices, isMuted]);
 
     // Surface action errors (such as offline block rejections) as floating Toast Notifications
     useEffect(() => {
@@ -818,53 +880,28 @@ function App() {
         return () => clearTimeout(timer);
     }, [error, clearError]);
 
-    // Record Auto-Reblock event to notification history & security desktop alert
-    useEffect(() => {
-        if (autoReblockedEvent) {
-            const entry: NotificationItem = {
-                id: `reblock-${autoReblockedEvent.mac}-${Date.now()}`,
-                category: 'security',
-                senderName: 'Auto-Reblock',
-                actionText: 'berhasil mengunci target',
-                targetName: autoReblockedEvent.alias || autoReblockedEvent.hostname || autoReblockedEvent.ip,
-                timestamp: new Date(),
-                timeAgo: 'Baru saja',
-                isRead: false,
-                bubbleText: `Target mencoba berganti MAC (${autoReblockedEvent.mac}) di IP ${autoReblockedEvent.ip} dan otomatis diputus kembali.`,
-                type: 'auto_reblock',
-                device: autoReblockedEvent,
-                deviceIp: autoReblockedEvent.ip
-            };
-            setNotificationHistory(prev => [entry, ...prev]);
-
-            // Fire authoritative Security Desktop Notification if enabled and not muted
-            if (!isMuted) {
-                const targetName = autoReblockedEvent.alias && autoReblockedEvent.alias.trim() !== ''
-                    ? autoReblockedEvent.alias.trim()
-                    : (autoReblockedEvent.hostname && autoReblockedEvent.hostname.trim() !== '' ? autoReblockedEvent.hostname : autoReblockedEvent.ip);
-                sendDesktopNotification(
-                    'NetCut Sentinel: Target Terblokir Dicegat!',
-                    {
-                        body: `Target ${targetName} [${autoReblockedEvent.ip}] mencoba masuk kembali ke Wi-Fi dan telah otomatis diputus.`,
-                        onClick: () => {
-                            setSelectedInspectorIp(autoReblockedEvent.ip);
-                        }
-                    }
-                );
-            }
-        }
-    }, [autoReblockedEvent, isMuted]);
-
     // Handle Disconnected Device Toast Notifications (Suppressed if muted, recorded to history)
     useEffect(() => {
         if (disconnectedDeviceEvent) {
             const dev = disconnectedDeviceEvent;
+            // Anti-Self & Anti-Gateway Guard: Gateway router dan laptop operator tidak boleh memicu disconnect toast/history
+            if (!dev || dev.is_gateway || dev.is_self) {
+                clearDisconnectedDeviceEvent();
+                return;
+            }
             const devKey = (dev.mac || dev.ip).toLowerCase();
             if (dev.mac) {
                 const macLower = dev.mac.toLowerCase();
                 deviceOnlineStatusRef.current.set(macLower, false);
                 if (dev.profile_id && dev.profile_id.trim() !== '') {
-                    deviceOnlineStatusRef.current.set(`prof:${dev.profile_id.trim()}`, false);
+                    const profKey = `prof:${dev.profile_id.trim()}`;
+                    // Pilar 3: Hanya set status profil ke false bila TIDAK ADA perangkat online lain dalam profil ini di dedupedDevices
+                    const hasOtherOnlineInProfile = dedupedDevices.some(
+                        d => d.profile_id === dev.profile_id && d.is_online && d.mac?.toLowerCase() !== macLower
+                    );
+                    if (!hasOtherOnlineInProfile) {
+                        deviceOnlineStatusRef.current.set(profKey, false);
+                    }
                 }
             }
 
@@ -900,7 +937,7 @@ function App() {
             }
             clearDisconnectedDeviceEvent();
         }
-    }, [disconnectedDeviceEvent, clearDisconnectedDeviceEvent, isMuted]);
+    }, [disconnectedDeviceEvent, clearDisconnectedDeviceEvent, isMuted, dedupedDevices]);
 
     // Record Rogue DHCP event to notification history
     useEffect(() => {
@@ -932,6 +969,15 @@ function App() {
     const handleClearAllNotifications = () => {
         setNotificationHistory([]);
     };
+
+    const handleDismissToast = useCallback((toastId: string) => {
+        setActiveToasts(prev => prev.filter(t => t.id !== toastId));
+    }, []);
+
+    const handleDismissErrorToast = useCallback((toastId: string) => {
+        setActiveToasts(prev => prev.filter(t => t.id !== toastId));
+        clearError();
+    }, [clearError]);
 
     const gatewayIp = useMemo(() => {
         return gateway?.ip || devices.find(d => d.is_gateway)?.ip || '';
@@ -976,33 +1022,6 @@ function App() {
         window.addEventListener('keydown', handleKeyDown);
         return () => window.removeEventListener('keydown', handleKeyDown);
     }, []);
-
-    // Deduplicate device list by profile_id / MAC (preferring active online entries & recent timestamps)
-    const dedupedDevices = useMemo(() => {
-        const uniqueMap = new Map<string, Device>();
-        for (const dev of devices) {
-            const key = (dev.profile_id && dev.profile_id !== '') ? dev.profile_id : (dev.mac ? dev.mac.toLowerCase() : dev.ip);
-            const existing = uniqueMap.get(key);
-            if (!existing) {
-                uniqueMap.set(key, dev);
-            } else {
-                // If existing is offline but incoming dev is online, prefer online
-                if (!existing.is_online && dev.is_online) {
-                    uniqueMap.set(key, dev);
-                } else if (existing.is_online && !dev.is_online) {
-                    // Retain online existing
-                } else {
-                    // If same online status, prefer the one with active session, non-default speed limit, or newer last_seen
-                    const existingTime = existing.last_seen ? new Date(existing.last_seen).getTime() : 0;
-                    const devTime = dev.last_seen ? new Date(dev.last_seen).getTime() : 0;
-                    if ((dev.speed_limit !== undefined && dev.speed_limit < 100) || dev.is_blocked || devTime >= existingTime) {
-                        uniqueMap.set(key, dev);
-                    }
-                }
-            }
-        }
-        return Array.from(uniqueMap.values());
-    }, [devices]);
 
     const filteredDevices = useMemo(() => {
         const list = dedupedDevices.filter(device => {
@@ -1139,6 +1158,32 @@ function App() {
             setBusyToggleIp(null);
         }
     };
+
+    // Listener untuk aksi interaktif dari notifikasi native Windows (tombol "Putuskan Perangkat" dan "Lihat Detail")
+    useEffect(() => {
+        if (!window.electronAPI?.onNotificationAction) return;
+
+        const unsubscribe = window.electronAPI.onNotificationAction((data) => {
+            if (!data) return;
+            const { action, ip, mac } = data;
+
+            if (action === 'inspect' && ip) {
+                setSelectedInspectorIp(ip);
+            } else if (action === 'block') {
+                const target = devices.find(d =>
+                    (mac && d.mac && d.mac.toLowerCase() === mac.toLowerCase()) ||
+                    (ip && d.ip && d.ip === ip)
+                );
+                if (target) {
+                    handleToggleInternet(target);
+                } else if (ip) {
+                    block(ip, gatewayIp).catch(() => {});
+                }
+            }
+        });
+
+        return unsubscribe;
+    }, [devices, handleToggleInternet, block, gatewayIp]);
 
     // Perhitungan cerdas & konsisten untuk perangkat terpilih
     const selectedDevices = useMemo(() => {
@@ -1310,9 +1355,9 @@ function App() {
             openMobile={mobileMenuOpen}
             onOpenMobileChange={setMobileMenuOpen}
         >
-            <div className="flex flex-col w-full h-screen overflow-hidden bg-[#090a0c] text-zinc-100 antialiased">
+            <div className="flex flex-col w-full h-screen max-h-screen overflow-hidden bg-[#090a0c] text-zinc-100 antialiased">
                 <TitleBar theme={theme} />
-                <div className="flex flex-1 w-full min-h-0 overflow-hidden">
+                <div className="flex flex-1 w-full min-h-0 max-h-[calc(100vh-2rem)] overflow-hidden">
                     {/* Mobile Sidebar Backdrop Overlay */}
                 <AnimatePresence>
                     {mobileMenuOpen && (
@@ -1583,33 +1628,6 @@ function App() {
                             />
                         ) : (
                             <>
-                                {/* Auto-Reblock Toast Banner (PostgreSQL Persistent Trap Event) */}
-                                <AnimatePresence>
-                                    {autoReblockedEvent && (
-                            <motion.div
-                                initial={{ opacity: 0, y: -15, scale: 0.98 }}
-                                animate={{ opacity: 1, y: 0, scale: 1 }}
-                                exit={{ opacity: 0, y: -15, scale: 0.98 }}
-                                className="flex items-center justify-between p-3.5 mb-6 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-300 text-xs shadow-lg"
-                            >
-                                <div className="flex items-center gap-3">
-                                    <Zap size={16} className="text-amber-400 shrink-0" />
-                                    <div>
-                                        <strong className="font-semibold text-white">Auto-Reblock Engaged:</strong> Target{' '}
-                                        <span className="font-mono text-amber-200 font-medium">
-                                            {autoReblockedEvent.hostname || autoReblockedEvent.ip}
-                                        </span>{' '}
-                                        ({autoReblockedEvent.mac}) reconnected to LAN at{' '}
-                                        <span className="font-mono text-amber-200 font-medium">{autoReblockedEvent.ip}</span> and was immediately cut off!
-                                    </div>
-                                </div>
-                                <button onClick={clearAutoReblocked} className="p-1 rounded hover:bg-amber-500/20 text-amber-400 hover:text-white transition-colors">
-                                    <X size={15} />
-                                </button>
-                            </motion.div>
-                        )}
-                    </AnimatePresence>
-
                     {/* Rogue DHCP Server Security Alert Banner */}
                     <AnimatePresence>
                         {rogueDhcpAlert && (
@@ -2069,7 +2087,7 @@ function App() {
                                                 selectedIps={selectedIps}
                                                 isSelectMode={isSelectMode}
                                                 activeInspectorIp={selectedInspectorIp || undefined}
-                                                onSelectForInspect={(ip) => setSelectedInspectorIp(prev => (prev === ip ? null : ip))}
+                                                onSelectForInspect={handleSelectForInspect}
                                                 onToggleSelect={handleToggleSelect}
                                                 onToggleSelectAll={handleToggleSelectAll}
                                                 onToggleInternet={handleToggleInternet}
@@ -2210,21 +2228,18 @@ function App() {
                                     <ActionErrorToast
                                         message={toast.message || 'Terjadi kesalahan sistem'}
                                         title={toast.title}
-                                        onDismiss={() => {
-                                            setActiveToasts(prev => prev.filter(t => t.id !== toast.id));
-                                            clearError();
-                                        }}
+                                        onDismiss={() => handleDismissErrorToast(toast.id)}
                                     />
                                 ) : toast.type === 'disconnected' && toast.device ? (
                                     <DisconnectedDeviceToast
                                         device={toast.device}
-                                        onDismiss={() => setActiveToasts(prev => prev.filter(t => t.id !== toast.id))}
+                                        onDismiss={() => handleDismissToast(toast.id)}
                                     />
                                 ) : toast.type === 'reconnected' && toast.device ? (
                                     <OnlineDeviceToast
                                         device={toast.device}
                                         onInspect={(dev) => setSelectedInspectorIp(dev.ip)}
-                                        onDismiss={() => setActiveToasts(prev => prev.filter(t => t.id !== toast.id))}
+                                        onDismiss={() => handleDismissToast(toast.id)}
                                     />
                                 ) : toast.device ? (
                                     <NewDeviceToast
@@ -2232,7 +2247,7 @@ function App() {
                                         toastType="new_device"
                                         onBlock={handleToggleInternet}
                                         onInspect={(dev) => setSelectedInspectorIp(dev.ip)}
-                                        onDismiss={() => setActiveToasts(prev => prev.filter(t => t.id !== toast.id))}
+                                        onDismiss={() => handleDismissToast(toast.id)}
                                     />
                                 ) : null}
                             </motion.div>

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, Menu, Tray, dialog, shell, nativeTheme } from 'electron';
+import { app, BrowserWindow, ipcMain, Menu, Tray, dialog, shell, nativeTheme, Notification } from 'electron';
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
@@ -106,6 +106,34 @@ app.on('render-process-gone', (e, webContents, details) => {
     logElectron(`⚠️ [RENDER_PROCESS_GONE] Renderer process exited: reason=${details.reason}, code=${details.exitCode}`);
 });
 
+// Register custom protocol 'spoorf://' for interactive notification action buttons
+if (process.defaultApp) {
+    if (process.argv.length >= 2) {
+        app.setAsDefaultProtocolClient('spoorf', process.execPath, [path.resolve(process.argv[1])]);
+    }
+} else {
+    app.setAsDefaultProtocolClient('spoorf');
+}
+
+function handleProtocolUrl(urlStr: string) {
+    logElectron(`[Protocol] Received protocol URL: ${urlStr}`);
+    try {
+        const raw = urlStr.replace(/^spoorf:\/\/?/, '');
+        const params = new URLSearchParams(raw);
+        const action = params.get('action');
+        const ip = params.get('ip') || '';
+        const mac = params.get('mac') || '';
+
+        if (mainWindow) {
+            if (mainWindow.isMinimized()) mainWindow.restore();
+            mainWindow.focus();
+            mainWindow.webContents.send('notification-action', { action, ip, mac });
+        }
+    } catch (err) {
+        logElectron(`[Protocol] Failed to parse protocol URL: ${err}`);
+    }
+}
+
 // 1. Single Instance Lock
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 if (!gotSingleInstanceLock) {
@@ -113,12 +141,20 @@ if (!gotSingleInstanceLock) {
     app.quit();
 } else {
     logElectron('[Supervisor] Single instance lock acquired successfully.');
-    app.on('second-instance', () => {
-        logElectron('[Supervisor] Second instance opened. Focusing existing main window.');
-        if (mainWindow) {
+    app.on('second-instance', (_event, commandLine) => {
+        logElectron('[Supervisor] Second instance opened. Checking arguments...');
+        const protocolUrl = Array.isArray(commandLine) ? commandLine.find(arg => arg.startsWith('spoorf://')) : null;
+        if (protocolUrl) {
+            handleProtocolUrl(protocolUrl);
+        } else if (mainWindow) {
             if (mainWindow.isMinimized()) mainWindow.restore();
             mainWindow.focus();
         }
+    });
+
+    app.on('open-url', (event, url) => {
+        event.preventDefault();
+        handleProtocolUrl(url);
     });
 }
 
@@ -531,6 +567,74 @@ ipcMain.on('set-titlebar-theme', (_event, theme: 'dark' | 'light') => {
 ipcMain.handle('get-api-token', () => SENTINEL_API_TOKEN);
 ipcMain.on('get-api-token-sync', (event) => {
     event.returnValue = SENTINEL_API_TOKEN;
+});
+
+// Native Windows Interactive Notifications with Action Buttons (SPEC-006 & Windows Toast XML)
+ipcMain.on('show-interactive-notification', (_event, payload) => {
+    if (!payload) return;
+    const { title, body, ip, mac, is_gateway, is_self } = payload;
+
+    if (process.platform === 'win32' && Notification.isSupported()) {
+        const escapeXml = (str: string) => String(str || '')
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&apos;');
+
+        const safeTitle = escapeXml(title || 'NetCut Sentinel');
+        const safeBody = escapeXml(body || '');
+        const safeIp = escapeXml(ip || '');
+        const safeMac = escapeXml(mac || '');
+
+        let actionsXml = '';
+        // INVARIAN KEAMANAN: Gateway router dan laptop operator TIDAK PERNAH boleh memiliki tombol cut-off!
+        if (!is_gateway && !is_self && (safeIp || safeMac)) {
+            actionsXml += `<action content="⚡ Putuskan Perangkat" arguments="spoorf://action=block&amp;ip=${safeIp}&amp;mac=${safeMac}" activationType="protocol"/>`;
+        }
+        if (safeIp || safeMac) {
+            actionsXml += `<action content="🔍 Lihat Detail" arguments="spoorf://action=inspect&amp;ip=${safeIp}&amp;mac=${safeMac}" activationType="protocol"/>`;
+        }
+
+        const toastXml = `
+<toast launch="spoorf://action=inspect&amp;ip=${safeIp}&amp;mac=${safeMac}" activationType="protocol">
+  <visual>
+    <binding template="ToastGeneric">
+      <text>${safeTitle}</text>
+      <text>${safeBody}</text>
+    </binding>
+  </visual>
+  ${actionsXml ? `<actions>${actionsXml}</actions>` : ''}
+</toast>`;
+
+        try {
+            const notif = new Notification({ toastXml });
+            notif.show();
+            return;
+        } catch (err) {
+            logElectron(`[Notification] Failed to show toastXml notification: ${err}`);
+        }
+    }
+
+    // Fallback standard notification jika toastXml tidak didukung atau non-Windows
+    try {
+        const notif = new Notification({
+            title: title || 'NetCut Sentinel',
+            body: body || ''
+        });
+        notif.on('click', () => {
+            if (mainWindow) {
+                if (mainWindow.isMinimized()) mainWindow.restore();
+                mainWindow.focus();
+                if (ip) {
+                    mainWindow.webContents.send('notification-action', { action: 'inspect', ip, mac });
+                }
+            }
+        });
+        notif.show();
+    } catch (err) {
+        logElectron(`[Notification] Fallback notification failed: ${err}`);
+    }
 });
 
 // App Lifecycle

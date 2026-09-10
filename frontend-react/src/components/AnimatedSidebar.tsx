@@ -292,7 +292,7 @@ export function AnimatedSidebarProvider({
           ...style,
         }}
         className={cn(
-          "group/sidebar-wrapper flex min-h-svh w-full min-w-0",
+          "group/sidebar-wrapper flex h-full max-h-screen w-full min-w-0 overflow-hidden",
           className,
         )}
       >
@@ -746,10 +746,9 @@ export const AnimatedSidebar = forwardRef<HTMLElement, AnimatedSidebarProps>(
         </AnimatedSidebarContent>
 
         {/* Footer User Profile Card (Seamless, no borders, with Settings & Docs in Profile Menu) */}
-        {/* Footer User Profile Card (Seamless, no borders, with Settings & Docs in Profile Menu) */}
         <AnimatedSidebarFooter className={cn(
-          "mt-auto sticky bottom-0 bg-[#090a0c] shrink-0 transition-all flex flex-col relative",
-          collapsed ? "p-2 items-center" : "p-3"
+          "mt-auto bg-[#090a0c] shrink-0 transition-all flex flex-col relative",
+          collapsed ? "p-2 items-center pb-3" : "p-3 pb-3"
         )}>
           {/* Profile Trigger Card (No borders, completely seamless) */}
           <div
@@ -927,7 +926,7 @@ export const AnimatedSidebar = forwardRef<HTMLElement, AnimatedSidebarProps>(
           }
           style={style}
           className={cn(
-            "group/sidebar sticky top-0 left-0 hidden h-screen shrink-0 md:block will-change-[width] bg-[#090a0c] z-30 self-start",
+            "group/sidebar relative hidden h-full max-h-full min-h-0 shrink-0 md:flex md:flex-col will-change-[width] bg-[#090a0c] z-30",
             "peer",
             side === "right" && "order-last",
             className,
@@ -943,7 +942,7 @@ export const AnimatedSidebar = forwardRef<HTMLElement, AnimatedSidebarProps>(
               context.reduce ? REDUCED_TRANSITION : PANEL_TRANSITION
             }
             className={cn(
-              "flex h-screen w-full flex-col justify-between overflow-hidden bg-[#090a0c]",
+              "flex flex-1 min-h-0 max-h-full w-full flex-col overflow-hidden bg-[#090a0c]",
               collapsible === "offcanvas" && "w-[var(--sidebar-width)]",
               variant === "floating" &&
                 "m-2 h-[calc(100svh-1rem)] rounded-2xl border border-border shadow-sm",
@@ -1146,7 +1145,7 @@ export const AnimatedSidebarFooter = forwardRef<
       ref={forwardedRef}
       data-slot="sidebar-footer"
       className={cn(
-        "flex shrink-0 flex-col gap-2 pb-[max(0.75rem,env(safe-area-inset-bottom))] transition-all",
+        "flex shrink-0 flex-col gap-2 transition-all",
         collapsed ? "p-2 items-center" : "p-3",
         className,
       )}

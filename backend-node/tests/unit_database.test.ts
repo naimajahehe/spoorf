@@ -1861,4 +1861,317 @@ export async function runDatabaseTests() {
         await db.close();
         console.log('  ✓ ULTRAREVIEW #6: backfill multi-profil menyembuhkan tiap profil dari hostname miliknya sendiri');
     }
+
+    // Test: deleteDevice with networkId cleans up orphan device_profiles
+    {
+        const { DatabaseService } = await import('../src/services/database');
+        const db = new DatabaseService(':memory:');
+        await db.init();
+        const dev: Device = {
+            ip: '192.168.1.50',
+            mac: '11:22:33:44:55:66',
+            hostname: 'Phone-Test',
+            vendor: 'Samsung',
+            device_type: 'Mobile',
+            os: 'Android',
+            rtt_ms: 5,
+            open_ports: [],
+            services: [],
+            is_blocked: false,
+            is_online: true,
+            is_gateway: false
+        };
+        await db.syncScanResults([dev], 'net_test');
+        await db.setDeviceBlocked('11:22:33:44:55:66', true, undefined, 'net_test');
+        const beforeProf = (db as any).db.prepare(`SELECT count(*) as count FROM device_profiles`).get() as any;
+        assert.ok(beforeProf.count >= 1, 'Profile must exist after setDeviceBlocked');
+
+        // Delete device with networkId
+        await db.deleteDevice('11:22:33:44:55:66', 'net_test');
+
+        const afterDev = await db.getDeviceByMac('11:22:33:44:55:66', 'net_test');
+        assert.strictEqual(afterDev, null, 'Device must be deleted from devices table');
+
+        const afterProf = (db as any).db.prepare(`SELECT count(*) as count FROM device_profiles`).get() as any;
+        assert.strictEqual(afterProf.count, 0, 'Orphaned profile must be cleaned up from device_profiles');
+        await db.close();
+        console.log('  ✓ deleteDevice with networkId cleans up orphaned device_profiles');
+    }
+
+    // Test: Unblocking a device clears is_blocked and speed_limit across all historical/linked MAC entries for that profile in that network
+    {
+        const { DatabaseService } = await import('../src/services/database');
+        const db = new DatabaseService(':memory:');
+        await db.init();
+
+        const devA: Device = {
+            ip: '192.168.1.101',
+            mac: '26:b8:f1:00:00:01',
+            hostname: 'A07-milik-Virgiawan',
+            vendor: 'Samsung',
+            device_type: 'Mobile',
+            os: 'Android',
+            rtt_ms: 5,
+            open_ports: [],
+            services: [],
+            is_blocked: false,
+            is_online: true,
+            is_gateway: false,
+            dhcp_fingerprint: '1,3,6,15,26,28,51,58,59,43',
+            dhcp_vendor_class: 'android-dhcp-14',
+            dhcp_client_id: 'android-virgiawan-client-id'
+        };
+
+        // 1. Sync device A
+        await db.syncScanResults([devA], 'net_test');
+        // 2. Block device A
+        await db.setDeviceBlocked(devA.mac, true, 'session_a', 'net_test');
+
+        const storedA = await db.getDeviceByMac(devA.mac, 'net_test');
+        assert.ok(storedA);
+        assert.strictEqual(storedA.is_blocked, true);
+        const pId = storedA.profile_id;
+        assert.ok(pId, 'Profile ID must be assigned');
+
+        // 3. Device rotates MAC to devB, online with same profile fingerprint
+        const devB: Device = {
+            ...devA,
+            ip: '192.168.1.102',
+            mac: '26:b8:f1:00:00:02',
+            is_blocked: false
+        };
+        const syncB = await db.syncScanResults([devB], 'net_test');
+        // Because devA was blocked, devB is auto-reblocked
+        assert.strictEqual(syncB.autoReblockTargets.length, 1);
+        assert.strictEqual(syncB.autoReblockTargets[0].mac, devB.mac);
+        await db.setDeviceBlocked(devB.mac, true, 'session_b', 'net_test');
+
+        // Verify both devA and devB are in DB and marked blocked
+        const inDbA = (db as any).db.prepare('SELECT is_blocked, speed_limit FROM devices WHERE mac = ?').get(devA.mac);
+        const inDbB = (db as any).db.prepare('SELECT is_blocked, speed_limit FROM devices WHERE mac = ?').get(devB.mac);
+        assert.strictEqual(inDbA.is_blocked, 1);
+        assert.strictEqual(inDbB.is_blocked, 1);
+
+        // 4. User unblocks devB (Pulihkan Akses)
+        await db.setDeviceBlocked(devB.mac, false, undefined, 'net_test');
+
+        // 5. Assert: BOTH devA and devB must have is_blocked = 0 and speed_limit = 100
+        const afterUnblockA = (db as any).db.prepare('SELECT is_blocked, speed_limit, session_id FROM devices WHERE mac = ?').get(devA.mac);
+        const afterUnblockB = (db as any).db.prepare('SELECT is_blocked, speed_limit, session_id FROM devices WHERE mac = ?').get(devB.mac);
+        assert.strictEqual(afterUnblockA.is_blocked, 0, 'Historical MAC must have is_blocked cleared');
+        assert.strictEqual(afterUnblockA.speed_limit, 100, 'Historical MAC must have speed_limit restored to 100');
+        assert.strictEqual(afterUnblockA.session_id, null, 'Historical MAC must have session_id cleared');
+        assert.strictEqual(afterUnblockB.is_blocked, 0, 'Active MAC must have is_blocked cleared');
+        assert.strictEqual(afterUnblockB.speed_limit, 100, 'Active MAC must have speed_limit restored to 100');
+
+        // 6. Next scan cycle with devB or rotated devC must NOT trigger auto-reblock
+        const devC: Device = {
+            ...devA,
+            ip: '192.168.1.103',
+            mac: '26:b8:f1:00:00:03',
+            is_blocked: false
+        };
+        const syncC = await db.syncScanResults([devC], 'net_test');
+        assert.strictEqual(syncC.autoReblockTargets.length, 0, 'Must NOT auto-reblock after profile unblock');
+
+        // 7. Check hasBlockedIdentityMatch returns false
+        const identityMatch = db.hasBlockedIdentityMatch({
+            client_id: devA.dhcp_client_id,
+            hostname: devA.hostname,
+            dhcp_fingerprint: devA.dhcp_fingerprint,
+            vendor_class: devA.dhcp_vendor_class
+        }, 'net_test');
+        assert.strictEqual(identityMatch, false, 'hasBlockedIdentityMatch must return false after profile unblock');
+
+        await db.close();
+        console.log('  ✓ unblocking device clears is_blocked across all historical profile MACs and prevents auto-reblock');
+    }
+
+    // Test: Continuity fusing auto-links randomized MAC with generic fingerprint (score >= 60%) to existing profile
+    {
+        const { DatabaseService } = await import('../src/services/database');
+        const db = new DatabaseService(':memory:');
+        await db.init();
+
+        // 1. Initial device with personalized alias and generic Android DHCP fingerprint
+        const phoneA: Device = {
+            ip: '192.168.1.50',
+            mac: '2a:11:22:33:44:55',
+            hostname: 'Galaxy-A07',
+            vendor: 'Samsung',
+            device_type: 'Mobile',
+            os: 'Android',
+            rtt_ms: 5,
+            open_ports: [],
+            services: [],
+            is_randomized_mac: true,
+            is_blocked: false,
+            is_online: true,
+            is_gateway: false,
+            dhcp_fingerprint: '1,3,6,15,26,28,51,58,59,43',
+            dhcp_vendor_class: 'android-dhcp-16',
+            dhcp_client_id: 'random-client-id-1'
+        };
+
+        await db.syncScanResults([phoneA], 'net_test');
+        await db.setDeviceBlocked(phoneA.mac, true, 'sess_phoneA', 'net_test');
+
+        const storedPhoneA = await db.getDeviceByMac(phoneA.mac, 'net_test');
+        assert.ok(storedPhoneA);
+        assert.strictEqual(storedPhoneA.is_blocked, true);
+        const originalProfileId = storedPhoneA.profile_id;
+        assert.ok(originalProfileId);
+
+        // 2. Phone disconnects (simulated by scan with empty list or next scan where phoneA is offline)
+        // Mark phoneA offline with recent last_seen
+        await db.setDeviceOnlineStatus(phoneA.mac, false, 'net_test');
+
+        // 3. Phone reconnects with a NEW RANDOMIZED MAC (different DUID, no hostname sent)
+        const phoneB: Device = {
+            ip: '192.168.1.51',
+            mac: '36:aa:bb:cc:dd:ee', // Different randomized MAC
+            hostname: '', // Android sends empty hostname on reconnect
+            vendor: 'Samsung',
+            device_type: 'Mobile',
+            os: 'Android',
+            rtt_ms: 5,
+            open_ports: [],
+            services: [],
+            is_randomized_mac: true,
+            is_blocked: false,
+            is_online: true,
+            is_gateway: false,
+            dhcp_fingerprint: '1,3,6,15,26,28,51,58,59,43', // Same Android PRL
+            dhcp_vendor_class: 'android-dhcp-16', // Same vendor class
+            dhcp_client_id: 'random-client-id-2' // Different randomized DUID
+        };
+
+        const syncResult = await db.syncScanResults([phoneB], 'net_test');
+
+        // Assert: Phone B should be CONTINUITY FUSED to originalProfileId and auto-reblocked!
+        assert.strictEqual(syncResult.autoReblockTargets.length, 1, 'Phone B must be auto-reblocked via continuity fusing');
+        assert.strictEqual(syncResult.autoReblockTargets[0].mac, phoneB.mac);
+
+        const storedPhoneB = await db.getDeviceByMac(phoneB.mac, 'net_test');
+        assert.ok(storedPhoneB);
+        assert.strictEqual(storedPhoneB.profile_id, originalProfileId, 'Phone B must inherit the original profile_id');
+        assert.strictEqual(storedPhoneB.is_blocked, true, 'Phone B must be marked is_blocked');
+
+        // Assert: Phone A must now be marked is_archived = 1
+        const archivedPhoneA = (db as any).db.prepare('SELECT is_archived FROM devices WHERE mac = ?').get(phoneA.mac);
+        assert.strictEqual(archivedPhoneA.is_archived, 1, 'Superceded Phone A MAC must be archived');
+
+        await db.close();
+        console.log('  ✓ continuity fusing links Android randomized MAC (score >= 60%) to existing profile');
+    }
+
+    // Test: pruneStaleRandomizedMacs cleans up archived/stale randomized MACs while protecting personal aliases, gateway, and self
+    {
+        const { DatabaseService } = await import('../src/services/database');
+        const db = new DatabaseService(':memory:');
+        await db.init();
+
+        const raw = (db as any).db;
+        raw.prepare("INSERT INTO networks (id, ssid, gateway_ip, gateway_mac) VALUES ('net_test', 'Test', '192.168.1.1', 'aa:bb:cc:dd:ee:ff')").run();
+        // Insert a variety of device records to test pruning safety rules
+        raw.prepare(`
+            INSERT INTO devices (network_id, mac, ip, hostname, alias, is_randomized_mac, is_archived, is_online, is_self, is_gateway, last_seen)
+            VALUES 
+                ('net_test', '26:00:00:00:00:01', '', 'Unknown', 'Target Device', 1, 1, 0, 0, 0, datetime('now', 'localtime', '-3 hours')),
+                ('net_test', '26:00:00:00:00:02', '', 'Unknown', '', 1, 0, 0, 0, 0, datetime('now', 'localtime', '-3 days')),
+                ('net_test', '26:00:00:00:00:03', '192.168.1.10', 'Laptop Ibu', 'Laptop Pribadi', 1, 1, 0, 0, 0, datetime('now', 'localtime', '-5 days')),
+                ('net_test', '26:00:00:00:00:04', '192.168.1.1', 'Gateway', '', 1, 1, 0, 0, 1, datetime('now', 'localtime', '-5 days')),
+                ('net_test', '26:00:00:00:00:05', '192.168.1.2', 'My PC', '', 1, 1, 0, 1, 0, datetime('now', 'localtime', '-5 days')),
+                ('net_test', '00:11:22:33:44:55', '', 'Real Hardware', '', 0, 1, 0, 0, 0, datetime('now', 'localtime', '-5 days'))
+        `).run();
+
+        // Insert an orphan 'Target Device' profile
+        raw.prepare(`
+            INSERT INTO device_profiles (id, alias, hostname, updated_at)
+            VALUES ('prof_orphan_123', 'Target Device', 'Unknown', datetime('now', 'localtime'))
+        `).run();
+
+        const pruneResult = db.pruneStaleRandomizedMacs(2);
+
+        // 1. Archived randomized MAC older than 1h (26:..:01) and stale randomized MAC older than 2d (26:..:02) must be deleted
+        assert.strictEqual(pruneResult.deletedDevices, 2, 'Must delete exactly the 2 eligible stale randomized devices');
+        assert.strictEqual(pruneResult.deletedProfiles, 1, 'Must delete the 1 orphan Target Device profile');
+
+        // 2. Verify protected records are STILL PRESENT in database
+        const remaining = raw.prepare('SELECT mac, alias, is_gateway, is_self FROM devices').all();
+        const remainingMacs = remaining.map((r: any) => r.mac);
+        assert.ok(remainingMacs.includes('26:00:00:00:00:03'), 'Personal alias device must NOT be pruned');
+        assert.ok(remainingMacs.includes('26:00:00:00:00:04'), 'Gateway router must NOT be pruned');
+        assert.ok(remainingMacs.includes('26:00:00:00:00:05'), 'Controller host (is_self) must NOT be pruned');
+        assert.ok(remainingMacs.includes('00:11:22:33:44:55'), 'Physical non-randomized hardware MAC must NOT be pruned');
+
+        await db.close();
+        console.log('  ✓ pruneStaleRandomizedMacs safely cleans archived and stale randomized MACs without touching protected hosts');
+    }
+
+    // Test: Continuity fusing succeeds even when an un-scanned historical MAC was lingering as is_online
+    {
+        const { DatabaseService } = await import('../src/services/database');
+        const db = new DatabaseService(':memory:');
+        await db.init();
+
+        const raw = (db as any).db;
+        raw.prepare("INSERT INTO networks (id, ssid, gateway_ip, gateway_mac) VALUES ('net_test', 'Test', '192.168.1.1', 'aa:bb:cc:dd:ee:ff')").run();
+
+        // 1. Profil target terdaftar
+        raw.prepare(`
+            INSERT INTO device_profiles (id, alias, hostname, dhcp_fingerprint, dhcp_vendor_class, linked_macs, updated_at)
+            VALUES ('prof_target_hanif', 'Galaxy A55', 'Galaxy-A55', 'Android OS Signature (android-dhcp-16)', 'android-dhcp-16', '["26:00:00:00:00:01"]', datetime('now', 'localtime'))
+        `).run();
+
+        // 2. MAC lama (Phone A) tercatat di database dengan is_online = 1 (mis. dari event DHCP atau belum lewat grace period)
+        raw.prepare(`
+            INSERT INTO devices (network_id, mac, ip, hostname, alias, profile_id, is_randomized_mac, is_blocked, is_online, dhcp_fingerprint, dhcp_vendor_class, last_seen)
+            VALUES ('net_test', '26:00:00:00:00:01', '192.168.1.254', 'Galaxy-A55', 'Galaxy A55', 'prof_target_hanif', 1, 1, 1, 'Android OS Signature (android-dhcp-16)', 'android-dhcp-16', datetime('now', 'localtime', '-1 minute'))
+        `).run();
+
+        // 3. Scan fisik Layer 2 ARP menangkap MAC baru (Phone B) di IP fisik sebenarnya (192.168.1.2)
+        // Phone A TIDAK ada di hasil scan fisik ini (karena sudah diskonek / ganti MAC)
+        const phoneB: any = {
+            ip: '192.168.1.2',
+            mac: '26:00:00:00:00:02',
+            hostname: 'Galaxy-A55',
+            vendor: 'Samsung',
+            device_type: 'Mobile',
+            os: 'Android',
+            rtt_ms: 5,
+            open_ports: [],
+            services: [],
+            is_blocked: false,
+            is_online: true,
+            is_gateway: false,
+            is_self: false,
+            is_randomized_mac: true,
+            dhcp_fingerprint: 'Android OS Signature (android-dhcp-16)',
+            dhcp_vendor_class: 'android-dhcp-16',
+            network_id: 'net_test'
+        };
+
+        const syncResult = await db.syncScanResults([phoneB], 'net_test');
+
+        // Assert: Phone B harus berhasil difusikan ke prof_target_hanif tanpa terblokir oleh residu Phone A
+        assert.strictEqual(syncResult.autoReblockTargets.length, 1, 'Phone B must be auto-reblocked via continuity fusing');
+        assert.strictEqual(syncResult.autoReblockTargets[0].mac, phoneB.mac);
+
+        const storedPhoneB = await db.getDeviceByMac(phoneB.mac, 'net_test');
+        assert.ok(storedPhoneB);
+        assert.strictEqual(storedPhoneB.profile_id, 'prof_target_hanif', 'Phone B must inherit the target profile_id');
+        assert.strictEqual(storedPhoneB.ip, '192.168.1.2', 'Phone B must be at physical IP 192.168.1.2');
+
+        // Phone A harus diarsipkan dan IP lama 192.168.1.254 harus dilepas (ip = '')
+        const archivedPhoneA = raw.prepare('SELECT is_archived, is_online, ip, last_ip FROM devices WHERE mac = ?').get('26:00:00:00:00:01');
+        assert.strictEqual(archivedPhoneA.is_archived, 1, 'Historical MAC must be archived');
+        assert.strictEqual(archivedPhoneA.is_online, 0, 'Historical MAC must be marked offline');
+        assert.strictEqual(archivedPhoneA.ip, '', 'Historical MAC must have empty IP to prevent ghost IP conflicts');
+        assert.strictEqual(archivedPhoneA.last_ip, '192.168.1.254', 'Historical IP preserved in last_ip');
+
+        await db.close();
+        console.log('  ✓ Continuity fusing succeeds and disassociates stale IP even when old un-scanned MAC was marked online');
+    }
 }
+

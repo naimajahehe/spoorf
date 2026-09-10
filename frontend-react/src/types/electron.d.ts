@@ -19,6 +19,16 @@ declare global {
         isWindowMinimized?: () => boolean;
         restartEngine?: () => void;
         setTitleBarTheme?: (theme: 'dark' | 'light') => void;
+        showInteractiveNotification?: (options: {
+            title: string;
+            body: string;
+            ip?: string;
+            mac?: string;
+            is_gateway?: boolean;
+            is_self?: boolean;
+            toastType?: 'new_device' | 'reconnected';
+        }) => void;
+        onNotificationAction?: (callback: (data: { action: 'block' | 'inspect'; ip?: string; mac?: string }) => void) => () => void;
     }
 
     interface Window {

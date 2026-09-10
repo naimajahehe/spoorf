@@ -2561,5 +2561,101 @@ export async function runDeviceManagerTests() {
         console.log('  ✓ TAHAP-0a: resolveActivePrefix memakai netmask OS yang benar');
     }
 
+    // Test: Pre-flight auto-migration via profile_id when MAC rotated
+    {
+        let spoofedIp = '';
+        let spoofedMac = '';
+        const python: any = {
+            on: () => {},
+            pulseLiveness: async (targets: any[]) => {
+                const res: Record<string, any> = {};
+                for (const t of targets) {
+                    // IP lama (192.168.1.50) mati; IP baru (192.168.1.60) hidup
+                    res[t.ip] = { is_alive: t.ip === '192.168.1.60' };
+                }
+                return res;
+            },
+            startSpoof: async (ip: string, mac: string) => {
+                spoofedIp = ip;
+                spoofedMac = mac;
+                return `${ip}_session123`;
+            },
+            stopSpoof: async () => {}
+        };
+        const db: any = {
+            getDeviceByMac: async () => undefined,
+            updateDeviceIp: async () => {},
+            setDeviceBlocked: async () => {},
+            setDeviceSpeedLimit: async () => {},
+            setDeviceOnlineStatus: async () => {}
+        };
+        const manager = new DeviceManager(python, db);
+        const gw: Device = {
+            ip: '192.168.1.1', mac: '00:11:22:33:44:55', hostname: 'Gateway',
+            vendor: 'Router', device_type: 'Router', os: 'RouterOS', rtt_ms: 1,
+            open_ports: [], services: [], is_blocked: false, is_online: true, is_gateway: true
+        };
+        // Perangkat 1: Kartu lama di UI (IP 192.168.1.50, MAC aa:11:22:33:44:55, profile prof_1)
+        const oldCard: Device = {
+            ip: '192.168.1.50', mac: 'aa:11:22:33:44:55', profile_id: 'prof_1', hostname: 'A55-Phone',
+            vendor: 'Samsung', device_type: 'Mobile', os: 'Android', rtt_ms: 5,
+            open_ports: [], services: [], is_blocked: false, is_online: true, is_gateway: false
+        };
+        // Perangkat 2: Rotasi MAC baru yang online di IP 192.168.1.60 dengan profil sama
+        const newCard: Device = {
+            ip: '192.168.1.60', mac: 'bb:99:88:77:66:55', profile_id: 'prof_1', hostname: 'A55-Phone',
+            vendor: 'Samsung', device_type: 'Mobile', os: 'Android', rtt_ms: 5,
+            open_ports: [], services: [], is_blocked: false, is_online: true, is_gateway: false
+        };
+        (manager as any).devices.set('192.168.1.1', gw);
+        (manager as any).devices.set('192.168.1.50', oldCard);
+        (manager as any).devices.set('192.168.1.60', newCard);
+
+        // Eksekusi blockDevice pada kartu lama (192.168.1.50)
+        const blocked = await manager.blockDevice('192.168.1.50', '192.168.1.1');
+
+        assert.strictEqual(spoofedIp, '192.168.1.60', 'Spoof target harus auto-migrate ke IP baru');
+        assert.strictEqual(spoofedMac, 'bb:99:88:77:66:55', 'Spoof target harus auto-migrate ke MAC baru');
+        assert.strictEqual(blocked.ip, '192.168.1.60', 'Device yang diblokir harus memiliki IP aktif');
+        console.log('  ✓ Pre-Flight Auto-Migration: Target berpindah IP/MAC dalam profil yang sama sebelum spoof');
+    }
+
+    // Optimization A Test: _runRetentionSweep triggers pruneStaleRandomizedMacs and checkpointWal
+    {
+        const python: any = new EventEmitter();
+        let pruneCalled = false;
+        let checkpointWalCalled = false;
+        let archiveCalled = false;
+
+        const db: any = {
+            archiveStaleDevices: async (days: number) => {
+                archiveCalled = true;
+                return 0;
+            },
+            pruneStaleRandomizedMacs: (days: number) => {
+                pruneCalled = true;
+                return { deletedDevices: 3, deletedProfiles: 1 };
+            },
+            checkpointWal: () => {
+                checkpointWalCalled = true;
+            },
+            getAllDevices: async () => [
+                { mac: '00:11:22:33:44:55', ip: '192.168.1.1', is_online: true }
+            ]
+        };
+
+        const manager = new DeviceManager(python, db);
+        (manager as any).devices.set('192.168.1.1', { mac: '00:11:22:33:44:55', ip: '192.168.1.1', is_online: true });
+        (manager as any).devices.set('192.168.1.99', { mac: '26:00:00:00:00:99', ip: '192.168.1.99', is_online: false });
+
+        await (manager as any)._runRetentionSweep();
+
+        assert.strictEqual(archiveCalled, true, 'archiveStaleDevices must be invoked');
+        assert.strictEqual(pruneCalled, true, 'pruneStaleRandomizedMacs must be invoked');
+        assert.strictEqual(checkpointWalCalled, true, 'checkpointWal must be invoked');
+        assert.strictEqual((manager as any).devices.has('192.168.1.99'), false, 'Pruned stale device must be evicted from memory');
+        assert.strictEqual((manager as any).devices.has('192.168.1.1'), true, 'Active device must remain in memory');
+        console.log('  ✓ Optimization A: _runRetentionSweep executes pruneStaleRandomizedMacs, checkpointWal, and memory eviction');
+    }
 }
 

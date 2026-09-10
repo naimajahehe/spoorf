@@ -46,5 +46,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
         };
     },
     restartEngine: () => ipcRenderer.send('engine-restart'),
-    setTitleBarTheme: (theme: 'dark' | 'light') => ipcRenderer.send('set-titlebar-theme', theme)
+    setTitleBarTheme: (theme: 'dark' | 'light') => ipcRenderer.send('set-titlebar-theme', theme),
+    showInteractiveNotification: (options: any) => ipcRenderer.send('show-interactive-notification', options),
+    onNotificationAction: (callback: (data: any) => void) => {
+        const handler = (_event: any, data: any) => callback(data);
+        ipcRenderer.on('notification-action', handler);
+        return () => {
+            ipcRenderer.removeListener('notification-action', handler);
+        };
+    }
 });

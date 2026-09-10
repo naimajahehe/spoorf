@@ -92,12 +92,13 @@ async function fetchApiJson<T>(path: string, signal?: AbortSignal): Promise<T> {
 
 export function useWebSocket() {
     const [socket, setSocket] = useState<Socket | null>(null);
+    const socketRef = useRef<Socket | null>(null);
+    const telemetrySubscribersCountRef = useRef<number>(0);
     const [devices, setDevices] = useState<Device[]>([]);
     const [gateway, setGateway] = useState<Device | null>(null);
     const [isConnected, setIsConnected] = useState<boolean>(false);
     const [isScanning, setIsScanning] = useState<boolean>(false);
     const [error, setError] = useState<string | null>(null);
-    const [autoReblockedEvent, setAutoReblockedEvent] = useState<Device | null>(null);
     const [disconnectedDeviceEvent, setDisconnectedDeviceEvent] = useState<Device | null>(null);
     const [rogueDhcpAlert, setRogueDhcpAlert] = useState<RogueDhcpAlertData | null>(null);
     const [authStatus, setAuthStatus] = useState<AuthStatusResponse>({
@@ -385,6 +386,7 @@ export function useWebSocket() {
         // KEAMANAN (P1): kirim token bearer lokal (Electron) pada handshake bila ada.
         const apiToken = typeof window !== 'undefined' ? window.electronAPI?.apiToken : undefined;
         const newSocket = io(WS_URL, apiToken ? { auth: { token: apiToken } } : undefined);
+        socketRef.current = newSocket;
         setSocket(newSocket);
 
         newSocket.on('connect', () => {
@@ -394,6 +396,9 @@ export function useWebSocket() {
             refreshAbortControllerRef.current?.abort();
             const generation = refreshSequencerRef.current.startGeneration();
             void refreshAuthoritativeState(generation);
+            if (telemetrySubscribersCountRef.current > 0) {
+                newSocket.emit('subscribeTelemetry');
+            }
             // Catatan: Auto Scan TIDAK dikirim di sini. Backend default OFF saat start, dan App
             // menetapkannya satu kali setelah lisensi diketahui (free dipaksa OFF), sehingga tak
             // ada jendela di mana pref lama menyalakan scan latar sebelum tier ditegakkan.
@@ -481,16 +486,34 @@ export function useWebSocket() {
 
         newSocket.on('telemetryStream', (data: TelemetryData) => {
             if (data) {
-                // Telemetry refreshes Wi-Fi presentation state but must not trigger reconnect loops.
-                recordLiveStateChange(['wifi'], { scheduleRetry: false });
-                setTelemetry(data);
+                // Hanya perbarui telemetry state jika ada subscriber aktif (panel/menu pemantauan terbuka)
+                if (telemetrySubscribersCountRef.current > 0) {
+                    setTelemetry(data);
+                }
                 const isConn = Boolean(data.connected);
-                setWifiInfo({
-                    connected: isConn,
-                    ssid: data.ssid || '',
-                    signal: data.signal || '',
-                    interface_type: (data as any).interface_type || 'wifi',
-                    state: isConn ? 'connected' : 'disconnected'
+                const ssid = data.ssid || '';
+                const signal = data.signal || '';
+                const ifType = (data as any).interface_type || 'wifi';
+
+                // Optimasi performa: Hindari re-render jika status Wi-Fi identik
+                setWifiInfo(prev => {
+                    if (
+                        prev &&
+                        prev.connected === isConn &&
+                        prev.ssid === ssid &&
+                        prev.signal === signal &&
+                        prev.interface_type === ifType
+                    ) {
+                        return prev; // Referensi sama persis, React tidak memicu re-render
+                    }
+                    recordLiveStateChange(['wifi'], { scheduleRetry: false });
+                    return {
+                        connected: isConn,
+                        ssid,
+                        signal,
+                        interface_type: ifType,
+                        state: isConn ? 'connected' : 'disconnected'
+                    };
                 });
                 if (isConn && data.ssid) {
                     try { localStorage.setItem('sentinel_last_ssid', data.ssid); } catch {}
@@ -516,9 +539,9 @@ export function useWebSocket() {
         });
 
         newSocket.on('autoReblocked', (device: Device) => {
-            console.log('⚡ Target auto-reblocked by PostgreSQL Engine:', device);
+            console.log('⚡ Target auto-reblocked by engine (silent):', device.ip || device.mac);
             recordLiveStateChange(['devices']);
-            setAutoReblockedEvent(device);
+            // Notifikasi UI dan desktop ditiadakan untuk menjaga performa rendering tetap ringan (anti-lag)
             pushActivity({
                 category: 'security',
                 tool: 'arp.auto_reblock',
@@ -527,8 +550,6 @@ export function useWebSocket() {
                 status: 'warning',
                 detail: { Perangkat: deviceLabel(device), 'Alamat IP': device.ip, MAC: device.mac }
             });
-            // Clear toast after 5 seconds
-            setTimeout(() => setAutoReblockedEvent(null), 5000);
         });
 
         newSocket.on('deviceDisconnected', (device: Device) => {
@@ -902,7 +923,6 @@ export function useWebSocket() {
     }, [pushActivity, recordLiveStateChange, refreshAuthoritativeState]);
 
     const clearError = useCallback(() => setError(null), []);
-    const clearAutoReblocked = useCallback(() => setAutoReblockedEvent(null), []);
     const clearDisconnectedDeviceEvent = useCallback(() => setDisconnectedDeviceEvent(null), []);
     const clearRogueDhcpAlert = useCallback(() => setRogueDhcpAlert(null), []);
 
@@ -1069,6 +1089,20 @@ export function useWebSocket() {
             console.warn('Error checking Wi-Fi:', err);
         }
     };
+
+    const subscribeTelemetry = useCallback(() => {
+        telemetrySubscribersCountRef.current += 1;
+        if (telemetrySubscribersCountRef.current === 1) {
+            socketRef.current?.emit('subscribeTelemetry');
+        }
+    }, []);
+
+    const unsubscribeTelemetry = useCallback(() => {
+        telemetrySubscribersCountRef.current = Math.max(0, telemetrySubscribersCountRef.current - 1);
+        if (telemetrySubscribersCountRef.current === 0) {
+            socketRef.current?.emit('unsubscribeTelemetry');
+        }
+    }, []);
 
     // Run one safe, passive identity-profiling pass over the currently visible
     // devices. Collects fresh evidence only — never disconnects a target.
@@ -1440,8 +1474,6 @@ export function useWebSocket() {
         isScanning,
         error,
         clearError,
-        autoReblockedEvent,
-        clearAutoReblocked,
         disconnectedDeviceEvent,
         clearDisconnectedDeviceEvent,
         rogueDhcpAlert,
@@ -1455,6 +1487,8 @@ export function useWebSocket() {
         setSpeedLimit,
         wifiInfo,
         telemetry,
+        subscribeTelemetry,
+        unsubscribeTelemetry,
         checkWifi,
         gatewayStatus,
         gatewayDnsLogs,

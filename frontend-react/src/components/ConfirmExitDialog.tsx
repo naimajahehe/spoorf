@@ -9,7 +9,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
-import { ShieldAlert, LogOut } from 'lucide-react';
+import { LogOut } from 'lucide-react';
 
 interface ConfirmExitDialogProps {
   open: boolean;
@@ -25,10 +25,7 @@ export const ConfirmExitDialog: React.FC<ConfirmExitDialogProps> = ({
   return (
     <AlertDialog open={open} onOpenChange={onOpenChange}>
       <AlertDialogContent className="border border-white/10 bg-[#0d0f14]/98 shadow-2xl backdrop-blur-2xl max-w-[440px]">
-        <AlertDialogHeader className="space-y-3">
-          <div className="size-11 rounded-xl bg-rose-500/10 border border-rose-500/25 flex items-center justify-center text-rose-400 mx-auto sm:mx-0 shadow-lg shadow-rose-500/10">
-            <ShieldAlert size={22} className="text-rose-400" />
-          </div>
+        <AlertDialogHeader className="space-y-2">
           <div className="space-y-1 text-center sm:text-left">
             <AlertDialogTitle className="text-base font-semibold text-white tracking-tight">
               Keluar dari Spoorf Sentinel?

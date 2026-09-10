@@ -111,10 +111,16 @@ class DHCPDiscoveredCache:
             # Ambil entri lama jika ada (berdasarkan MAC sebagai identitas tunggal)
             old_entry = self._cache_by_mac.get(norm_mac, {}) if norm_mac else {}
 
-            # Smart merge: pertahankan nilai non-empty lama jika nilai baru kosong
+            # Smart merge: pertahankan nilai non-empty lama jika nilai baru kosong.
+            # KECUALI jika paket baru menandakan inisiasi/rebind DHCP (DISCOVER=1, REQUEST=3)
+            # atau pelepasan (RELEASE=7, DECLINE=4) di mana IP lama tidak boleh diresurreksi.
+            msg_code = entry.get('message_type_code')
+            is_unconfirmed_ip_event = msg_code in (1, 3, 4, 7)
+            resolved_ip = clean_ip if (clean_ip or is_unconfirmed_ip_event) else old_entry.get('ip', '')
+
             merged = {
                 'mac': norm_mac or old_entry.get('mac', ''),
-                'ip': clean_ip or old_entry.get('ip', ''),
+                'ip': resolved_ip,
                 'hostname': entry.get('hostname') or old_entry.get('hostname', ''),
                 'vendor_class': entry.get('vendor_class') or old_entry.get('vendor_class', ''),
                 'dhcp_fingerprint': entry.get('dhcp_fingerprint') or old_entry.get('dhcp_fingerprint', ''),
@@ -526,17 +532,24 @@ def _handle_dhcp_packet(pkt) -> None:
             except:
                 router_ip = ""
 
-        # Alamat IP: Option 50 (requested_addr) atau yiaddr/ciaddr
+        # Alamat IP: prioritaskan IP otoritatif server (yiaddr) atau klien aktif (ciaddr).
+        # Abaikan penetapan IP jika paket adalah penolakan (DHCPNAK = 6) atau konflik (DHCPDECLINE = 4).
+        # Klien meminta IP lama via Option 50 tanpa persetujuan server (DHCPDISCOVER, DHCPREQUEST):
+        # JANGAN jadikan IP sah karena Option 50 hanyalah permohonan sepihak klien (Ghost IP).
         ip = ""
-        for candidate in (
-            options.get('requested_addr'),
-            bootp.yiaddr,
-            bootp.ciaddr,
-        ):
-            clean_candidate = str(candidate).strip() if candidate else ""
-            if is_valid_private_ip(clean_candidate):
-                ip = clean_candidate
-                break
+        if msg_type_code not in (4, 6):
+            if msg_type_code in (2, 5):  # DHCPOFFER, DHCPACK (dari DHCP Server)
+                candidates = (bootp.yiaddr, bootp.ciaddr)
+            elif msg_type_code in (7, 8):  # DHCPRELEASE, DHCPINFORM
+                candidates = (bootp.ciaddr,)
+            else:  # DHCPDISCOVER, DHCPREQUEST (dari Klien)
+                candidates = (bootp.ciaddr, bootp.yiaddr)
+
+            for candidate in candidates:
+                clean_candidate = str(candidate).strip() if candidate else ""
+                if is_valid_private_ip(clean_candidate):
+                    ip = clean_candidate
+                    break
 
         # Deteksi Rogue DHCP Server (Opsi 54 != Gateway Resmi pada respon OFFER/ACK)
         is_rogue_dhcp = False

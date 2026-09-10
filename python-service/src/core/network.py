@@ -343,11 +343,12 @@ def get_wifi_info() -> Dict[str, Any]:
                 stats = psutil.net_if_stats()
                 addrs = psutil.net_if_addrs()
                 for iface_name, stat in stats.items():
-                    if stat.isup and 'loopback' not in iface_name.lower():
-                        if_addrs = addrs.get(iface_name, [])
-                        for a in if_addrs:
-                            if a.family == socket.AF_INET and not a.address.startswith('127.') and not a.address.startswith('169.254.'):
-                                name_lower = iface_name.lower()
+                    name_lower = iface_name.lower()
+                    if not stat.isup or any(v in name_lower for v in ('loopback', 'tailscale', 'wireguard', 'vpn', 'virtual', 'vmware', 'vbox', 'docker', 'hyper-v', 'wsl', 'tap-')):
+                        continue
+                    if_addrs = addrs.get(iface_name, [])
+                    for a in if_addrs:
+                        if a.family == socket.AF_INET and not a.address.startswith('127.') and not a.address.startswith('169.254.'):
                                 if any(x in name_lower for x in ('ethernet', 'local area', 'lan', 'eth')):
                                     wifi_info['connected'] = True
                                     wifi_info['ssid'] = 'Ethernet (LAN)'

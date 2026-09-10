@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import type { FC } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
     Check,
@@ -32,7 +33,6 @@ import {
     Link2,
     ShieldAlert
 } from 'lucide-react';
-import { SmoothScroll } from './motion/smooth-scroll';
 import { Tooltip } from './motion/tooltip';
 import { Dock, DockItem, DockSeparator } from './motion/dock';
 import { InstagramIcon } from './icons/InstagramIcon';
@@ -60,7 +60,7 @@ interface Props {
     busyToggleIp?: string | null;
 }
 
-export const DeviceTable: FC<Props> = ({
+export const DeviceTable: FC<Props> = React.memo(({
     devices,
     selectedIps,
     isSelectMode = false,
@@ -106,6 +106,28 @@ export const DeviceTable: FC<Props> = ({
         return sortDevicesByField(devices, sortField, sortOrder);
     }, [devices, sortField, sortOrder]);
 
+    const parentRef = React.useRef<HTMLDivElement>(null);
+
+    const rowVirtualizer = useVirtualizer({
+        count: sortedDevices.length,
+        getScrollElement: () => parentRef.current,
+        estimateSize: () => 56,
+        getItemKey: React.useCallback(
+            (index: number) => sortedDevices[index]?.mac || sortedDevices[index]?.ip || String(index),
+            [sortedDevices]
+        ),
+        overscan: 8,
+    });
+
+    const virtualItems = rowVirtualizer.getVirtualItems();
+    const totalSize = rowVirtualizer.getTotalSize();
+    const paddingTop = virtualItems.length > 0 ? virtualItems[0].start : 0;
+    const paddingBottom = virtualItems.length > 0 ? totalSize - virtualItems[virtualItems.length - 1].end : 0;
+
+    React.useEffect(() => {
+        rowVirtualizer.measure();
+    }, [expandedIp, rowVirtualizer]);
+
     const selectableDevices = sortedDevices.filter(d => !d.is_gateway && !d.is_self);
     const canSelectAny = selectableDevices.length > 0;
     // selectedIps & expandedIp memakai MAC (kunci stabil), bukan IP: perangkat offline ber-ip=''
@@ -139,9 +161,9 @@ export const DeviceTable: FC<Props> = ({
     }
 
     return (
-        <SmoothScroll root={false} className="w-full overflow-x-auto overflow-y-auto relative max-h-[min(650px,65vh)]">
+        <div ref={parentRef} className="w-full overflow-x-auto overflow-y-auto relative max-h-[min(650px,65vh)]">
             <table className="w-full text-left border-collapse">
-                <thead className="sticky top-0 bg-[#090a0c]/95 backdrop-blur z-10 shadow-sm shadow-black/40">
+                <thead className="sticky top-0 bg-[#090a0c] z-10 shadow-sm shadow-black/40">
                     <tr className="border-b border-white/[0.06] bg-white/[0.02] text-[11px] font-semibold uppercase tracking-wider text-zinc-400 h-[44px]">
                         {isSelectMode && (
                             <th className="w-11 text-center h-[44px] py-0 px-2">
@@ -236,33 +258,47 @@ export const DeviceTable: FC<Props> = ({
                     </tr>
                 </thead>
 
-                <tbody className="divide-y divide-white/[0.04]">
-                    {sortedDevices.map((device) => {
-                        const isSelected = selectedIps.includes(device.mac);
-                        const isExpanded = expandedIp === device.mac;
-                        const isInspecting = activeInspectorIp === device.ip;
-                        const isOnline = Boolean(device.is_online);
-                        const isDeviceBusy = (Boolean(device.ip) && busyToggleIp === device.ip) || (Boolean(device.mac) && busyToggleIp === device.mac);
-                        const isLoading = (Boolean(device.ip) && loadingIps.has(device.ip)) || (Boolean(device.mac) && loadingIps.has(device.mac));
-                        // Kunci total: operasi putus/pulih perangkat LAIN sedang berjalan.
-                        const lockedByOther = busyToggleIp != null && !isDeviceBusy;
-                        const isInternetActive = !device.is_blocked && (device.speed_limit === undefined || device.speed_limit > 0);
-                        const isThrottled = (device.speed_limit ?? 100) > 0 && (device.speed_limit ?? 100) < 100;
+                {paddingTop > 0 && (
+                    <tbody>
+                        <tr>
+                            <td style={{ height: `${paddingTop}px`, padding: 0, border: 0 }} colSpan={isSelectMode ? 7 : 6} />
+                        </tr>
+                    </tbody>
+                )}
 
-                        const deviceName = getResolvedDeviceName(device);
+                {virtualItems.map((virtualRow) => {
+                    const device = sortedDevices[virtualRow.index];
+                    if (!device) return null;
+                    const isSelected = selectedIps.includes(device.mac);
+                    const isExpanded = expandedIp === device.mac;
+                    const isInspecting = activeInspectorIp === device.ip;
+                    const isOnline = Boolean(device.is_online);
+                    const isDeviceBusy = (Boolean(device.ip) && busyToggleIp === device.ip) || (Boolean(device.mac) && busyToggleIp === device.mac);
+                    const isLoading = (Boolean(device.ip) && loadingIps.has(device.ip)) || (Boolean(device.mac) && loadingIps.has(device.mac));
+                    // Kunci total: operasi putus/pulih perangkat LAIN sedang berjalan.
+                    const lockedByOther = busyToggleIp != null && !isDeviceBusy;
+                    const isInternetActive = !device.is_blocked && (device.speed_limit === undefined || device.speed_limit > 0);
+                    const isThrottled = (device.speed_limit ?? 100) > 0 && (device.speed_limit ?? 100) < 100;
 
-                        const isDeepFingerprintEnabled = authStatus?.license?.can_deep_fingerprint ?? (authStatus?.license?.tier !== 'free');
-                        const activeIpForSplit = device.ip && device.ip.trim() !== '' ? device.ip : (device.last_ip || '');
-                        const lastDotIdx = activeIpForSplit.lastIndexOf('.');
-                        const ipPrefix = lastDotIdx !== -1 ? activeIpForSplit.slice(0, lastDotIdx + 1) : '';
-                        const ipHost = lastDotIdx !== -1 ? activeIpForSplit.slice(lastDotIdx + 1) : (device.is_online ? device.ip : 'Offline');
+                    const deviceName = getResolvedDeviceName(device);
 
-                        const ttlValue = device.ttl || (device.os?.includes('Windows') ? 128 : 64);
-                        const ttlDesc = ttlValue >= 100 ? 'Windows NT' : ttlValue <= 75 ? (device.os ? formatDeviceOs(device.os, device.is_gateway, device.vendor) : 'Mobile / POSIX') : 'Network Appliance';
+                    const isDeepFingerprintEnabled = authStatus?.license?.can_deep_fingerprint ?? (authStatus?.license?.tier !== 'free');
+                    const activeIpForSplit = device.ip && device.ip.trim() !== '' ? device.ip : (device.last_ip || '');
+                    const lastDotIdx = activeIpForSplit.lastIndexOf('.');
+                    const ipPrefix = lastDotIdx !== -1 ? activeIpForSplit.slice(0, lastDotIdx + 1) : '';
+                    const ipHost = lastDotIdx !== -1 ? activeIpForSplit.slice(lastDotIdx + 1) : (device.is_online ? device.ip : 'Offline');
 
-                        return (
-                            <React.Fragment key={device.mac || device.ip}>
-                                <tr
+                    const ttlValue = device.ttl || (device.os?.includes('Windows') ? 128 : 64);
+                    const ttlDesc = ttlValue >= 100 ? 'Windows NT' : ttlValue <= 75 ? (device.os ? formatDeviceOs(device.os, device.is_gateway, device.vendor) : 'Mobile / POSIX') : 'Network Appliance';
+
+                    return (
+                        <tbody
+                            key={device.mac || device.ip}
+                            ref={rowVirtualizer.measureElement}
+                            data-index={virtualRow.index}
+                            className="border-b border-white/[0.04]"
+                        >
+                            <tr
                                     onClick={() => handleToggleRowDetail(device.mac)}
                                     className={cn(
                                         "group transition-all duration-150 cursor-pointer select-none h-[56px]",
@@ -733,7 +769,7 @@ export const DeviceTable: FC<Props> = ({
                                                             className="absolute right-full mr-2.5 top-1/2 z-50 whitespace-nowrap"
                                                             onClick={(e) => e.stopPropagation()}
                                                         >
-                                                            <Dock size={28} className="shadow-2xl border-white/[0.12] bg-[#121316]/98 backdrop-blur-2xl">
+                                                            <Dock size={28} className="shadow-2xl border border-white/[0.12] bg-[#121316]">
                                                                 <DockItem
                                                                     title="Ubah Nama Perangkat"
                                                                     onClick={() => {
@@ -1029,10 +1065,17 @@ export const DeviceTable: FC<Props> = ({
                                             </tr>
                                         )}
                                     </AnimatePresence>
-                            </React.Fragment>
-                        );
-                    })}
-                </tbody>
+                        </tbody>
+                    );
+                })}
+
+                {paddingBottom > 0 && (
+                    <tbody>
+                        <tr>
+                            <td style={{ height: `${paddingBottom}px`, padding: 0, border: 0 }} colSpan={isSelectMode ? 7 : 6} />
+                        </tr>
+                    </tbody>
+                )}
             </table>
 
             {/* Rename Device Alias Modal (Triggered from BeUI Dock) */}
@@ -1176,6 +1219,6 @@ export const DeviceTable: FC<Props> = ({
                     </div>
                 )}
             </AnimatePresence>
-        </SmoothScroll>
+        </div>
     );
-};
+});

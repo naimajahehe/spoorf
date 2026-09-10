@@ -1,5 +1,5 @@
-﻿import type { FC } from 'react';
-import { useEffect } from 'react';
+import type { FC } from 'react';
+import { useEffect, useRef } from 'react';
 import { AlertCircle, X } from 'lucide-react';
 
 interface Props {
@@ -13,13 +13,16 @@ export const ActionErrorToast: FC<Props> = ({
     title = 'Gagal Memproses Aksi',
     onDismiss
 }) => {
+    const onDismissRef = useRef(onDismiss);
+    onDismissRef.current = onDismiss;
+
     // Auto dismiss after 4.5 seconds
     useEffect(() => {
         const timer = setTimeout(() => {
-            onDismiss();
+            onDismissRef.current();
         }, 4500);
         return () => clearTimeout(timer);
-    }, [onDismiss]);
+    }, []);
 
     return (
         <div className="flex items-start justify-between gap-3 px-3.5 py-2.5 rounded-xl bg-[#14151a] border border-rose-500/25 shadow-[0_8px_20px_rgba(0,0,0,0.7)] backdrop-blur-xl text-xs select-none w-full">

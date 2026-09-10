@@ -381,14 +381,16 @@ class TestSentinelShield(unittest.TestCase):
         self.assertFalse(self.shield.get_status()['is_enabled'])
         mock_unlock.assert_called_once()
 
+    @patch('src.core.shield.get_wifi_info')
     @patch('src.core.shield.get_network_info')
     @patch('src.core.shield.get_current_gateway')
     @patch('src.core.shield.SentinelShield._resolve_gateway_mac')
     @patch('src.core.shield.SentinelShield._lock_kernel_neighbor')
     @patch('src.core.shield.SentinelShield._unlock_kernel_neighbor')
     def test_enable_rolls_back_lock_and_started_workers_when_start_fails(
-        self, mock_unlock, mock_lock, mock_resolve_mac, mock_gw, mock_info
+        self, mock_unlock, mock_lock, mock_resolve_mac, mock_gw, mock_info, mock_wifi
     ):
+        mock_wifi.return_value = {'interface': 'Wi-Fi'}
         mock_info.return_value = {'ip': '192.168.110.99', 'interface': 'Wi-Fi'}
         mock_gw.return_value = '192.168.110.1'
         mock_resolve_mac.return_value = '98:4a:6b:0f:4a:97'
