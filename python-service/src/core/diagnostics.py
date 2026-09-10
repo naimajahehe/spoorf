@@ -38,13 +38,22 @@ def check_admin_privileges() -> Dict[str, Any]:
         "details": "Berjalan dengan hak akses Administrator (Full Raw L2 Injection)" if is_admin else "Berjalan sebagai User standar (Raw packet injection mungkin terbatas oleh Windows UAC)"
     }
 
-def check_npcap_driver() -> Dict[str, Any]:
+_npcap_cache: Optional[Dict[str, Any]] = None
+_npcap_cache_time: float = 0.0
+_NPCAP_CACHE_TTL: float = 20.0
+
+def check_npcap_driver(force_refresh: bool = False) -> Dict[str, Any]:
     """
     Inspeksi nyata Npcap NDIS 6 Kernel Driver di Windows:
     - Service 'npcap' status via Windows Service Controller (`sc query npcap`)
     - Keberadaan DLL C:\\Windows\\System32\\Npcap\\wpcap.dll & Packet.dll
     - Scapy pcap backend binding (conf.use_pcap) dan jumlah interface Layer 2
     """
+    global _npcap_cache, _npcap_cache_time
+    now = time.time()
+    if not force_refresh and _npcap_cache is not None and (now - _npcap_cache_time < _NPCAP_CACHE_TTL):
+        return _npcap_cache
+
     is_windows = sys.platform == 'win32'
     
     # 1. Cek Service Controller
@@ -136,7 +145,7 @@ def check_npcap_driver() -> Dict[str, Any]:
         status = "warning"
         details = f"Npcap terdeteksi parsial (DLL: {len(present_dlls)} ditemukan, Service: {service_state_text}, L2 Ifaces: {iface_count})"
 
-    return {
+    result = {
         "status": status,
         "installed": service_installed or dlls_present,
         "service_running": service_running,
@@ -149,6 +158,9 @@ def check_npcap_driver() -> Dict[str, Any]:
         "default_iface_desc": default_iface_desc,
         "details": details
     }
+    _npcap_cache = result
+    _npcap_cache_time = now
+    return result
 
 def check_network_adapter_and_gateway() -> Dict[str, Any]:
     """Inspeksi adapter jaringan fisik aktif, IP privat, dan konektivitas gateway."""
@@ -223,7 +235,7 @@ def run_system_diagnostics() -> Dict[str, Any]:
     t_start = time.perf_counter()
     
     admin_check = check_admin_privileges()
-    npcap_check = check_npcap_driver()
+    npcap_check = check_npcap_driver(force_refresh=True)
     adapter_check = check_network_adapter_and_gateway()
 
     # Hitung overall status

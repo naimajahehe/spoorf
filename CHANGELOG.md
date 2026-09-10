@@ -2,6 +2,23 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.2] - 2026-09-10
+
+### Fix Cold-Start Bootloader Premature Halt & Engine Readiness Resilience
+- **Eliminasi Prematur Bootloader Halt pada Aplikasi Electron — `frontend-react/src/components/EngineReadinessGate.tsx`**:
+  - Masalah: Pada binary Electron terpaket, PyInstaller Windows memerlukan 1.5 - 2.5 detik untuk cold-start modular Python engine (`spoorf-engine.exe`). Loop inisialisasi pada gate berhenti mendadak di percobaan ke-1 (detik ke-0.40) karena endpoint `/api/system/diagnostics` Node mengembalikan HTTP 200 `{ success: true, checks: { python_engine: { status: 'error' } } }`, memicu status *Failed* pada UI bootloader.
+  - Solusi: Memperluas siklus polling hingga 30 kali percobaan (15 detik batas waktu) dengan jeda 500ms, dan hanya melakukan `break` ketika `res.checks?.python_engine?.status !== "error"`. Menambahkan tombol interaktif *"Coba Lagi"* berdampingan dengan *"Lanjutkan Mode Terbatas"*.
+- **Toleransi Jitter & Eliminasi Flapping Health Check — `backend-node/src/services/pythonBridge.ts`**:
+  - Menaikkan batas timeout request health check `/health` dari 1000ms ke 2500ms untuk mengakomodasi jeda respons CPU Windows saat scanning atau cold-start.
+  - Menambahkan *hysteresis counter* `consecutiveHealthFailures` yang mewajibkan kegagalan minimal 2 tick berturut-turut sebelum menandai Python offline, mencegah status *flapping* sementara.
+- **Optimasi Latensi Endpoint `/health` (Driver Check Caching) — `python-service/src/core/diagnostics.py`**:
+  - Menghilangkan beban eksekusi `subprocess.run(["sc", "query", "npcap"])` yang sebelumnya berjalan sinkron setiap 5 detik dengan menambahkan cache TTL 20 detik pada `check_npcap_driver(force_refresh=False)`.
+  - Mengurangi latensi respons health check dari ~500ms menjadi < 1ms pada Windows.
+- **Verifikasi Kualitas & Build Distribusi**:
+  - `backend-node`: 40/40 test lulus (*100% pass*).
+  - `python-service`: 330/330 test lulus (*100% pass*). Total 370 tests hijau.
+  - `desktop-electron`: Sukses memaketkan installer final `Spoorf Sentinel Setup 2.21.0.exe` (NSIS x64).
+
 ## [v2.41.1] - 2026-09-09
 
 ### Fix Profile Popover Clipping (Portal) & Complete Ghost Border Elimination

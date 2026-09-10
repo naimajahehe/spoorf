@@ -95,6 +95,7 @@ export class PythonBridge extends EventEmitter {
     private ready: boolean = false;
     private wsEverConnected: boolean = false; // true setelah WS pertama tersambung; membedakan reconnect (potensi restart Python) dari koneksi awal
     private healthTimer: ReturnType<typeof setInterval> | null = null; // monitor periodik: re-arm WS mati
+    private consecutiveHealthFailures: number = 0; // hysteresis counter untuk mencegah flapping
     private isInternalSpawn: boolean = false;
 
     constructor() {
@@ -213,6 +214,7 @@ export class PythonBridge extends EventEmitter {
      * akan dianggap offline selamanya oleh seluruh guard `if (!this.ready)`.
      */
     private markReachable(): void {
+        this.consecutiveHealthFailures = 0;
         if (this.ready) return;
         this.ready = true;
         console.log(`✅ Python FastAPI microservice kembali terjangkau di ${this.baseUrl}`);
@@ -271,7 +273,7 @@ export class PythonBridge extends EventEmitter {
 
     private async checkHealth(): Promise<boolean> {
         try {
-            const res = await this.fetchWithTimeout(`${this.baseUrl}/health`, {}, 1000);
+            const res = await this.fetchWithTimeout(`${this.baseUrl}/health`, {}, 2500);
             return res.ok;
         } catch {
             return false;
@@ -404,12 +406,17 @@ export class PythonBridge extends EventEmitter {
         let reachable = false;
         try { reachable = await this.checkHealth(); } catch { reachable = false; }
         if (reachable) {
+            this.consecutiveHealthFailures = 0;
             this.markReachable();
             if (!this.isWsHealthy() && this.ws === null) {
                 this.connectWebSocket();
             }
         } else {
-            this.markUnreachable();
+            this.consecutiveHealthFailures++;
+            // Toleransi jitter/blip jaringan: hanya tandai offline bila gagal >= 2 kali berturut-turut
+            if (this.consecutiveHealthFailures >= 2) {
+                this.markUnreachable();
+            }
         }
     }
 

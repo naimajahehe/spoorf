@@ -192,18 +192,27 @@ export const EngineReadinessGateContent: FC<EngineReadinessGateProps> = ({ onRea
 
     let diagResult: SystemDiagnosticsResponse | null = null;
     let attempts = 0;
+    const maxAttempts = 30; // Hingga 15 detik batas toleransi inisialisasi cold-start PyInstaller di Windows
 
-    while (attempts < 10) {
+    while (attempts < maxAttempts) {
       attempts++;
       try {
         const res = await apiClient.getDiagnostics();
         if (res && res.success) {
           diagResult = res;
-          break;
+          // Hanya break jika python_engine sudah benar-benar siap ('ok' atau 'warning')
+          if (res.checks?.python_engine?.status !== "error") {
+            break;
+          }
         }
       } catch {
-        await new Promise((r) => setTimeout(r, 200));
+        // Abaikan error jaringan sementara saat backend Node masih startup
       }
+
+      if (attempts === 3) {
+        addLog("[BOOT] Menunggu inisialisasi modular FastAPI Python Engine (:8001)...", "info");
+      }
+      await new Promise((r) => setTimeout(r, 500));
     }
 
     if (!diagResult || diagResult.checks.python_engine.status === "error") {
@@ -501,13 +510,25 @@ export const EngineReadinessGateContent: FC<EngineReadinessGateProps> = ({ onRea
                   </p>
                 </div>
 
-                <button
-                  type="button"
-                  onClick={() => onReady()}
-                  className="shrink-0 px-2.5 py-1.5 rounded-lg text-[11px] font-medium text-amber-300 border border-amber-400/25 bg-amber-400/[0.06] hover:bg-amber-400/[0.12] hover:text-amber-200 transition-colors cursor-pointer outline-none"
-                >
-                  Lanjutkan Mode Terbatas
-                </button>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => runDiagnostics()}
+                    disabled={isChecking}
+                    className="px-2.5 py-1.5 rounded-lg text-[11px] font-medium text-cyan-300 border border-cyan-400/25 bg-cyan-400/[0.06] hover:bg-cyan-400/[0.12] hover:text-cyan-200 transition-colors cursor-pointer outline-none flex items-center gap-1.5 disabled:opacity-50"
+                  >
+                    <RefreshCw size={11} className={cn(isChecking && "animate-spin")} />
+                    <span>Coba Lagi</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => onReady()}
+                    className="px-2.5 py-1.5 rounded-lg text-[11px] font-medium text-amber-300 border border-amber-400/25 bg-amber-400/[0.06] hover:bg-amber-400/[0.12] hover:text-amber-200 transition-colors cursor-pointer outline-none"
+                  >
+                    Lanjutkan Mode Terbatas
+                  </button>
+                </div>
               </div>
             </motion.div>
           )}
