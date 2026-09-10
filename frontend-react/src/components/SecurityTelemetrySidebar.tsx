@@ -769,7 +769,7 @@ export const SecurityTelemetrySidebar: FC<SecurityTelemetrySidebarProps> = ({
 
     return (
         <aside className={cn(
-            "w-full xl:w-[320px] shrink-0 bg-[#090a0c] border border-white/[0.08] rounded-2xl overflow-hidden shadow-2xl flex flex-col",
+            "w-full lg:w-[300px] xl:w-[320px] shrink-0 bg-[#090a0c] border border-white/[0.08] rounded-2xl overflow-hidden shadow-2xl flex flex-col",
             className
         )}>
             {/* Header with Title and Close Button (No Shield Icon) */}

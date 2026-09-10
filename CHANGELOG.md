@@ -2,6 +2,17 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.3] - 2026-09-10
+
+### Fix Responsive Layout Breakpoint for Security & Telemetry Sidebar
+- **Perbaikan Kolaps Prematur Sidebar ke Bawah Jendela — `frontend-react/src/App.tsx` & `SecurityTelemetrySidebar.tsx`**:
+  - Masalah: Panel Security & Telemetry sebelumnya menggunakan breakpoint Tailwind `xl:flex-row` dan `xl:w-[320px]` (ambang batas 1280px). Ketika pengguna me-restore/mengubah ukuran jendela dari maximize ke window mode standar (misal 1100px – 1250px atau layar laptop 1366x768 berskala 125%), lebar viewport turun ke bawah 1280px sehingga panel Security & Telemetry langsung jatuh ke bawah tabel perangkat (*vertical stack*), padahal ruang horizontal masih sangat leluasa.
+  - Solusi: Menurunkan breakpoint tata letak ke `lg:flex-row` (ambang batas 1024px) dan menerapkan lebar adaptif `w-full lg:w-[300px] xl:w-[320px] shrink-0 lg:sticky lg:top-4`.
+  - Hasil: Panel Security & Telemetry kini selalu konsisten berada di sisi kanan tabel perangkat pada seluruh ukuran jendela desktop normal (termasuk batas minimum window Electron 1080px), dan hanya akan turun ke bawah jika jendela benar-benar diperkecil ke ukuran mobile/tablet (< 1024px).
+- **Verifikasi Kualitas**:
+  - `frontend-react`: `npm run build` sukses 100% tanpa error TypeScript.
+  - `backend-node`: 40/40 tests lulus.
+
 ## [v2.41.2] - 2026-09-10
 
 ### Fix Cold-Start Bootloader Premature Halt & Engine Readiness Resilience

@@ -1723,7 +1723,7 @@ function App() {
 
                     {/* Connected Devices Card Table & Parallel Security Telemetry Sidebar with BeUI Scroll Reveal */}
                     <ScrollReveal y={20} blur={8} duration={0.6} className="w-full">
-                        <div className="flex flex-col xl:flex-row items-start gap-5 w-full">
+                        <div className="flex flex-col lg:flex-row items-start gap-5 w-full">
                             {/* Left: Connected Devices Card Table with White Border on Scan */}
                             <div className={cn(
                                 "flex-1 min-w-0 w-full bg-[#090a0c] rounded-2xl overflow-visible shadow-2xl relative transition-all duration-300 border",
@@ -2051,7 +2051,7 @@ function App() {
                                         animate={{ opacity: 1, x: 0, scale: 1 }}
                                         exit={{ opacity: 0, x: 24, scale: 0.98 }}
                                         transition={{ duration: 0.35, ease: [0.16, 1, 0.3, 1] }}
-                                        className="w-full xl:w-[320px] shrink-0"
+                                        className="w-full lg:w-[300px] xl:w-[320px] shrink-0 lg:sticky lg:top-4"
                                     >
                                         <SecurityTelemetrySidebar
                                             device={inspectorDevice}
