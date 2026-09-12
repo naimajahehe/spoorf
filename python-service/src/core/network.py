@@ -69,7 +69,15 @@ def get_self_mac() -> str:
         my_ip = info.get('ip')
         if my_ip:
             for _, s_obj in ifaces.items():
-                if hasattr(s_obj, 'ips') and my_ip in s_obj.ips:
+                # Scapy di Windows: s_obj.ips adalah dict ber-kunci AF int {4: [...], 6: [...]}.
+                # Cek .ip, .ips.get(4, []), atau .ips (jika list mock di test).
+                is_match = getattr(s_obj, 'ip', None) == my_ip or (
+                    hasattr(s_obj, 'ips') and (
+                        (isinstance(s_obj.ips, dict) and my_ip in s_obj.ips.get(4, []))
+                        or (isinstance(s_obj.ips, (list, tuple, set)) and my_ip in s_obj.ips)
+                    )
+                )
+                if is_match:
                     m = getattr(s_obj, 'mac', None)
                     if m:
                         return m.lower().replace('-', ':')

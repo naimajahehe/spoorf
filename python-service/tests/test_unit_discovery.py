@@ -204,6 +204,34 @@ class TestCoreDiscovery(unittest.TestCase):
         from src.core.discovery import dhcp
         self.assertFalse(dhcp._dhcp_sniffer_running)
 
+    def test_dhcp_sniffer_iface_matching_dict_ips(self):
+        """Verify DHCP sniffer resolves interface using Windows Scapy dict ips {4: [ip]}."""
+        from src.core.discovery import dhcp
+        from unittest.mock import patch, MagicMock
+
+        mock_target_iface = MagicMock()
+        mock_target_iface.ips = {4: ['192.168.1.99'], 6: []}
+
+        mock_other_iface = MagicMock()
+        mock_other_iface.ips = {4: ['10.0.0.1'], 6: []}
+
+        sniffed_ifaces = []
+        def fake_sniff(**kwargs):
+            sniffed_ifaces.append(kwargs.get('iface'))
+            dhcp._dhcp_sniffer_running = False
+
+        with patch('src.core.discovery.dhcp.get_network_info', return_value={'ip': '192.168.1.99'}), \
+             patch.dict('src.core.discovery.dhcp.ifaces', {'eth0': mock_other_iface, 'wifi': mock_target_iface}, clear=True), \
+             patch('src.core.discovery.dhcp.sniff', side_effect=fake_sniff), \
+             patch('src.core.discovery.dhcp.threading.Thread') as mock_thread:
+            dhcp.start_dhcp_sniffer()
+            worker_fn = mock_thread.call_args[1]['target']
+            worker_fn()
+            dhcp.stop_dhcp_sniffer()
+
+        self.assertEqual(len(sniffed_ifaces), 1)
+        self.assertIs(sniffed_ifaces[0], mock_target_iface)
+
     def test_rogue_dhcp_detection(self):
         """Security: Verify Rogue DHCP server is detected when server_id != official gateway."""
         from src.core.discovery.dhcp import _handle_dhcp_packet

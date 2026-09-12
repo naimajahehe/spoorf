@@ -81,7 +81,7 @@ class TestCoreNetwork(unittest.TestCase):
 
     # ===== 3. Interface & Gateway Discovery =====
     def test_get_self_mac_structure(self):
-        """Verify get_self_mac returns valid MAC structure."""
+        """Verify get_self_mac returns valid MAC structure with list ips mock."""
         iface = type('Iface', (), {'ips': ['192.168.1.20'], 'mac': '00:11:22:33:44:55'})()
         with patch(
             'src.core.network.get_network_info',
@@ -90,6 +90,16 @@ class TestCoreNetwork(unittest.TestCase):
             mac = get_self_mac()
         self.assertIsInstance(mac, str)
         self.assertTrue(is_valid_mac(mac))
+
+    def test_get_self_mac_scapy_dict_ips(self):
+        """Verify get_self_mac matches Windows Scapy dict ips {4: [ip], 6: []}."""
+        iface = type('Iface', (), {'ips': {4: ['192.168.1.50'], 6: []}, 'mac': 'aa:bb:cc:dd:ee:ff'})()
+        with patch(
+            'src.core.network.get_network_info',
+            return_value={'ip': '192.168.1.50'}
+        ), patch.dict('src.core.network.ifaces', {'mock': iface}, clear=True):
+            mac = get_self_mac()
+        self.assertEqual(mac, 'aa:bb:cc:dd:ee:ff')
 
     def test_get_current_gateway_structure(self):
         """Verify get_current_gateway returns non-empty string."""

@@ -18,7 +18,7 @@ from typing import Dict, Any, List, Set, Optional, Callable
 from scapy.all import Ether, IP, TCP, UDP, ARP, DNS, DNSQR, DNSRR, sendp, sniff
 
 from ..spoofer import ARPSpoofer
-from ..network import get_network_info, set_ip_forwarding, is_valid_private_ip
+from ..network import get_network_info, set_ip_forwarding, is_forwarding_enabled, is_valid_private_ip
 from ...utils.logger import logger
 from ...exceptions.custom import SpoofError
 
@@ -464,10 +464,15 @@ class TransparentGatewayManager:
         if prior_session:
             self._teardown_session(victim_ip, prior_session)
 
-        with self._lock:
-            my_ip, my_mac = self._get_controller_ip_and_mac()
-            interface = self.spoofer._interface
+        # Catat baseline forwarding jika belum pernah disentuh spoofer
+        if hasattr(self.spoofer, '_fwd_touched') and not getattr(self.spoofer, '_fwd_touched', False):
+            win_iface = getattr(self.spoofer, '_win_interface_name', None)
+            if win_iface:
+                self.spoofer._fwd_was_enabled = is_forwarding_enabled(win_iface)
+                self.spoofer._fwd_touched = True
 
+        arp_session_id = None
+        try:
             # A. Aktifkan ARP Spoofing mode pass-through (speed_limit=100)
             arp_session_id = self.spoofer.start(
                 victim_ip=victim_ip,
@@ -478,35 +483,40 @@ class TransparentGatewayManager:
                 is_redirect=True
             )
 
-            # B. Aktifkan Windows Kernel IP Forwarding
-            set_ip_forwarding(True, self.spoofer._win_interface_name)
+            # B. Aktifkan Windows Kernel IP Forwarding (DI LUAR lock agar tak memblokir mutex)
+            win_iface = getattr(self.spoofer, '_win_interface_name', None)
+            set_ip_forwarding(True, win_iface)
 
-            # C. Jalankan Gateway DNS Sniffer & Sinkhole + Bettercap Dissectors
-            sniffer = GatewayDNSSniffer(
-                target_ip=victim_ip,
-                target_mac=victim_mac,
-                gateway_ip=gateway_ip,
-                controller_ip=my_ip,
-                interface=interface,
-                self_mac=my_mac,
-                sinkhole_domains=self._sinkhole_domains,
-                gateway_mac=gateway_mac,
-                on_query_callback=self._on_dns_query,
-                bettercap_dns=self.bettercap_dns,
-                bettercap_dissector=self.bettercap_dissector
-            )
-            sniffer.start()
+            with self._lock:
+                my_ip, my_mac = self._get_controller_ip_and_mac()
+                interface = self.spoofer._interface
 
-            session_data = {
-                "victim_ip": victim_ip,
-                "victim_mac": victim_mac,
-                "gateway_ip": gateway_ip,
-                "gateway_mac": gateway_mac,
-                "arp_session_id": arp_session_id,
-                "sniffer": sniffer,
-                "started_at": time.time()
-            }
-            self._sessions[victim_ip] = session_data
+                # C. Jalankan Gateway DNS Sniffer & Sinkhole + Bettercap Dissectors
+                sniffer = GatewayDNSSniffer(
+                    target_ip=victim_ip,
+                    target_mac=victim_mac,
+                    gateway_ip=gateway_ip,
+                    controller_ip=my_ip,
+                    interface=interface,
+                    self_mac=my_mac,
+                    sinkhole_domains=self._sinkhole_domains,
+                    gateway_mac=gateway_mac,
+                    on_query_callback=self._on_dns_query,
+                    bettercap_dns=self.bettercap_dns,
+                    bettercap_dissector=self.bettercap_dissector
+                )
+                sniffer.start()
+
+                session_data = {
+                    "victim_ip": victim_ip,
+                    "victim_mac": victim_mac,
+                    "gateway_ip": gateway_ip,
+                    "gateway_mac": gateway_mac,
+                    "arp_session_id": arp_session_id,
+                    "sniffer": sniffer,
+                    "started_at": time.time()
+                }
+                self._sessions[victim_ip] = session_data
 
             logger.info(f"✨ [Transparent Gateway] Sesi aktif untuk {victim_ip} ({victim_mac}) via Gateway {gateway_ip}")
 
@@ -517,6 +527,13 @@ class TransparentGatewayManager:
                 "arp_session_id": arp_session_id,
                 "started_at": session_data["started_at"]
             }
+        except Exception as e:
+            if arp_session_id:
+                try:
+                    self.spoofer.stop(arp_session_id)
+                except Exception as stop_err:
+                    logger.debug(f"Error rolling back ARP session on gateway startup failure: {stop_err}")
+            raise e
 
     def _teardown_session(self, victim_ip: str, session):
         """Stop the sniffer + ARP session for an ALREADY-POPPED session.
@@ -540,6 +557,22 @@ class TransparentGatewayManager:
                 self.spoofer.stop(arp_sid)
             except Exception as e:
                 logger.debug(f"Notice stopping ARP session: {e}")
+
+        # Pemulihan status forwarding: bila seluruh sesi gateway telah berakhir
+        # dan spoofer tidak memiliki sesi aktif lain, pastikan forwarding kembali ke baseline asli.
+        with self._lock:
+            no_tg_sessions = len(self._sessions) == 0
+        if no_tg_sessions and getattr(self.spoofer, '_fwd_touched', False):
+            spoofer_sessions = getattr(self.spoofer, '_sessions', {})
+            has_other_active = any(s.get('active', False) for s in spoofer_sessions.values()) if isinstance(spoofer_sessions, dict) else False
+            if not has_other_active:
+                baseline = bool(getattr(self.spoofer, '_fwd_was_enabled', False))
+                try:
+                    set_ip_forwarding(baseline, getattr(self.spoofer, '_win_interface_name', None))
+                    self.spoofer._fwd_touched = False
+                    self.spoofer._fwd_was_enabled = None
+                except Exception as fwd_err:
+                    logger.debug(f"Notice restoring IP forwarding in gateway teardown: {fwd_err}")
 
         logger.info(f"🏁 [Transparent Gateway] Sesi {victim_ip} dihentikan.")
 

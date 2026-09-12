@@ -87,9 +87,13 @@ class ARPSpoofer:
                 # mengecek KUNCI (4/6) dan SELALU False. Cocokkan lewat .ip atau .ips.get(4, []).
                 if my_ip:
                     for scapy_name, scapy_obj in ifaces.items():
-                        if getattr(scapy_obj, 'ip', None) == my_ip or (
-                            hasattr(scapy_obj, 'ips') and my_ip in scapy_obj.ips.get(4, [])
-                        ):
+                        is_match = getattr(scapy_obj, 'ip', None) == my_ip or (
+                            hasattr(scapy_obj, 'ips') and (
+                                (isinstance(scapy_obj.ips, dict) and my_ip in scapy_obj.ips.get(4, []))
+                                or (isinstance(scapy_obj.ips, (list, tuple, set)) and my_ip in scapy_obj.ips)
+                            )
+                        )
+                        if is_match:
                             self._interface = scapy_obj
                             self._win_interface_name = getattr(scapy_obj, 'name', 'Wi-Fi')
                             self._self_mac = getattr(scapy_obj, 'mac', None)

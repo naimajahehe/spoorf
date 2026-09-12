@@ -2,6 +2,26 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.20] - 2026-09-12
+
+### Core Network Engine & Reliability Bug Fixes (Prioritas 1 Kritis)
+- **Scapy Dual-Type Interface Resolution — `python-service/src/core/network.py`, `spoofer.py`, & `discovery/dhcp.py`**:
+  - **Akar Masalah**: Pada Windows dengan Npcap driver, atribut `scapy_obj.ips` adalah dictionary bertipe integer address-family (`{4: ['192.168.1.5'], 6: []}`). Pengecekan terdahulu menggunakan `my_ip in s_obj.ips`, yang di Python mengecek *keys* (integer 4/6) alih-alih nilai IP (string), sehingga selalu mengevaluasi ke `False`. Akibatnya, `get_self_mac()`, `start_dhcp_sniffer()`, dan `refresh_interface()` gagal mengenali adapter aktif dan fallback ke antarmuka sembarang (seperti WSL, Hyper-V, atau VirtualBox adapter).
+  - **Solusi**: Menerapkan pengecekan dual-type defensif: `getattr(s_obj, 'ip', None) == my_ip or (hasattr(s_obj, 'ips') and ((isinstance(s_obj.ips, dict) and my_ip in s_obj.ips.get(4, [])) or (isinstance(s_obj.ips, (list, tuple, set)) and my_ip in s_obj.ips)))`. Mendukung 100% objek Scapy riil Windows sekaligus mempertahankan kompatibilitas mock list pada unit test.
+- **Windows Kernel IP Forwarding Lifecycle & Exception Rollback — `python-service/src/core/redirector/transparent_gateway.py`**:
+  - **Akar Masalah**: `set_ip_forwarding(True)` dipanggil secara langsung di dalam blok mutex `with self._lock:` (pelanggaran Invariant 3: No I/O inside mutex). Selain itu, pemanggilan tersebut tidak mencatat baseline status awal forwarding komputer operator (`_fwd_was_enabled`), dan bila inisialisasi sniffer mengalami kegagalan, sesi ARP spoofing tidak di-rollback, menyebabkan kebocoran sesi dan status kernel forwarding tertahan aktif.
+  - **Solusi**: Memindahkan `set_ip_forwarding` ke luar mutex, mencatat baseline forwarding jika belum tersentuh, menambahkan penanganan `try...except` dengan auto-rollback memanggil `spoofer.stop()` bila terjadi kegagalan startup, serta memulihkan kernel forwarding ke baseline awal saat seluruh sesi berakhir.
+- **WebSocket Coroutine Exception Handling & Dead Socket Pruning — `python-service/src/server.py`**:
+  - **Akar Masalah**: Pada metode `ConnectionManager.broadcast()`, pemanggilan `asyncio.run_coroutine_threadsafe(connection.send_json(message), loop)` tidak pernah mengaitkan callback selesai. Jika klien websocket disconnect mendadak, exception coroutine tidak diambil (`Future exception was never retrieved`), dan socket mati tertinggal di `self.active_connections`, memicu kebocoran memori dan error berulang pada setiap broadcast berikutnya.
+  - **Solusi**: Menambahkan handler `_safe_send_done(fut, conn)` yang dipasang via `fut.add_done_callback(...)`. Bila terjadi kegagalan transmisi, koneksi yang mati langsung dipangkas secara otomatis dari `self.active_connections`.
+- **Thread-Safe TTL DNS Cache for Walled Garden Passthrough — `python-service/src/core/redirector/dns_spoofer.py`**:
+  - **Akar Masalah**: Panggilan `socket.gethostbyname(qname)` untuk domain whitelist dieksekusi secara sinkron di dalam sniffing loop, memblokir thread sniffing selama 5–10 detik saat resolusi DNS lambat atau upstream sedang down.
+  - **Solusi**: Menambahkan in-memory DNS cache `_DNS_RESOLVE_CACHE` dengan kunci nama domain, nilai IP, dan TTL 300 detik yang dilindungi mutex thread-safe `_DNS_RESOLVE_CACHE_LOCK`.
+- **Pengujian Otomatis & Verifikasi Menyeluruh**:
+  - Menambahkan rangkaian unit test baru di `python-service/tests/test_unit_core_fixes.py` (WebSocket exception pruning, DNS cache hit/expiry, dan Transparent Gateway rollback).
+  - Menambahkan test case dual-type Scapy dict matching di `test_unit_network.py` dan `test_unit_discovery.py`.
+  - Hasil verifikasi: **340/340 Python tests PASSED** dan **40/40 Node.js backend tests PASSED** (Total: **380 tests 100% green** tanpa satu pun kegagalan/regresi).
+
 ## [v2.41.19] - 2026-09-11
 
 ### Performance Overhaul: On-Demand Telemetry, Table Virtualization, and GPU Shader Optimization
