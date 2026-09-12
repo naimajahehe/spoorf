@@ -1940,19 +1940,16 @@ export class DeviceManager extends EventEmitter {
             if (dev.mac.toLowerCase() === normMac || (dev.profile_id && dev.profile_id === updated.profile_id)) {
                 dev.alias = alias;
                 dev.profile_id = updated.profile_id;
-                dev.is_online = true;
                 this.devices.set(ip, dev);
                 this.emit('deviceUpdated', dev);
                 found = true;
             }
         }
         if (!found && updated && updated.ip) {
-            updated.is_online = true;
             this.devices.set(updated.ip, updated);
         }
-        await this.db.setDeviceOnlineStatus(mac, true, this.currentNetworkId);
         this.emit('devicesUpdated', Array.from(this.devices.values()));
-        return { ...updated, is_online: true };
+        return updated;
     }
 
     async setSpeedLimit(ip: string, limit: number, gatewayIp?: string): Promise<Device> {

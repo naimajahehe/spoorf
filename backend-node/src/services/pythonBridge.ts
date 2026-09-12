@@ -95,6 +95,7 @@ export class PythonBridge extends EventEmitter {
     private ready: boolean = false;
     private wsEverConnected: boolean = false; // true setelah WS pertama tersambung; membedakan reconnect (potensi restart Python) dari koneksi awal
     private healthTimer: ReturnType<typeof setInterval> | null = null; // monitor periodik: re-arm WS mati
+    private reconnectTimer: NodeJS.Timeout | null = null;
     private consecutiveHealthFailures: number = 0; // hysteresis counter untuk mencegah flapping
     private isInternalSpawn: boolean = false;
 
@@ -199,7 +200,13 @@ export class PythonBridge extends EventEmitter {
             throw new BridgeHttpError(res.status, safeMessage);
         }
 
-        if (data?.success === false) {
+        if (!data || typeof data !== 'object') {
+            throw new BridgeOperationError(
+                `Invalid response payload received from Python engine for ${operation}.`
+            );
+        }
+
+        if (data.success === false) {
             throw new BridgeOperationError(
                 downstreamMessage?.slice(0, 500) || `${operation} was rejected by Python engine.`
             );
@@ -428,6 +435,15 @@ export class PythonBridge extends EventEmitter {
     }
 
     private connectWebSocket(): void {
+        if (this.reconnectTimer) {
+            clearTimeout(this.reconnectTimer);
+            this.reconnectTimer = null;
+        }
+
+        if (this.ws !== null && (this.ws.readyState === WebSocket.CONNECTING || this.ws.readyState === WebSocket.OPEN)) {
+            return;
+        }
+
         try {
             const token = process.env.SENTINEL_API_TOKEN;
             this.ws = new WebSocket(this.wsUrl, token ? { headers: { 'x-sentinel-token': token } } : undefined);
@@ -437,6 +453,10 @@ export class PythonBridge extends EventEmitter {
             });
 
             this.ws.on('open', () => {
+                if (this.reconnectTimer) {
+                    clearTimeout(this.reconnectTimer);
+                    this.reconnectTimer = null;
+                }
                 console.log(`🔌 Connected to Python event stream via WebSocket (${this.wsUrl})`);
                 // Keandalan deteksi restart (FASE-1): bila ini RE-connect (pernah terhubung lalu putus),
                 // Python bisa saja baru restart & kehilangan semua sesi spoof. Pancarkan 'pythonReachable'
@@ -462,9 +482,17 @@ export class PythonBridge extends EventEmitter {
                 // Lepas referensi socket mati agar markReachable() bisa menyambung ulang
                 // saat Python kembali hidup setelah sempat dianggap offline.
                 this.ws = null;
+                if (this.reconnectTimer) {
+                    clearTimeout(this.reconnectTimer);
+                    this.reconnectTimer = null;
+                }
                 // Reconnect after 3 seconds if Python is still active
                 if (this.ready) {
-                    setTimeout(() => this.connectWebSocket(), 3000);
+                    this.reconnectTimer = setTimeout(() => {
+                        this.reconnectTimer = null;
+                        this.connectWebSocket();
+                    }, 3000);
+                    (this.reconnectTimer as any).unref?.();
                 }
             });
         } catch (e) {
@@ -1100,8 +1128,17 @@ export class PythonBridge extends EventEmitter {
     }
 
     stop(): void {
+        if (this.reconnectTimer) {
+            clearTimeout(this.reconnectTimer);
+            this.reconnectTimer = null;
+        }
+        if (this.healthTimer) {
+            clearInterval(this.healthTimer);
+            this.healthTimer = null;
+        }
         if (this.ws) {
             try { this.ws.close(); } catch {}
+            this.ws = null;
         }
         if (this.isInternalSpawn && this.process) {
             console.log('🛑 Terminating Python child process...');

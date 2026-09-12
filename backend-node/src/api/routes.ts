@@ -23,7 +23,8 @@ export function respondError(res: Response, err: any, status = 500): void {
         isBridgeHttpError(err) &&
         err.status >= 400 &&
         err.status < 500;
-    if (isOffline || isDownstreamValidation) {
+    const isFeatureRestricted = err instanceof FeatureLimitError || err instanceof FeatureLockedError;
+    if (isOffline || isDownstreamValidation || isFeatureRestricted) {
         // eslint-disable-next-line no-console
         console.warn(`⚠️ [API Warning] ${msg || 'Python Engine Offline / Aborted'}`);
     } else {
@@ -37,7 +38,7 @@ export function respondError(res: Response, err: any, status = 500): void {
         isDownstreamValidation ||
         isBridgeOperationError(err) ||
         (msg !== '' && OPERATIONAL_ERROR_RE.test(msg));
-    const responseStatus = isOffline ? 503 : (isDownstreamValidation ? err.status : status);
+    const responseStatus = isOffline ? 503 : (isDownstreamValidation ? err.status : (isFeatureRestricted ? 403 : status));
     res.status(responseStatus).json({
         success: false,
         error: isOperational ? msg : 'Terjadi kesalahan internal pada server.'
@@ -55,6 +56,16 @@ function parsePositiveInt(value: unknown, fallback: number): number {
 
 export const createRouter = (deviceManager: DeviceManager, licenseManager?: LicenseManager) => {
     const router = Router();
+
+    const assertCanArsenal = () => {
+        const lic = licenseManager || (deviceManager as any)?.license;
+        if (lic && typeof lic.checkCanArsenal === 'function') {
+            const check = lic.checkCanArsenal();
+            if (!check.allowed) {
+                throw new FeatureLockedError(check.reason || 'Fitur VIP Arsenal (Bettercap & SYN Scan) khusus untuk pengguna PRO/VIP.');
+            }
+        }
+    };
 
     // Health check with service readiness
     router.get(['/health', '/api/health'], (req: Request, res: Response) => {
@@ -217,14 +228,15 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
         try {
             const { mac } = req.params;
             const { alias } = req.body;
-            if (!alias || typeof alias !== 'string') {
+            if (alias === undefined || typeof alias !== 'string') {
                 return res.status(400).json({ success: false, error: 'Valid alias string is required' });
             }
-            const updated = await deviceManager.setDeviceAlias(mac, alias.trim());
+            const cleanAlias = alias.trim();
+            const updated = await deviceManager.setDeviceAlias(mac, cleanAlias);
             res.json({
                 success: true,
                 device: updated,
-                message: `Alias for ${mac} updated to "${alias}"`
+                message: cleanAlias ? `Alias for ${mac} updated to "${cleanAlias}"` : `Alias for ${mac} cleared`
             });
         } catch (error: any) {
             respondError(res, error);
@@ -236,7 +248,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
         try {
             const { ip } = req.params;
             const { limit } = req.body;
-            if (limit === undefined || typeof limit !== 'number') {
+            if (limit === undefined || typeof limit !== 'number' || !Number.isFinite(limit) || Number.isNaN(limit) || limit < 0 || limit > 100) {
                 return res.status(400).json({ success: false, error: 'Numeric speed limit (0-100) is required' });
             }
             const updated = await deviceManager.setSpeedLimit(ip, limit);
@@ -534,6 +546,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
 
     router.post('/api/bettercap/dns/rules', async (req: Request, res: Response) => {
         try {
+            assertCanArsenal();
             const { domain, target_ip, action, is_enabled } = req.body;
             if (!domain) {
                 return res.status(400).json({ success: false, error: 'Domain is required' });
@@ -547,6 +560,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
 
     router.put('/api/bettercap/dns/rules/:id', async (req: Request, res: Response) => {
         try {
+            assertCanArsenal();
             const { id } = req.params;
             const { domain, target_ip, action, is_enabled } = req.body;
             const result = await deviceManager.updateBettercapDnsRule(id, { domain, target_ip, action, is_enabled });
@@ -558,6 +572,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
 
     router.delete('/api/bettercap/dns/rules/:id', async (req: Request, res: Response) => {
         try {
+            assertCanArsenal();
             const { id } = req.params;
             const result = await deviceManager.deleteBettercapDnsRule(id);
             res.json(result);
@@ -568,6 +583,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
 
     router.post('/api/bettercap/dns/spoof-all', async (req: Request, res: Response) => {
         try {
+            assertCanArsenal();
             const { enabled, address } = req.body;
             const result = await deviceManager.setBettercapDnsSpoofAll(enabled === true, address || '');
             res.json(result);
@@ -578,6 +594,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
 
     router.post('/api/bettercap/dns/hosts', async (req: Request, res: Response) => {
         try {
+            assertCanArsenal();
             const { content, default_address, action } = req.body;
             if (!content) {
                 return res.status(400).json({ success: false, error: 'content is required' });
@@ -591,6 +608,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
 
     router.post('/api/bettercap/dns/ttl', async (req: Request, res: Response) => {
         try {
+            assertCanArsenal();
             const ttl = parseInt(req.body?.ttl, 10);
             const result = await deviceManager.setBettercapDnsTtl(isNaN(ttl) ? 10 : ttl);
             res.json(result);
@@ -611,6 +629,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
 
     router.delete('/api/bettercap/credentials', async (_req: Request, res: Response) => {
         try {
+            assertCanArsenal();
             await deviceManager.clearBettercapCredentials();
             res.json({ success: true, message: 'Credentials cleared' });
         } catch (err: any) {
@@ -620,6 +639,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
 
     router.post('/api/bettercap/syn-scan', async (req: Request, res: Response) => {
         try {
+            assertCanArsenal();
             const { target_ip, ports, profile } = req.body;
             if (!target_ip) {
                 return res.status(400).json({ success: false, error: 'Target IP is required' });

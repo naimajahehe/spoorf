@@ -57,9 +57,18 @@ export interface Device {
     vendor_confidence?: number;
     type_confidence?: number;
     hostname_confidence?: number;
-    profile_evidence?: string[];
+    profile_evidence?: ProfileEvidence[];
     profiled_at?: string;
     profile_version?: number;
+}
+
+export interface ProfileEvidence {
+    source: string;
+    group: string;
+    field: string;
+    value: string;
+    strength: number;
+    observed_at: string;
 }
 
 export interface ProfileRefreshSummary {

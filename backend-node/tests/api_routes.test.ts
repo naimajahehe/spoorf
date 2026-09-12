@@ -19,10 +19,7 @@ export async function runApiRoutesTests() {
     {
         const validateAliasRequest = (body: any): { valid: boolean; error?: string } => {
             const { alias } = body;
-            if (!alias || typeof alias !== 'string') {
-                return { valid: false, error: 'Valid alias string is required' };
-            }
-            if (alias.trim().length === 0) {
+            if (alias === undefined || typeof alias !== 'string') {
                 return { valid: false, error: 'Valid alias string is required' };
             }
             return { valid: true };
@@ -30,6 +27,7 @@ export async function runApiRoutesTests() {
 
         // Happy path
         assert.strictEqual(validateAliasRequest({ alias: 'My Phone' }).valid, true);
+        assert.strictEqual(validateAliasRequest({ alias: '' }).valid, true);
 
         // Negative: missing alias
         const resMissing = validateAliasRequest({});
@@ -40,18 +38,14 @@ export async function runApiRoutesTests() {
         const resNumber = validateAliasRequest({ alias: 12345 });
         assert.strictEqual(resNumber.valid, false);
 
-        // Edge case: blank whitespace string
-        const resBlank = validateAliasRequest({ alias: '   ' });
-        assert.strictEqual(resBlank.valid, false);
-
-        console.log('  ✓ Negative & Edge: Alias validation rejects missing, non-string, and blank inputs');
+        console.log('  ✓ Negative & Edge: Alias validation rejects missing and non-string inputs, allows clearing');
     }
 
     // Test 3: POST /api/devices/:ip/limit Validation (Negative Tests & Edge Cases)
     {
         const validateLimitRequest = (body: any): { valid: boolean; error?: string } => {
             const { limit } = body;
-            if (limit === undefined || typeof limit !== 'number' || isNaN(limit)) {
+            if (limit === undefined || typeof limit !== 'number' || !Number.isFinite(limit) || Number.isNaN(limit) || limit < 0 || limit > 100) {
                 return { valid: false, error: 'Numeric speed limit (0-100) is required' };
             }
             return { valid: true };
@@ -71,7 +65,12 @@ export async function runApiRoutesTests() {
         // Edge case: NaN
         assert.strictEqual(validateLimitRequest({ limit: NaN }).valid, false);
 
-        console.log('  ✓ Negative & Edge: Limit validation rejects non-numbers and NaN');
+        // Edge case: out of range
+        assert.strictEqual(validateLimitRequest({ limit: -1 }).valid, false);
+        assert.strictEqual(validateLimitRequest({ limit: 101 }).valid, false);
+        assert.strictEqual(validateLimitRequest({ limit: Infinity }).valid, false);
+
+        console.log('  ✓ Negative & Edge: Limit validation rejects non-numbers, NaN, and out-of-range');
     }
 
     // Test 4: L7 Interceptor & CA Payload Validations (SPEC-012)
@@ -449,5 +448,38 @@ export async function runApiRoutesTests() {
             { stopAllCalls: 1, stopCalls: 1, dbCloseCalls: 1, serverCloseCalls: 1, exitCalls: 1 }
         );
         console.log('  ✓ Contract: shared shutdown handler is idempotent across both signals');
+    }
+
+    // VIP Arsenal Licensing Guard Test: /api/bettercap/* mutation endpoints reject Free tier with 403
+    {
+        const manager = {
+            license: {
+                checkCanArsenal: () => ({ allowed: false, reason: 'Fitur VIP Arsenal terkunci khusus PRO/VIP.' })
+            },
+            runBettercapSynScan: async () => ({})
+        };
+        const router = createRouter(manager as any);
+        const layer = (router as any).stack.find((item: any) =>
+            item.route?.path === '/api/bettercap/syn-scan' && item.route.methods.post
+        );
+        assert.ok(layer, 'Bettercap syn-scan route must be registered');
+
+        let statusCode = 200;
+        let responseBody: any;
+        const res: any = {
+            status: (code: number) => { statusCode = code; return res; },
+            json: (data: any) => { responseBody = data; return res; }
+        };
+
+        await layer.route.stack[0].handle(
+            { body: { target_ip: '192.168.1.50' } } as any,
+            res,
+            () => {}
+        );
+
+        assert.strictEqual(statusCode, 403, 'Free tier must be rejected with 403 Forbidden');
+        assert.strictEqual(responseBody.success, false);
+        assert.match(responseBody.error, /VIP Arsenal/i);
+        console.log('  ✓ Licensing: Bettercap mutation routes reject Free tier with 403');
     }
 }

@@ -400,4 +400,15 @@ export class LicenseManager extends EventEmitter {
         }
         return { allowed: true };
     }
+
+    public checkCanArsenal(): { allowed: boolean; reason?: string } {
+        if (!this.currentLicense.can_arsenal) {
+            return {
+                allowed: false,
+                reason: 'Fitur VIP Arsenal (Bettercap & SYN Scan) terkunci khusus pengguna PRO/VIP.'
+            };
+        }
+        return { allowed: true };
+    }
 }
+

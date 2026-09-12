@@ -102,6 +102,7 @@ function App() {
         clearRogueDhcpAlert,
         scan,
         setAutoScan,
+        autoScanEnabled,
         block,
         unblock,
         deleteDevice,
@@ -641,6 +642,12 @@ function App() {
     }, [isConnected, authStatus?.license?.tier, canAutoScan]);
 
     useEffect(() => {
+        if (canAutoScan && (scanMode === 'auto' || scanMode === 'normal')) {
+            setScanMode(autoScanEnabled ? 'auto' : 'normal');
+        }
+    }, [autoScanEnabled, canAutoScan]);
+
+    useEffect(() => {
         if (!isScanning) {
             fetchApIsolation();
         }
@@ -1159,6 +1166,15 @@ function App() {
         }
     };
 
+    const devicesRef = useRef(devices);
+    devicesRef.current = devices;
+    const handleToggleInternetRef = useRef(handleToggleInternet);
+    handleToggleInternetRef.current = handleToggleInternet;
+    const blockRef = useRef(block);
+    blockRef.current = block;
+    const gatewayIpRef = useRef(gatewayIp);
+    gatewayIpRef.current = gatewayIp;
+
     // Listener untuk aksi interaktif dari notifikasi native Windows (tombol "Putuskan Perangkat" dan "Lihat Detail")
     useEffect(() => {
         if (!window.electronAPI?.onNotificationAction) return;
@@ -1170,20 +1186,20 @@ function App() {
             if (action === 'inspect' && ip) {
                 setSelectedInspectorIp(ip);
             } else if (action === 'block') {
-                const target = devices.find(d =>
+                const target = devicesRef.current.find(d =>
                     (mac && d.mac && d.mac.toLowerCase() === mac.toLowerCase()) ||
                     (ip && d.ip && d.ip === ip)
                 );
                 if (target) {
-                    handleToggleInternet(target);
+                    handleToggleInternetRef.current(target);
                 } else if (ip) {
-                    block(ip, gatewayIp).catch(() => {});
+                    blockRef.current(ip, gatewayIpRef.current).catch(() => {});
                 }
             }
         });
 
         return unsubscribe;
-    }, [devices, handleToggleInternet, block, gatewayIp]);
+    }, []);
 
     // Perhitungan cerdas & konsisten untuk perangkat terpilih
     const selectedDevices = useMemo(() => {
@@ -1219,14 +1235,16 @@ function App() {
         }
 
         // Kunci diakuisisi SINKRON sebelum IIFE async agar klik kedua langsung tertolak.
-        busyToggleRef.current = unblockedSelected[0]?.ip ?? 'batch';
+        const firstKey = (unblockedSelected[0]?.ip && unblockedSelected[0]?.ip.trim() !== '') ? unblockedSelected[0].ip : (unblockedSelected[0]?.mac ?? 'batch');
+        busyToggleRef.current = firstKey;
         // Proses satu-per-satu berurutan: spinner berpindah dari perangkat satu ke berikutnya,
         // menunggu tiap pemutusan benar-benar selesai (bukan serentak + timer).
         void (async () => {
             try {
                 for (const d of unblockedSelected) {
-                    setBusyToggleIp(d.ip);
-                    setLoadingIps(prev => new Set(prev).add(d.ip));
+                    const targetKey = d.ip && d.ip.trim() !== '' ? d.ip : d.mac;
+                    setBusyToggleIp(targetKey);
+                    setLoadingIps(prev => new Set(prev).add(targetKey));
                     try {
                         await block(d.ip, gatewayIp);
                     } catch {
@@ -1234,7 +1252,7 @@ function App() {
                     } finally {
                         setLoadingIps(prev => {
                             const next = new Set(prev);
-                            next.delete(d.ip);
+                            next.delete(targetKey);
                             return next;
                         });
                     }
@@ -1252,20 +1270,22 @@ function App() {
         if (blockedSelected.length === 0) return;
 
         // Kunci diakuisisi SINKRON sebelum IIFE async agar klik kedua langsung tertolak.
-        busyToggleRef.current = blockedSelected[0]?.ip ?? 'batch';
+        const firstKey = (blockedSelected[0]?.ip && blockedSelected[0]?.ip.trim() !== '') ? blockedSelected[0].ip : (blockedSelected[0]?.mac ?? 'batch');
+        busyToggleRef.current = firstKey;
         void (async () => {
             try {
                 for (const d of blockedSelected) {
-                    setBusyToggleIp(d.ip);
-                    setLoadingIps(prev => new Set(prev).add(d.ip));
+                    const targetKey = d.ip && d.ip.trim() !== '' ? d.ip : d.mac;
+                    setBusyToggleIp(targetKey);
+                    setLoadingIps(prev => new Set(prev).add(targetKey));
                     try {
-                        await unblock(d.ip);
+                        await unblock(targetKey);
                     } catch {
                         // Kegagalan per-perangkat sudah ditampilkan via toast; lanjut ke berikutnya.
                     } finally {
                         setLoadingIps(prev => {
                             const next = new Set(prev);
-                            next.delete(d.ip);
+                            next.delete(targetKey);
                             return next;
                         });
                     }

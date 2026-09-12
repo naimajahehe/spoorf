@@ -172,6 +172,9 @@ export function useWebSocket() {
     const pendingToggleOpsRef = useRef<Map<string, { resolve: () => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout>; mac?: string }>>(new Map());
     const refreshAbortControllerRef = useRef<AbortController | null>(null);
     const refreshRequestRef = useRef<(generation?: number) => void>(() => {});
+    const [autoScanEnabled, setAutoScanEnabled] = useState<boolean>(() => {
+        try { return localStorage.getItem('sentinel_autoscan') !== '0'; } catch { return true; }
+    });
 
     // ===== Live Activity Feed (event kronologis manusiawi untuk halaman Aktivitas) =====
     const [activityLog, setActivityLog] = useState<ActivityEvent[]>([]);
@@ -415,6 +418,11 @@ export function useWebSocket() {
             refreshAbortControllerRef.current?.abort();
             refreshAbortControllerRef.current = null;
             refreshSequencerRef.current.startGeneration();
+            pendingToggleOpsRef.current.forEach(op => {
+                clearTimeout(op.timer);
+                op.reject(new Error('Koneksi terputus saat operasi berlangsung'));
+            });
+            pendingToggleOpsRef.current.clear();
             setWifiInfo(prev => ({ ...prev, connected: false, state: 'disconnected' }));
             setTelemetry(prev => ({ ...prev, connected: false, download: 0, upload: 0, latency: 0 }));
             console.log('WebSocket disconnected');
@@ -474,13 +482,22 @@ export function useWebSocket() {
                 setDevices(prev => {
                     const updated = prev.map(d =>
                         ((d.mac && updatedDevice.mac && d.mac.toLowerCase() === updatedDevice.mac.toLowerCase()) || (d.ip && updatedDevice.ip && d.ip === updatedDevice.ip))
-                            ? { ...d, ...updatedDevice, is_online: true }
+                            ? { ...d, ...updatedDevice, is_online: (updatedDevice.is_online !== undefined ? updatedDevice.is_online : d.is_online) }
                             : d
                     );
                     deviceRef.current = updated;
                     detectGateway(updated);
                     return updated;
                 });
+            }
+        });
+
+        newSocket.on('autoScanChanged', (data: { enabled: boolean }) => {
+            if (data && typeof data.enabled === 'boolean') {
+                setAutoScanEnabled(data.enabled);
+                try {
+                    localStorage.setItem('sentinel_autoscan', data.enabled ? '1' : '0');
+                } catch {}
             }
         });
 
@@ -918,6 +935,11 @@ export function useWebSocket() {
             refreshAbortControllerRef.current?.abort();
             refreshAbortControllerRef.current = null;
             refreshSequencerRef.current.startGeneration();
+            pendingToggleOpsRef.current.forEach(op => {
+                clearTimeout(op.timer);
+                op.reject(new Error('Komponen dibongkar saat operasi berlangsung'));
+            });
+            pendingToggleOpsRef.current.clear();
             newSocket.close();
         };
     }, [pushActivity, recordLiveStateChange, refreshAuthoritativeState]);
@@ -940,6 +962,7 @@ export function useWebSocket() {
     // Aktif/nonaktifkan Auto Scan di backend (watchdog + scan-saat-perangkat-baru + scan seketika).
     // Pilihan disimpan agar diingat lintas sesi.
     const setAutoScan = (enabled: boolean) => {
+        setAutoScanEnabled(enabled);
         try { localStorage.setItem('sentinel_autoscan', enabled ? '1' : '0'); } catch {}
         if (socket?.connected) {
             socket.emit('setAutoScan', { enabled });
@@ -952,8 +975,11 @@ export function useWebSocket() {
         if (!pending) return false;
         clearTimeout(pending.timer);
         pendingToggleOpsRef.current.delete(key);
-        if (ok) pending.resolve();
-        else pending.reject(new Error(errorMsg || 'Operasi gagal'));
+        if (ok) {
+            pending.resolve();
+        } else {
+            pending.reject(new Error(errorMsg || 'Operasi gagal di backend'));
+        }
         return true;
     };
 
@@ -970,8 +996,11 @@ export function useWebSocket() {
                 if (pending.mac && pending.mac.toLowerCase() === macLower) {
                     clearTimeout(pending.timer);
                     pendingToggleOpsRef.current.delete(key);
-                    if (ok) pending.resolve();
-                    else pending.reject(new Error(errorMsg || 'Operasi gagal'));
+                    if (ok) {
+                        pending.resolve();
+                    } else {
+                        pending.reject(new Error(errorMsg || 'Operasi gagal di backend'));
+                    }
                     return;
                 }
             }
@@ -1041,7 +1070,7 @@ export function useWebSocket() {
         setDevices(prev => {
             const updated = prev.map(d =>
                 d.mac && d.mac.toLowerCase() === normMac
-                    ? { ...d, alias, is_online: true }
+                    ? { ...d, alias }
                     : d
             );
             deviceRef.current = updated;
@@ -1480,6 +1509,7 @@ export function useWebSocket() {
         clearRogueDhcpAlert,
         scan,
         setAutoScan,
+        autoScanEnabled,
         block,
         unblock,
         deleteDevice,

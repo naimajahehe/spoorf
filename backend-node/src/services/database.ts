@@ -1405,14 +1405,11 @@ export class DatabaseService {
 
         this.db.prepare(`
             UPDATE devices 
-            SET alias = ?, profile_id = ?, is_online = 1, last_seen = datetime('now', 'localtime') 
+            SET alias = ?, profile_id = ?, last_seen = datetime('now', 'localtime') 
             WHERE (LOWER(mac) = LOWER(?) OR profile_id = ?) AND network_id = ?
         `).run(alias, pId, normMac, pId, networkId);
 
         const updated = await this.getDeviceByMac(normMac, networkId);
-        if (updated) {
-            updated.is_online = true;
-        }
         return updated!;
     }
 

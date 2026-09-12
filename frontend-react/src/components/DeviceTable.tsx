@@ -80,14 +80,14 @@ export const DeviceTable: FC<Props> = React.memo(({
     const [copiedKey, setCopiedKey] = useState<string | null>(null);
     const [sortField, setSortField] = useState<SortField>('default');
     const [sortOrder, setSortOrder] = useState<SortOrder>('asc');
-    const [activeDockIp, setActiveDockIp] = useState<string | null>(null);
+    const [activeDockKey, setActiveDockKey] = useState<string | null>(null);
     const [editingDevice, setEditingDevice] = useState<Device | null>(null);
     const [editAliasValue, setEditAliasValue] = useState<string>('');
     const [deletingDevice, setDeletingDevice] = useState<Device | null>(null);
 
     React.useEffect(() => {
         const handleClickOutside = () => {
-            setActiveDockIp(null);
+            setActiveDockKey(null);
         };
         window.addEventListener('click', handleClickOutside);
         return () => window.removeEventListener('click', handleClickOutside);
@@ -291,9 +291,11 @@ export const DeviceTable: FC<Props> = React.memo(({
                     const ttlValue = device.ttl || (device.os?.includes('Windows') ? 128 : 64);
                     const ttlDesc = ttlValue >= 100 ? 'Windows NT' : ttlValue <= 75 ? (device.os ? formatDeviceOs(device.os, device.is_gateway, device.vendor) : 'Mobile / POSIX') : 'Network Appliance';
 
+                    const rowKey = device.mac || device.ip;
+
                     return (
                         <tbody
-                            key={device.mac || device.ip}
+                            key={rowKey}
                             ref={rowVirtualizer.measureElement}
                             data-index={virtualRow.index}
                             className="border-b border-white/[0.04]"
@@ -560,9 +562,9 @@ export const DeviceTable: FC<Props> = React.memo(({
                                         onClick={(e) => e.stopPropagation()}
                                     >
                                         <AnimatePresence mode="wait">
-                                            {activeDockIp !== device.ip ? (
+                                            {activeDockKey !== rowKey ? (
                                                 <motion.div
-                                                    key={`access-${device.ip}`}
+                                                    key={`access-${rowKey}`}
                                                     initial={{ opacity: 0, scale: 0.94, filter: "blur(2px)" }}
                                                     animate={{ opacity: 1, scale: 1, filter: "blur(0px)" }}
                                                     exit={{ opacity: 0, scale: 0.94, filter: "blur(2px)" }}
@@ -746,11 +748,11 @@ export const DeviceTable: FC<Props> = React.memo(({
                                                     type="button"
                                                     onClick={(e) => {
                                                         e.stopPropagation();
-                                                        setActiveDockIp(prev => (prev === device.ip ? null : device.ip));
+                                                        setActiveDockKey(prev => (prev === rowKey ? null : rowKey));
                                                     }}
                                                     className={cn(
                                                         "p-1.5 transition-all duration-200 bg-transparent border-0 outline-none flex items-center justify-center rounded cursor-pointer",
-                                                        activeDockIp === device.ip ? "text-white rotate-90" : "text-zinc-400 hover:text-white rotate-0"
+                                                        activeDockKey === rowKey ? "text-white rotate-90" : "text-zinc-400 hover:text-white rotate-0"
                                                     )}
                                                     title="Opsi Perangkat"
                                                     aria-label="Opsi Perangkat"
@@ -760,7 +762,7 @@ export const DeviceTable: FC<Props> = React.memo(({
 
                                                 {/* Floating BeUI Motion Dock directly anchored to the left of the 3-dots button */}
                                                 <AnimatePresence>
-                                                    {activeDockIp === device.ip && (
+                                                    {activeDockKey === rowKey && (
                                                         <motion.div
                                                             initial={{ opacity: 0, scale: 0.88, x: 12, y: "-50%" }}
                                                             animate={{ opacity: 1, scale: 1, x: 0, y: "-50%" }}
@@ -775,7 +777,7 @@ export const DeviceTable: FC<Props> = React.memo(({
                                                                     onClick={() => {
                                                                         setEditingDevice(device);
                                                                         setEditAliasValue(device.alias || device.hostname || '');
-                                                                        setActiveDockIp(null);
+                                                                        setActiveDockKey(null);
                                                                     }}
                                                                     className="hover:text-white hover:bg-white/[0.08]"
                                                                 >
@@ -786,7 +788,7 @@ export const DeviceTable: FC<Props> = React.memo(({
                                                                     title="Hapus dari Database"
                                                                     onClick={() => {
                                                                         setDeletingDevice(device);
-                                                                        setActiveDockIp(null);
+                                                                        setActiveDockKey(null);
                                                                     }}
                                                                     className="text-rose-400 hover:text-rose-300 hover:bg-rose-500/20"
                                                                 >
@@ -795,7 +797,7 @@ export const DeviceTable: FC<Props> = React.memo(({
                                                                 <DockSeparator />
                                                                 <DockItem
                                                                     title="Tutup Menu"
-                                                                    onClick={() => setActiveDockIp(null)}
+                                                                    onClick={() => setActiveDockKey(null)}
                                                                     className="text-zinc-500 hover:text-zinc-300 hover:bg-white/[0.05]"
                                                                 >
                                                                     <X size={13} />
@@ -835,11 +837,11 @@ export const DeviceTable: FC<Props> = React.memo(({
                                                                             </span>
                                                                             <button
                                                                                 type="button"
-                                                                                onClick={(e) => handleCopy(`ip-${device.ip}`, device.ip, e)}
+                                                                                onClick={(e) => handleCopy('ip-' + rowKey, device.ip || device.last_ip || '-', e)}
                                                                                 className="p-1 rounded text-zinc-500 hover:text-white transition-colors"
                                                                                 title="Copy IP"
                                                                             >
-                                                                                {copiedKey === `ip-${device.ip}` ? (
+                                                                                {copiedKey === 'ip-' + rowKey ? (
                                                                                     <Check size={12} className="text-emerald-400" />
                                                                                 ) : (
                                                                                     <Copy size={12} />
@@ -847,7 +849,7 @@ export const DeviceTable: FC<Props> = React.memo(({
                                                                             </button>
                                                                         </div>
                                                                         <div className="flex items-baseline justify-between">
-                                                                            <span className="text-sm font-mono font-semibold text-white">{device.ip}</span>
+                                                                            <span className="text-sm font-mono font-semibold text-white">{device.ip || device.last_ip || '-'}</span>
                                                                             {device.is_gateway && (
                                                                                 <span className="text-[10px] font-mono text-zinc-400 bg-white/[0.06] px-1.5 py-0.5 rounded">Gateway</span>
                                                                             )}
@@ -991,11 +993,11 @@ export const DeviceTable: FC<Props> = React.memo(({
                                                                                 {device.ipv6_link_local && (
                                                                                     <button
                                                                                         type="button"
-                                                                                        onClick={(e) => handleCopy(`ipv6-ll-${device.ip}`, device.ipv6_link_local!, e)}
+                                                                                        onClick={(e) => handleCopy('ipv6-ll-' + rowKey, device.ipv6_link_local!, e)}
                                                                                         className="p-1 rounded text-zinc-500 hover:text-white transition-colors"
                                                                                         title="Copy IPv6 Link-Local"
                                                                                     >
-                                                                                        {copiedKey === `ipv6-ll-${device.ip}` ? (
+                                                                                        {copiedKey === 'ipv6-ll-' + rowKey ? (
                                                                                             <Check size={12} className="text-emerald-400" />
                                                                                         ) : (
                                                                                             <Copy size={12} />
@@ -1021,11 +1023,11 @@ export const DeviceTable: FC<Props> = React.memo(({
                                                                                 {(device.ipv6_global || (device.ipv6_addresses && device.ipv6_addresses.length > 0)) && (
                                                                                     <button
                                                                                         type="button"
-                                                                                        onClick={(e) => handleCopy(`ipv6-glob-${device.ip}`, device.ipv6_global || (device.ipv6_addresses?.[0] || ''), e)}
+                                                                                        onClick={(e) => handleCopy('ipv6-glob-' + rowKey, device.ipv6_global || (device.ipv6_addresses?.[0] || ''), e)}
                                                                                         className="p-1 rounded text-zinc-500 hover:text-white transition-colors"
                                                                                         title="Copy IPv6 Global"
                                                                                     >
-                                                                                        {copiedKey === `ipv6-glob-${device.ip}` ? (
+                                                                                        {copiedKey === 'ipv6-glob-' + rowKey ? (
                                                                                             <Check size={12} className="text-emerald-400" />
                                                                                         ) : (
                                                                                             <Copy size={12} />

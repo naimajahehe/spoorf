@@ -2,6 +2,32 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.24] - 2026-09-12
+
+### Stage 4 (P1): Orchestration, WebSocket, Frontend UI & Desktop Packaging Hardening
+- **Backend Node Orchestrator & API Hardening — `backend-node/`**:
+  - **VIP Arsenal Licensing Guard (`assertCanArsenal`)**: Mengamankan seluruh rute mutasi dan serangan Bettercap (`/api/bettercap/dns/rules`, `/api/bettercap/dns/spoof-all`, `/api/bettercap/dns/hosts`, `/api/bettercap/dns/ttl`, `/api/bettercap/credentials`, `/api/bettercap/syn-scan`) agar menolak permintaan tier Free dengan HTTP 403 Forbidden dan log peringatan ramah.
+  - **Speed Limit Numeric Validation**: Memperketat validasi `POST /api/devices/:ip/limit` dengan `Number.isFinite`, penolakan nilai `NaN`, dan batasan rentang [0, 100].
+  - **Dukungan Pengosongan Alias**: Mengizinkan pengiriman string kosong `""` pada `PUT /api/devices/:mac/alias` untuk menghapus alias kustom perangkat dan kembali ke penamaan bawaan.
+  - **Preservasi Status Online Perangkat Offline saat Rename (BUG F-17)**: Menghapus mutasi paksa `is_online = 1` pada `database.ts:setDeviceAlias` dan `dev.is_online = true` pada `deviceManager.ts:setDeviceAlias`, sehingga perangkat offline yang diubah namanya tidak memicu lonceng/toast perangkat kembali online.
+  - **PythonBridge Robustness**: Menambahkan pelacakan timer rekoneksi WebSocket (`reconnectTimer`), guard terhadap soket duplikat paralel (`CONNECTING`/`OPEN`), pembersihan timer pada `stop()`, serta validasi objek non-null pada respons mutasi Python.
+- **Frontend React UI & Virtualization Integrity — `frontend-react/`**:
+  - **Resolusi Kolisi 3-Dots Perangkat Offline (BUG F-15 & F-16)**: Mengganti pelacakan menu dock `activeDockIp` menjadi `activeDockKey` yang berbasis `rowKey = device.mac || device.ip`. Mengeliminasi bug di mana seluruh baris perangkat offline (ber-IP kosong `""`) membuka dock titik 3 secara bersamaan dan menghasilkan duplikat React key.
+  - **Restorasi Massal Perangkat Offline**: Memperbaiki `handleRestoreSelected` pada `App.tsx` agar menggunakan identifikasi aman `targetKey = d.ip && d.ip.trim() !== '' ? d.ip : d.mac`, memastikan unblock perangkat offline yang dipilih berhasil dikirim ke backend.
+  - **Stabilisasi Listener Notifikasi Desktop**: Memindahkan referensi `devices`, `handleToggleInternet`, `block`, dan `gatewayIp` ke dalam React refs pada listener notifikasi interaktif Windows di `App.tsx`, mengeliminasi pendaftaran ulang listener berulang pada setiap detak telemetri.
+  - **Sinkronisasi Auto Scan Lintas Jendela**: Mengintegrasikan listener `autoScanChanged` pada `useWebSocket.ts` dan mengekspos `autoScanEnabled` untuk menjaga konsistensi toggle scan antar tab/jendela.
+  - **Pencegahan Memory Leak & Promise Hang**: Menambahkan pembersihan timer dan reject otomatis untuk seluruh `pendingToggleOpsRef` pada event `disconnect` dan unmount komponen `useWebSocket`.
+  - **Aligment Tipe Profiling**: Menyelaraskan interface `ProfileEvidence` terstruktur pada `src/types/index.ts`.
+- **Desktop Electron Supervisor & Packaging**:
+  - Memverifikasi pengamanan IPC `get-api-token-sync` dan `get-api-token` untuk rendering terisolasi.
+  - Memverifikasi mekanisme debounce pada `engine-restart`.
+- **Pengujian Otomatis & Verifikasi Menyeluruh**:
+  - Menjalankan 40 unit/integration test Node.js di `backend-node` (**40/40 PASSED**).
+  - Menjalankan 6 supervisor test Electron di `desktop-electron` (**6/6 PASSED**).
+  - Menjalankan 363 unittest Python di `python-service` (**363/363 PASSED**).
+  - Menjalankan TypeScript check & Vite build di `frontend-react` (**Build Clean 8.63s**).
+  - Total pengujian: **409 tests 100% green**.
+
 ## [v2.41.23] - 2026-09-12
 
 ### Stage 3 (P1): Profiling, Fingerprinting & Backend Reconciliation Hardening
