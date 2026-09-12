@@ -36,6 +36,7 @@ from .core.discovery import (
     pulse_host,
     get_mac_from_arp,
     LivenessWatchdogDaemon,
+    clear_discovery_caches,
 )
 from .core.discovery.profile_observation import (
     ProfileCollectorUnavailableError,
@@ -282,6 +283,7 @@ def network_watchdog_thread():
                     dhcp_cache.clear()
                     scanner._DEVICE_HISTORY.clear()
                     clear_wifi_cache()
+                    clear_discovery_caches()
                     try:
                         info = scanner.get_network_info()
                         last_interface = info.get('interface', '')

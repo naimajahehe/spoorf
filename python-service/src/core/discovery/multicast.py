@@ -146,11 +146,11 @@ def _parse_dns_identity(data: bytes, protocol: str) -> Dict[str, Any]:
     hostname = ""
     for candidate in candidates:
         clean = str(candidate).strip().rstrip(".")
-        if not clean or clean.startswith("_"):
+        if not clean or clean.startswith("_") or clean == "*":
             continue
         if clean.casefold().endswith(".local"):
             clean = clean[:-6].rstrip(".")
-        if clean:
+        if clean and clean != "*":
             hostname = clean
             break
 
@@ -379,12 +379,21 @@ def collect_ssdp_sensors(timeout: float = 0.4) -> Dict[str, Dict[str, str]]:
         if s:
             s.close()
 
-    # Ambil & parse deskriptor perangkat (maks 8 lokasi), masing-masing dengan
-    # SSRF-guard + baca terbatas via _fetch_ssdp_descriptor (M1 hardening).
-    for ip, loc in list(locations_to_fetch.items())[:8]:
-        info = _fetch_ssdp_descriptor(loc, ip)
-        if info:
-            _SSDP_DISCOVERED[ip] = info
+    # Ambil & parse deskriptor perangkat (maks 8 lokasi) secara paralel & bounded (M1 hardening).
+    items_to_fetch = list(locations_to_fetch.items())[:8]
+    if items_to_fetch:
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(items_to_fetch))) as pool:
+            future_map = {pool.submit(_fetch_ssdp_descriptor, loc, ip): ip for ip, loc in items_to_fetch}
+            done, _ = concurrent.futures.wait(future_map.keys(), timeout=0.6)
+            for f in done:
+                try:
+                    info = f.result()
+                    ip = future_map[f]
+                    if info:
+                        _SSDP_DISCOVERED[ip] = info
+                except Exception:
+                    pass
 
     return dict(_SSDP_DISCOVERED)
 
@@ -396,10 +405,10 @@ def collect_mdns_sensors(timeout: float = 0.4) -> Dict[str, Dict[str, str]]:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         s.settimeout(timeout)
         s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 255)
-        # PTR query untuk _services._dns-sd._udp.local
+        # PTR query untuk _services._dns-sd._udp.local dengan bit QU (Unicast-response 0x8001)
         query = (
             b'\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00'
-            b'\x09_services\x07_dns-sd\x04_udp\x05local\x00\x00\x0c\x00\x01'
+            b'\x09_services\x07_dns-sd\x04_udp\x05local\x00\x00\x0c\x80\x01'
         )
         s.sendto(query, ('224.0.0.251', 5353))
 
@@ -527,3 +536,9 @@ def get_ssdp_cache() -> Dict[str, Dict[str, str]]:
 
 def get_mdns_cache() -> Dict[str, Dict[str, str]]:
     return dict(_MDNS_DISCOVERED)
+
+def clear_discovery_caches() -> None:
+    """Bersihkan cache discovery multicast (SSDP & mDNS) saat pergantian jaringan."""
+    global _SSDP_DISCOVERED, _MDNS_DISCOVERED
+    _SSDP_DISCOVERED.clear()
+    _MDNS_DISCOVERED.clear()

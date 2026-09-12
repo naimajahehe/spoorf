@@ -288,7 +288,7 @@ class NetworkScanner:
             if not has_active_signal:
                 probe_disc: Dict[str, str] = {}
                 try:
-                    probe_sleeping_host_via_unicast_arp(ip, norm_mac, probe_disc, timeout=0.25)
+                    probe_sleeping_host_via_unicast_arp(ip, norm_mac, probe_disc, timeout=0.35)
                 except Exception:
                     pass
                 if ip not in probe_disc:
@@ -421,11 +421,14 @@ class NetworkScanner:
             except Exception as e:
                 logger.debug(f"Layer 2 ARP discovery exception: {e}")
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as discovery_executor:
+        discovery_executor = concurrent.futures.ThreadPoolExecutor(max_workers=3)
+        try:
             f_multi = discovery_executor.submit(_run_multicast_sensors)
             f_v6 = discovery_executor.submit(_run_ipv6_discovery)
             f_arp = discovery_executor.submit(_run_l2_arp_discovery)
             concurrent.futures.wait([f_multi, f_v6, f_arp], timeout=1.35)
+        finally:
+            discovery_executor.shutdown(wait=False, cancel_futures=True)
 
         # 5. Kumpulkan kandidat dari DHCP Cache, OS ARP Cache, dan Device History yang belum terverifikasi
         candidates: Dict[str, str] = {}
@@ -442,20 +445,24 @@ class NetworkScanner:
                         continue
                 except ValueError:
                     continue
-                candidates[d_ip] = d_mac
+                # Proteksi entri ARP kernel yang segar agar tidak tertimpa sewa DHCP lama
+                if d_ip not in candidates:
+                    candidates[d_ip] = d_mac
 
-        if cls._DEVICE_HISTORY:
-            for entry in cls._DEVICE_HISTORY.values():
-                h_ip = entry.get('ip')
-                h_mac = entry.get('mac')
-                if curr_net and h_ip and h_mac and is_valid_private_ip(h_ip) and is_valid_mac(h_mac):
-                    try:
-                        if ipaddress.IPv4Address(h_ip) not in curr_net:
-                            continue
-                    except ValueError:
+        with cls._HISTORY_LOCK:
+            history_entries = list(cls._DEVICE_HISTORY.values())
+
+        for entry in history_entries:
+            h_ip = entry.get('ip')
+            h_mac = entry.get('mac')
+            if curr_net and h_ip and h_mac and is_valid_private_ip(h_ip) and is_valid_mac(h_mac):
+                try:
+                    if ipaddress.IPv4Address(h_ip) not in curr_net:
                         continue
-                    if h_ip not in candidates:
-                        candidates[h_ip] = h_mac
+                except ValueError:
+                    continue
+                if h_ip not in candidates:
+                    candidates[h_ip] = h_mac
 
         # 6. Verifikasi Liveness untuk seluruh kandidat yang belum masuk 'discovered' (Doze Wakeup / Unicast ARP Probe)
         unverified = [
@@ -466,15 +473,18 @@ class NetworkScanner:
         if unverified:
             logger.info(f"📱 Memverifikasi {len(unverified)} host kandidat (Unicast ARP / Doze Probe)...")
             num_probe_workers = min(15, len(unverified))
-            with concurrent.futures.ThreadPoolExecutor(max_workers=num_probe_workers) as probe_executor:
+            probe_executor = concurrent.futures.ThreadPoolExecutor(max_workers=num_probe_workers)
+            try:
                 futures = [
                     probe_executor.submit(
                         probe_sleeping_host_via_unicast_arp,
-                        target_ip, target_mac, discovered, 0.25
+                        target_ip, target_mac, discovered, 0.35
                     )
                     for target_ip, target_mac in unverified
                 ]
                 concurrent.futures.wait(futures, timeout=1.5)
+            finally:
+                probe_executor.shutdown(wait=False, cancel_futures=True)
 
         # 6b. Rekonsiliasi Liveness IPv6 (dengan VERIFIKASI AKTIF paralel):
         # Kumpulkan dulu kandidat IPv6-only (MAC aktif di NDP/Multicast tapi belum ada di 'discovered'),
@@ -485,7 +495,7 @@ class NetworkScanner:
         v6_candidates = []  # (matched_ipv4, norm_v6_mac, v6_addr)
         for v6_mac, v6_data in discovered_ipv6.items():
             norm_v6_mac = v6_mac.lower().replace('-', ':')
-            already_in_discovered = any(m.lower().replace('-', ':') == norm_v6_mac for m in discovered.values())
+            already_in_discovered = any(m.lower().replace('-', ':') == norm_v6_mac for m in list(discovered.values()))
             if already_in_discovered:
                 continue
             matched_ipv4 = None
@@ -493,20 +503,30 @@ class NetworkScanner:
                 if c_mac.lower().replace('-', ':') == norm_v6_mac:
                     matched_ipv4 = c_ip
                     break
-            if not matched_ipv4 and norm_v6_mac in cls._DEVICE_HISTORY:
-                matched_ipv4 = cls._DEVICE_HISTORY[norm_v6_mac].get('ip')
+            if not matched_ipv4:
+                with cls._HISTORY_LOCK:
+                    if norm_v6_mac in cls._DEVICE_HISTORY:
+                        matched_ipv4 = cls._DEVICE_HISTORY[norm_v6_mac].get('ip')
             if not matched_ipv4:
                 dhcp_item = dhcp_snapshot.get(norm_v6_mac)
                 if dhcp_item and dhcp_item.get('ip') and is_valid_private_ip(dhcp_item['ip']):
                     matched_ipv4 = dhcp_item['ip']
             if not (matched_ipv4 and is_valid_private_ip(matched_ipv4)):
                 continue
+            # Cegah injeksi IP alien lintas-jaringan: verifikasi bahwa matched_ipv4 ada di subnet aktif!
+            if curr_net:
+                try:
+                    if ipaddress.IPv4Address(matched_ipv4) not in curr_net:
+                        continue
+                except ValueError:
+                    continue
             v6_addr = v6_data.get('link_local') or v6_data.get('global') or (v6_data.get('addresses') or [None])[0]
             if v6_addr:
                 v6_candidates.append((matched_ipv4, norm_v6_mac, v6_addr))
 
         if v6_candidates:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=min(10, len(v6_candidates))) as v6_exec:
+            v6_exec = concurrent.futures.ThreadPoolExecutor(max_workers=min(10, len(v6_candidates)))
+            try:
                 future_map = {
                     v6_exec.submit(verify_ipv6_alive, mac, addr, self_mac_for_probe): (ipv4, mac)
                     for (ipv4, mac, addr) in v6_candidates
@@ -522,6 +542,8 @@ class NetworkScanner:
                         discovered[ipv4] = mac
                     else:
                         logger.debug(f"🚫 [Dual-Stack Liveness] Host {ipv4} ({mac}) tidak menjawab probe IPv6 (entri NDP basi) -> dilewati")
+            finally:
+                v6_exec.shutdown(wait=False, cancel_futures=True)
 
         # 7. Pastikan Gateway tercakup
         if gateway_ip and gateway_ip not in discovered:

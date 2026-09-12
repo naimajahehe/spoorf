@@ -16,6 +16,7 @@ from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, asdict
 
 from ...utils.logger import logger
+from ..network import is_valid_private_ip
 
 # Batas maksimum jumlah port kustom untuk mencegah resource exhaustion (port sweep berlebih)
 MAX_CUSTOM_PORTS = 1024
@@ -122,6 +123,9 @@ class FastSYNScanner:
 
     def scan_host(self, target_ip: str, ports: Optional[List[int]] = None, profile: str = "top-20") -> Dict[str, Any]:
         """Jalankan pemindaian port pada target host."""
+        if not is_valid_private_ip(target_ip):
+            raise ValueError(f"Target IP '{target_ip}' is not a valid RFC 1918 private address")
+
         if ports is None or len(ports) == 0:
             if profile == "top-100":
                 target_ports = TOP_100_PORTS

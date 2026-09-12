@@ -2,6 +2,69 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.22] - 2026-09-12
+
+### Stage 2 (P1): Network Discovery, Probing & Topology Integrity Hardening
+- **Subnet Sweeping & Supernet Broadcast Guard — `discovery/arp.py`**:
+  - **Akar Masalah**: Filter kasar `not ip.endswith('.255')` membuang host unicast sah yang berakhiran `.255` pada supernet /16, /20, dan /22 (misal `10.0.1.255`), sedangkan pada subnet kecil (/28, /29) alamat broadcast asli (seperti `192.168.1.15`) tidak tersaring dan masuk sebagai perangkat hantu. Pada supernet > 1024 alamat, penyisiran hanya menyapu blok `/24` komputer operator sehingga router gateway pada slice lain (misal `10.50.0.1`) tidak pernah tersapu. Selain itu, ambang proteksi broadcast Scapy `> 1024` melewatkan subnet `/22` (tepat 1024 host), memicu 1024 siaran paket serial via Npcap.
+  - **Solusi**:
+    - Mengganti filter dengan perbandingan dinamis `ip != str(curr_net.broadcast_address)` dan `ip != str(curr_net.network_address)`.
+    - Memperluas penyisiran supernet dengan menyertakan irisan `/24` router gateway selain irisan operator.
+    - Menurunkan ambang batas proteksi broadcast storm menjadi `>= 512` alamat (/23 ke atas).
+    - Memasang batas waktu `timeout=1.5` pada seluruh eksekusi subprocess `arp -a` dan `arp -n` untuk mencegah thread hang permanen.
+    - Menyelaraskan ekstraksi ARP Linux agar menyaring subnet antarmuka aktif (`curr_net`).
+- **Multi-Vector Liveness Pulse Engine Safety & Starvation Prevention — `discovery/liveness.py`**:
+  - **Akar Masalah**: Bila IP pengontrol tidak dapat diselesaikan, `effective_src_ip` di-fallback ke `target_ip`. Mengirimkan ARP probe dengan `hwsrc=self_mac` dan `psrc=target_ip` merupakan pengumuman IP duplikat (RFC 5227) yang memicu popup peringatan *"Windows has detected an IP address conflict"* pada target. Balasan ARP juga memiliki evaluasi `or is_valid_mac(rcv_mac)` yang menerima MAC sembarang (proxy ARP). Selain itu, probing ICMP menjalankan `ping -n 3` di latar belakang (hingga 2.4 detik per target), menghabiskan kapasitas 32 worker `_PULSE_EXECUTOR` saat batch probe dijalankan.
+  - **Solusi**:
+    - Menyetel fallback `effective_src_ip = "0.0.0.0"` sesuai standar RFC 5227 Probe, sepenuhnya stealth dan tanpa memicu popup konflik.
+    - Menegakkan pencocokan MAC ketat (`rcv_mac == norm_mac`) untuk memvalidasi identitas responder.
+    - Mengubah parameter ICMP ping menjadi `-n 1` dengan batas `timeout=1.2` detik untuk menghemat 67% pemakaian thread pool dan resource CPU.
+- **Multicast Sensors & Cache Integrity — `discovery/multicast.py`**:
+  - **Akar Masalah**: Query mDNS pada `collect_mdns_sensors` menggunakan QCLASS `0x0001` tanpa bit QU unicast-response, sehingga responder mengirim multicast ke port 5353 sementara soket pengirim berada pada port ephemeral, menyebabkan 100% timeout pada deteksi Apple/Bonjour. Pada LLMNR, query wildcard `*` diekstrak dari respon dan dijadikan hostname perangkat. Struktur cache `_SSDP_DISCOVERED` dan `_MDNS_DISCOVERED` tidak pernah dibersihkan saat berpindah Wi-Fi. Pengambilan deskriptor UPnP dilakukan serial hingga 2.8 detik.
+  - **Solusi**:
+    - Menyetel bit QU `0x8001` pada query mDNS agar respon dikirim langsung ke soket pengirim.
+    - Memfilter wildcard `*` agar tidak pernah dijadikan nama host perangkat.
+    - Memparalelkan pengambilan deskriptor XML SSDP dengan mini thread pool (timeout global 0.6s).
+    - Menyediakan fungsi `clear_discovery_caches()` dan menghubungkannya ke watchdog pergantian jaringan di `server.py`.
+- **Scanner Orchestration & Concurrency Hardening — `scanner.py`**:
+  - **Akar Masalah**: Penggunaan `with ThreadPoolExecutor` pada discovery dan kandidat probe menahan eksekusi hingga semua worker lambat selesai karena `__exit__` memanggil `shutdown(wait=True)`, mengabaikan batas `wait(timeout=1.35)`. Pada rekonsiliasi IPv6 (Langkah 6b), MAC yang ditemukan di NDP mengambil IPv4 terakhir dari riwayat tanpa memeriksa `in curr_net`, menginjeksi IP dari Wi-Fi rumah ke subnet kantor. Pembacaan `_DEVICE_HISTORY` tidak dilindungi mutex saat worker enrichment menulis ke dictionary, berisiko memicu `RuntimeError`. Snapshot DHCP juga menimpa data kernel ARP yang lebih segar di dictionary `candidates`.
+  - **Solusi**:
+    - Mengganti context manager dengan instansiasi langsung dan `shutdown(wait=False, cancel_futures=True)`.
+    - Memvalidasi `ipaddress.IPv4Address(matched_ipv4) in curr_net` sebelum memasukkan IP ke hasil `discovered`.
+    - Mengambil salinan `history_entries = list(cls._DEVICE_HISTORY.values())` di bawah proteksi `_HISTORY_LOCK`.
+    - Mencegah penimpaan entri kernel ARP di `candidates` dengan guard `if d_ip not in candidates`.
+    - Meningkatkan batas waktu unicast ARP menjadi 0.35s serta memvalidasi `rcv_mac == target_mac` pada `probe_sleeping_host_via_unicast_arp` untuk mencegah hilangnya perangkat Windows yang memblokir ICMP echo.
+- **Pengujian Otomatis & Verifikasi Menyeluruh**:
+  - Menambahkan 12 unit test komprehensif di `tests/test_unit_discovery.py` dan `tests/test_unit_liveness.py`.
+  - Hasil verifikasi: **358/358 Python tests PASSED** dan **40/40 Node.js backend tests PASSED** (Total: **398 tests 100% green** tanpa satupun regresi).
+
+## [v2.41.21] - 2026-09-12
+
+### Stage 1 (P0): Traffic Engine, Routing Safety & Core Invariants Hardening
+- **Unthrottle (100%) ARP & IPv6 Traffic Restoration — `spoofer.py` & `spoofer_v6.py`**:
+  - **Akar Masalah**: Saat `speed_limit` diubah kembali ke 100% (unthrottle), thread spoof loop IPv4 dan IPv6 hanya tidur tanpa menginjeksi paket pemulihan (restore). Cache ARP/NDP korban dan router tetap teracuni sampai batas waktu cache habis secara pasif. Pada IPv6, unsolicited NA sebelumnya menyetel bit `S=1` (pelanggaran RFC 4861 §4.4) yang menyebabkan ponsel Android/iOS membuang paket pemulihan, dan `_build_restore_packets` tidak mengirimkan Router Advertisement (RA) sehingga rute default yang telah di-drop dengan `routerlifetime=0` mengalami blackout hingga 10 menit.
+  - **Solusi**:
+    - `spoofer.py`: Melacak transisi status `was_poisoned`. Saat beralih ke `speed_limit >= 100`, segera menginjeksi paket dual-opcode restore (is-at + who-has) ke korban dan gateway router.
+    - `spoofer_v6.py`: Mengoreksi flag NA tanpa permintaan menjadi `S=0`. Menyertakan Router Advertisement resmi (`routerlifetime=1800`, `hlim=255`) dari gateway ke dalam paket restorasi untuk memulihkan tabel rute default secara instan. Menambahkan injeksi restore saat unthrottle 100% pada IPv6 loop.
+- **Sentinel Shield Hardening, Self-Packet Filtering, & Interface Binding — `shield.py`**:
+  - **Akar Masalah**: Fungsi `_resolve_gateway_mac` mencoba mengimpor `scan_arp` yang tidak ada dari `.discovery.arp` (menimbulkan `ImportError` senyap). Pemanggilan `sniff()` dan `sendp()` pada thread sniffer, heartbeat, dan lan healer tidak meneruskan parameter `iface`, menyebabkan paket terkirim atau di-sniff pada adapter yang salah di lingkungan multi-NIC Windows. Selain itu, `_arp_filter` tidak mengecek `Ether.src == self_mac`, sehingga paket spoofing blackhole dari komputer operator memicu alarm serangan pada dirinya sendiri.
+  - **Solusi**: Mengganti impor `scan_arp` dengan `get_mac_from_arp` fallback. Mengikat eksplisit `iface=self._win_alias` pada seluruh panggilan `sniff()` dan `sendp()`. Menambahkan filter `Ether.src == self_mac` pada `_arp_filter` untuk mengabaikan frame internal controller.
+- **Perlindungan Garbage Collection Perangkat Terblokir — `database.ts`**:
+  - **Akar Masalah**: Kueri pembersihan `pruneStaleRandomizedMacs` menghapus perangkat MAC acak offline tanpa mengecek kolom `is_blocked`. Jika target yang diblokir sempat offline lebih dari 2 hari (atau 1 jam jika terarsip), entri terhapus dari database sehingga status pemutusan target hilang.
+  - **Solusi**: Menambahkan klausa `AND (is_blocked IS NULL OR is_blocked = 0)` pada kueri `deleteDevicesStmt` dan `deleteArchivedStmt`. Menambahkan validasi `!scanned.is_self && !scanned.is_gateway` pada `autoReblockTargets` dan `autoThrottleTargets` agar gateway dan controller host kebal terhadap penargetan otomatis.
+- **Perlindungan Deletion Gateway & Controller Host — `deviceManager.ts` & `routes.ts`**:
+  - **Akar Masalah**: Endpoint `DELETE /api/devices/:mac` mengizinkan penghapusan perangkat gateway dan controller host, merusak fungsionalitas `findGateway()` dan seluruh subsistem routing.
+  - **Solusi**: Memasang guard di `deviceManager._deleteDeviceImpl` dan `routes.ts` yang menolak penghapusan gateway (`is_gateway: true`, Invariant 1) dan host (`is_self: true`, Invariant 2) dengan status 400 Bad Request. Pada `_clearAllDevicesImpl`, perangkat gateway dan self diproteksi dan tetap dipertahankan di memori dan SQLite.
+- **Penegakan Kuota Lisensi pada Limit 0 — `deviceManager.ts`**:
+  - **Akar Masalah**: Memanggil `setSpeedLimit(ip, 0)` secara langsung melewati pemeriksaan kuota `license.checkCanBlock()`, memungkinkan pengguna Free tier memutus perangkat ke-6 dan seterusnya tanpa batas.
+  - **Solusi**: Menambahkan validasi `this.license.checkCanBlock(activeBlockedCount, isBlocked)` pada `_setSpeedLimitImpl` ketika `cleanLimit === 0` yang memunculkan `FeatureLimitError` saat kuota tercapai.
+- **Penegakan Lingkup RFC 1918 pada SYN Scan — `routes.ts`, `deviceManager.ts`, & `syn_scan.py`**:
+  - **Akar Masalah**: Endpoint `/api/bettercap/syn-scan` dan modul `FastSYNScanner.scan_host` menerima IP publik sembarang, melanggar Invariant 4.
+  - **Solusi**: Memvalidasi `isPrivateIpv4(target_ip)` di level rute REST dan `DeviceManager`, serta memvalidasi `is_valid_private_ip(target_ip)` di modul `FastSYNScanner.scan_host` Python.
+- **Pengujian Otomatis & Verifikasi Menyeluruh**:
+  - Menulis 100% test baru dengan siklus TDD (Red-Green-Refactor) pada `test_unit_spoofer.py`, `test_unit_spoofer_v6.py`, `test_unit_shield.py`, `test_unit_syn_scan.py`, `unit_database.test.ts`, `unit_deviceManager.test.ts`, dan `api_routes.test.ts`.
+  - Hasil verifikasi: **346/346 Python tests PASSED** dan **40/40 Node.js backend tests PASSED** (Total: **386 tests 100% green** tanpa satupun regresi).
+
 ## [v2.41.20] - 2026-09-12
 
 ### Core Network Engine & Reliability Bug Fixes (Prioritas 1 Kritis)

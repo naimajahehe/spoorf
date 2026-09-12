@@ -9,6 +9,7 @@ from .multicast import (
     send_multicast_wakeup,
     get_ssdp_cache,
     get_mdns_cache,
+    clear_discovery_caches,
 )
 from .profile_observation import collect_profile_refresh
 from .arp import (
@@ -42,7 +43,7 @@ __all__ = [
     'dhcp_cache', 'start_dhcp_sniffer', 'stop_dhcp_sniffer',
     'collect_identity_multicast', 'collect_profile_refresh',
     'collect_ssdp_sensors', 'collect_mdns_sensors', 'send_multicast_wakeup',
-    'get_ssdp_cache', 'get_mdns_cache',
+    'get_ssdp_cache', 'get_mdns_cache', 'clear_discovery_caches',
     'get_mac_from_arp', 'collect_from_arp_cache', 'collect_from_arp_broadcast',
     'sweep_subnet_for_arp', 'probe_sleeping_host_via_unicast_arp',
     'probe_sleeping_host_via_gateway_arp',

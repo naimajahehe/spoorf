@@ -54,7 +54,7 @@ def probe_sleeping_host_via_unicast_arp(
         for _, rcv in ans:
             if rcv.haslayer(ARP):
                 rcv_mac = rcv[ARP].hwsrc.lower().replace('-', ':')
-                if is_valid_mac(rcv_mac):
+                if is_valid_mac(rcv_mac) and rcv_mac == target_mac.lower().replace('-', ':'):
                     discovered[target_ip] = rcv_mac
                     logger.debug(f"📱 [Doze Wakeup] Sleeping host {target_ip} ({rcv_mac}) responded to controller ARP probe")
                     break
@@ -90,7 +90,7 @@ def get_mac_from_arp(ip: str, *, strict: bool = False) -> str:
         if sys.platform == 'win32':
             # Argumen list tanpa shell=True (hindari interpolasi shell) + sembunyikan konsol.
             output = subprocess.check_output(
-                ["arp", "-a", ip], text=True,
+                ["arp", "-a", ip], text=True, timeout=1.5,
                 creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0)
             )
             pattern = r'(\d+\.\d+\.\d+\.\d+)\s+([0-9a-fA-F-]{17})'
@@ -98,7 +98,7 @@ def get_mac_from_arp(ip: str, *, strict: bool = False) -> str:
             if matches:
                 return matches[0][1].replace('-', ':').lower()
         else:
-            output = subprocess.check_output(["arp", "-n", ip], text=True)
+            output = subprocess.check_output(["arp", "-n", ip], text=True, timeout=1.5)
             pattern = r'(\d+\.\d+\.\d+\.\d+)\s+(\S+)'
             matches = re.findall(pattern, output)
             if matches:
@@ -129,7 +129,7 @@ def collect_from_arp_cache(
 
         if sys.platform == 'win32':
             output = subprocess.check_output(
-                ["arp", "-a"], text=True,
+                ["arp", "-a"], text=True, timeout=1.5,
                 creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0)
             )
             pattern = r'(\d+\.\d+\.\d+\.\d+)\s+([0-9a-fA-F-]{17})'
@@ -139,29 +139,45 @@ def collect_from_arp_cache(
                     is_valid_mac(norm_mac) and
                     not norm_mac.startswith('ff:ff:ff') and
                     not norm_mac.startswith('01:00:5e') and
-                    not ip.endswith('.255') and
                     ip != self_ip and
                     norm_mac != self_mac and
                     ip not in discovered):
                     if curr_net:
                         try:
                             import ipaddress
-                            if ipaddress.IPv4Address(ip) not in curr_net:
-                                continue
-                        except:
+                            ip_obj = ipaddress.IPv4Address(ip)
+                            if (ip_obj in curr_net and
+                                ip != str(curr_net.broadcast_address) and
+                                ip != str(curr_net.network_address)):
+                                discovered[ip] = norm_mac
+                        except Exception:
                             pass
-                    discovered[ip] = norm_mac
+                    elif not ip.endswith('.255') and not ip.endswith('.0'):
+                        discovered[ip] = norm_mac
         else:
-            output = subprocess.check_output(["arp", "-n"], text=True)
+            output = subprocess.check_output(["arp", "-n"], text=True, timeout=1.5)
             pattern = r'(\d+\.\d+\.\d+\.\d+)\s+\S+\s+([0-9a-fA-F:]{17})'
             for ip, mac in re.findall(pattern, output):
                 norm_mac = mac.lower()
                 if (is_valid_private_ip(ip) and
                     is_valid_mac(norm_mac) and
+                    not norm_mac.startswith('ff:ff:ff') and
+                    not norm_mac.startswith('01:00:5e') and
                     ip != self_ip and
                     norm_mac != self_mac and
                     ip not in discovered):
-                    discovered[ip] = norm_mac
+                    if curr_net:
+                        try:
+                            import ipaddress
+                            ip_obj = ipaddress.IPv4Address(ip)
+                            if (ip_obj in curr_net and
+                                ip != str(curr_net.broadcast_address) and
+                                ip != str(curr_net.network_address)):
+                                discovered[ip] = norm_mac
+                        except Exception:
+                            pass
+                    elif not ip.endswith('.255') and not ip.endswith('.0'):
+                        discovered[ip] = norm_mac
     except Exception as e:
         logger.debug(f"ARP cache read notice: {e}")
         if strict:
@@ -181,7 +197,7 @@ def collect_from_arp_broadcast(discovered: Dict[str, str], timeout: float = 1.0)
         # ke blok /24 lokal di sekitar host agar tidak memicu AP rate-limiting / storm control.
         try:
             net_obj = ipaddress.IPv4Network(network_cidr, strict=False)
-            if net_obj.num_addresses > 1024:
+            if net_obj.num_addresses >= 512:
                 my_ip = net_info.get('ip', '')
                 if my_ip and is_valid_private_ip(my_ip):
                     network_cidr = f"{my_ip.rsplit('.', 1)[0]}.0/24"
@@ -236,7 +252,16 @@ def sweep_subnet_for_arp(discovered: Dict[str, str]) -> None:
         if net_obj.num_addresses <= 1024:
             candidate_ips = [str(ip) for ip in net_obj.hosts()]
         elif safe_base_prefix:
-            candidate_ips = [f"{safe_base_prefix}.{i}" for i in range(1, 255)]
+            cand_set = {f"{safe_base_prefix}.{i}" for i in range(1, 255)}
+            gw_ip = str(gateway_ip or '').strip()
+            if gw_ip and is_valid_private_ip(gw_ip):
+                try:
+                    if ipaddress.IPv4Address(gw_ip) in net_obj:
+                        gw_prefix = gw_ip.rsplit('.', 1)[0]
+                        cand_set.update(f"{gw_prefix}.{i}" for i in range(1, 255))
+                except Exception:
+                    pass
+            candidate_ips = list(cand_set)
         else:
             return
 

@@ -61,13 +61,13 @@ def pulse_host(
     if self_mac:
         self_mac = self_mac.lower().replace('-', ':')
 
-    # Resolve local host IP for clean, non-poisoning ARP queries
+    # Resolve local host IP for clean, non-poisoning ARP queries (RFC 5227 probe fallback)
     my_ip = ""
     try:
         my_ip = (get_network_info() or {}).get('ip', '')
     except Exception:
         pass
-    effective_src_ip = my_ip if (my_ip and is_valid_private_ip(my_ip)) else target_ip
+    effective_src_ip = my_ip if (my_ip and is_valid_private_ip(my_ip)) else "0.0.0.0"
 
     start_time = time.time()
 
@@ -93,7 +93,7 @@ def pulse_host(
             for _, rcv in ans:
                 if rcv.haslayer(ARP):
                     rcv_mac = rcv[ARP].hwsrc.lower().replace('-', ':')
-                    if rcv_mac == norm_mac or is_valid_mac(rcv_mac):
+                    if rcv_mac == norm_mac:
                         return max(0.1, round((t1 - t0) * 1000, 2))
         except Exception as e:
             logger.debug(f"Unicast ARP probe exception for {target_ip}: {e}")
@@ -103,7 +103,7 @@ def pulse_host(
         """Vektor 2: Fast ICMP Ping Fallback (Untuk perangkat mobile dalam Wi-Fi Power Save / Doze)."""
         try:
             t0 = time.time()
-            p = subprocess.run(["ping", "-n", "3", "-w", "800", target_ip], capture_output=True, text=True, timeout=3.0)
+            p = subprocess.run(["ping", "-n", "1", "-w", "800", target_ip], capture_output=True, text=True, timeout=1.2)
             if "TTL=" in p.stdout or "Reply from" in p.stdout or "Menerima balasan" in p.stdout:
                 return max(0.1, round((time.time() - t0) * 1000, 2))
         except Exception:

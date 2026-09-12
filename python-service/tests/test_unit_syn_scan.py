@@ -41,6 +41,12 @@ class TestSynScanSanitizer(unittest.TestCase):
         res = scanner.scan_host('192.168.1.50', ports=None, profile='top-20')
         self.assertEqual(res['total_scanned'], 20)
 
+    def test_scan_host_rejects_non_rfc1918_target(self):
+        """scan_host must reject public IP addresses outside RFC 1918."""
+        scanner = FastSYNScanner()
+        with self.assertRaises(ValueError):
+            scanner.scan_host('8.8.8.8')
+
 
 if __name__ == '__main__':
     unittest.main()

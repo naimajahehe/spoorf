@@ -52,7 +52,7 @@ function deviceMemKey(d: Device): string {
     return d.profile_id || normalizeProfileMac(d.mac) || (typeof d.mac === 'string' ? d.mac.toLowerCase() : '');
 }
 
-function isPrivateIpv4(ip: unknown): ip is string {
+export function isPrivateIpv4(ip: unknown): ip is string {
     if (typeof ip !== 'string') return false;
     const text = ip.trim();
     const parts = text.split('.');
@@ -1834,6 +1834,12 @@ export class DeviceManager extends EventEmitter {
         this._assertNoPendingGamingRecoveryConflict(inMemoryTargets);
 
         const existing = await this.db.getDeviceByMac(normMac, this.currentNetworkId);
+        if (requestedDevice?.is_gateway || existing?.is_gateway) {
+            throw new Error('Cannot delete gateway router (Invariant 1: Gateway Immunity)');
+        }
+        if (requestedDevice?.is_self || existing?.is_self) {
+            throw new Error('Cannot delete controller host (Invariant 2: Controller Self-Protection)');
+        }
         const profileId = requestedProfileId || existing?.profile_id;
 
         const devicesToDelete: Array<[string, Device]> = [];
@@ -1869,8 +1875,18 @@ export class DeviceManager extends EventEmitter {
             throw this._pendingGamingRecoveryError();
         }
         await this.db.clearAllDevices(this.currentNetworkId);
+        const preserved: Device[] = [];
+        for (const dev of this.devices.values()) {
+            if (dev.is_gateway || dev.is_self) {
+                preserved.push(dev);
+            }
+        }
         this.devices.clear();
-        this.emit('devicesUpdated', []);
+        for (const dev of preserved) {
+            this.devices.set(dev.ip, dev);
+            await this.db.saveDevice(dev, this.currentNetworkId);
+        }
+        this.emit('devicesUpdated', Array.from(this.devices.values()));
     }
 
     async setDeviceAlias(mac: string, alias: string): Promise<Device> {
@@ -1917,6 +1933,14 @@ export class DeviceManager extends EventEmitter {
             const check = this.license.checkCanThrottle();
             if (!check.allowed) {
                 throw new FeatureLockedError(check.reason || 'Fitur Pembatasan Kecepatan (PWM Bandwidth Throttling) khusus untuk pengguna PRO.');
+            }
+        }
+
+        if (cleanLimit === 0 && this.license) {
+            const activeBlockedCount = Array.from(this.devices.values()).filter(d => d.is_blocked).length;
+            const check = this.license.checkCanBlock(activeBlockedCount, Boolean(device.is_blocked));
+            if (!check.allowed) {
+                throw new FeatureLimitError(check.reason || 'Batas kuota pemutusan tercapai. Upgrade ke Pro untuk memutus tanpa batas!');
             }
         }
 
@@ -2706,6 +2730,9 @@ export class DeviceManager extends EventEmitter {
     }
 
     async runBettercapSynScan(targetIp: string, ports?: number[], profile: string = 'top-20'): Promise<any> {
+        if (!isPrivateIpv4(targetIp)) {
+            throw new Error(`Target IP '${targetIp}' is not a valid RFC 1918 private address`);
+        }
         return await this.python.runBettercapSynScan(targetIp, ports, profile);
     }
 

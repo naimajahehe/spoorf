@@ -55,6 +55,10 @@ class TestUnitSpooferV6(unittest.TestCase):
         self.assertTrue(p_ra.haslayer(ICMPv6ND_RA))
         self.assertEqual(p_ra[ICMPv6ND_RA].routerlifetime, 0)
 
+        # RFC 4861 compliance: Unsolicited NA must have S=0
+        self.assertEqual(p_vic[ICMPv6ND_NA].S, 0, "Unsolicited spoof NA ke korban wajib S=0")
+        self.assertEqual(pkts[1][ICMPv6ND_NA].S, 0, "Unsolicited spoof NA ke gateway wajib S=0")
+
     def test_ndp_packets_have_hlim_255(self):
         """Regression guard: SEMUA paket NDP (NA & RA) keluar dengan Hop Limit = 255.
 
@@ -84,10 +88,16 @@ class TestUnitSpooferV6(unittest.TestCase):
             self.gateway_ip,
             self.gateway_mac
         )
-        self.assertEqual(len(pkts), 2)
+        self.assertEqual(len(pkts), 3, "Harus menyertakan NA victim, NA gateway, dan RA default route restore")
         # Paket 1 ke korban harus bersumber dari MAC asli gateway
         self.assertEqual(pkts[0][Ether].src, self.gateway_mac)
         self.assertEqual(pkts[0][ICMPv6ND_NA].R, 1)
+        self.assertEqual(pkts[0][ICMPv6ND_NA].S, 0, "Unsolicited NA ke korban wajib S=0")
+        self.assertEqual(pkts[1][ICMPv6ND_NA].S, 0, "Unsolicited NA ke gateway wajib S=0")
+        # Paket 3 adalah RA untuk mengembalikan default route
+        self.assertTrue(pkts[2].haslayer(ICMPv6ND_RA))
+        self.assertEqual(pkts[2][ICMPv6ND_RA].routerlifetime, 1800)
+        self.assertEqual(pkts[2][IPv6].hlim, 255)
 
     def test_gateway_immunity_invariant(self):
         """Uji bahwa Gateway IPv6 kebal dari manipulasi."""
@@ -240,6 +250,45 @@ class TestUnitSpooferV6(unittest.TestCase):
         self.assertIn('sendp', events, "paket restore harus dikirim saat stop_spoof")
         self.assertLess(events.index('join'), events.index('sendp'),
                         "join worker harus terjadi SEBELUM sendp paket restore")
+
+    @patch('src.core.spoofer_v6.sendp')
+    def test_ipv6_spoof_loop_unthrottle_restores_on_100_percent(self, mock_sendp):
+        """When an IPv6 session transitions to speed_limit >= 100, restore packets must be injected."""
+        session_id = 'test_v6_unthrottle'
+        self.spoofer._sessions[session_id] = {
+            'victim_ipv6': self.victim_ip,
+            'victim_mac': self.victim_mac,
+            'gateway_ipv6': self.gateway_ip,
+            'gateway_mac': self.gateway_mac,
+            'active': True,
+            'speed_limit': 0,
+            'blackhole_mac': None,
+            'packets_sent': 0,
+        }
+
+        stop_event = MagicMock()
+        stop_event.is_set.return_value = False
+
+        call_count = 0
+        def on_wait(timeout):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                self.spoofer._sessions[session_id]['speed_limit'] = 100
+                return False
+            elif call_count >= 2:
+                return True
+            return False
+
+        stop_event.wait.side_effect = on_wait
+
+        with patch.object(self.spoofer, '_build_restore_packets', wraps=self.spoofer._build_restore_packets) as mock_restore:
+            self.spoofer._spoof_loop(session_id, stop_event)
+            mock_restore.assert_called_once_with(
+                self.victim_ip, self.victim_mac, self.gateway_ip, self.gateway_mac
+            )
+            # sendp should have sent restore packets
+            self.assertGreater(mock_sendp.call_count, 1)
 
 
 if __name__ == '__main__':

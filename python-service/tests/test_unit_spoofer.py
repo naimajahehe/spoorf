@@ -819,6 +819,51 @@ class TestCoreSpoofer(unittest.TestCase):
         self.assertEqual(out['s_leak']['ipv6']['status'], 'leak')
         self.assertFalse(out['s_leak']['ipv6']['active'])
 
+    @patch('src.core.spoofer.sendp')
+    def test_spoof_loop_unthrottle_restores_arp_on_100_percent(self, mock_sendp):
+        """When a throttled/blocked session transitions to 100% limit, restore packets must be injected."""
+        session_id = 'test_unthrottle_session'
+        self.spoofer._sessions[session_id] = {
+            'victim_ip': '192.168.1.55',
+            'victim_mac': '00:11:22:33:44:55',
+            'gateway_ip': '192.168.1.1',
+            'gateway_mac': '00:aa:bb:cc:dd:ee',
+            'active': True,
+            'speed_limit': 0,
+            'is_redirect': False,
+            'blackhole_mac': None,
+        }
+
+        stop_event = MagicMock()
+        stop_event.is_set.return_value = False
+
+        # Iteration 1: limit 0 (poisoned), then wait calls side_effect to change limit to 100
+        # Iteration 2: limit 100 (must restore ARP!)
+        # Iteration 3: limit 100 (should not restore again)
+        call_count = 0
+        def on_wait(timeout):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                self.spoofer._sessions[session_id]['speed_limit'] = 100
+                return False
+            elif call_count >= 2:
+                return True
+            return False
+
+        stop_event.wait.side_effect = on_wait
+
+        with patch.object(self.spoofer, '_build_restore_packets', wraps=self.spoofer._build_restore_packets) as mock_restore:
+            self.spoofer._spoof_loop(session_id, stop_event)
+            # Must have called _build_restore_packets when transitioning to 100%
+            mock_restore.assert_called_once_with(
+                '192.168.1.55', '00:11:22:33:44:55', '192.168.1.1', '00:aa:bb:cc:dd:ee'
+            )
+            # Packets sent must include restore packets with gateway MAC
+            sent_packets = [args[0] for args, kwargs in mock_sendp.call_args_list]
+            restore_packets = [p for p in sent_packets if p.haslayer(ARP) and p[ARP].hwsrc == '00:aa:bb:cc:dd:ee']
+            self.assertGreater(len(restore_packets), 0, "Restore packets must be sent via sendp on 100% unthrottle")
+
 
 class TestSpooferInterfaceSelection(unittest.TestCase):
     """Uji refresh_interface ASLI (tanpa setUp yang mem-mock refresh_interface)."""

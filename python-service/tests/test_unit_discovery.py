@@ -1188,5 +1188,218 @@ class TestCoreDiscovery(unittest.TestCase):
         self.assertTrue(read_sizes)
         self.assertTrue(all(s is not None and 0 <= s <= MAX_SSDP_DESCRIPTOR_BYTES for s in read_sizes))
 
+    # ===== 5. Stage 2 (P1) Task 2.1: Subnet Sweeping & Broadcast Guard =====
+    def test_arp_cache_supernet_preserves_255_host(self):
+        """Task 2.1: Supernet host ending in .255 (e.g. 10.0.1.255 in /16) must NOT be dropped."""
+        from src.core.discovery.arp import collect_from_arp_cache
+
+        mock_output = (
+            "Interface: 10.0.0.5 --- 0x2\n"
+            "  Internet Address      Physical Address      Type\n"
+            "  10.0.1.255            00-11-22-33-44-55     dynamic\n"
+            "  10.0.255.255          ff-ff-ff-ff-ff-ff     static\n"
+            "  10.0.0.1              aa-bb-cc-dd-ee-01     dynamic\n"
+        )
+        with patch('sys.platform', 'win32'), \
+             patch('src.core.discovery.arp.get_network_info', return_value={'ip': '10.0.0.5', 'network': '10.0.0.0/16'}), \
+             patch('src.core.discovery.arp.get_self_mac', return_value='00:00:00:00:00:01'), \
+             patch('src.core.discovery.arp.subprocess.check_output', return_value=mock_output):
+            discovered = {}
+            collect_from_arp_cache(discovered)
+            # 10.0.1.255 is a valid host on /16, MUST be present
+            self.assertIn('10.0.1.255', discovered)
+            self.assertEqual(discovered['10.0.1.255'], '00:11:22:33:44:55')
+            # 10.0.255.255 is broadcast, MUST NOT be present
+            self.assertNotIn('10.0.255.255', discovered)
+            self.assertIn('10.0.0.1', discovered)
+
+    def test_arp_cache_small_subnet_drops_true_broadcast(self):
+        """Task 2.1: Small subnet (/28) broadcast address (.15) must be dropped even if it doesn't end in .255."""
+        from src.core.discovery.arp import collect_from_arp_cache
+
+        mock_output = (
+            "Interface: 192.168.1.2 --- 0x2\n"
+            "  Internet Address      Physical Address      Type\n"
+            "  192.168.1.14          00-11-22-33-44-14     dynamic\n"
+            "  192.168.1.15          00-11-22-33-44-15     dynamic\n"
+        )
+        with patch('sys.platform', 'win32'), \
+             patch('src.core.discovery.arp.get_network_info', return_value={'ip': '192.168.1.2', 'network': '192.168.1.0/28'}), \
+             patch('src.core.discovery.arp.get_self_mac', return_value='00:00:00:00:00:01'), \
+             patch('src.core.discovery.arp.subprocess.check_output', return_value=mock_output):
+            discovered = {}
+            collect_from_arp_cache(discovered)
+            # .14 is valid host
+            self.assertIn('192.168.1.14', discovered)
+            # .15 is broadcast on /28, MUST be dropped
+            self.assertNotIn('192.168.1.15', discovered)
+
+    def test_sweep_subnet_for_arp_includes_gateway_slice_on_supernet(self):
+        """Task 2.1: sweep_subnet_for_arp on >1024 supernet sweeps both self /24 and gateway /24 slices."""
+        from unittest.mock import MagicMock
+        from src.core.discovery.arp import sweep_subnet_for_arp
+
+        probed_ips = []
+        def mock_map(func, iterable):
+            probed_ips.extend(list(iterable))
+            return []
+
+        with patch('src.core.discovery.arp.get_network_info', return_value={'ip': '10.50.3.140', 'network': '10.50.0.0/20', 'gateway': '10.50.0.1'}), \
+             patch('src.core.discovery.arp.concurrent.futures.ThreadPoolExecutor') as mock_exec, \
+             patch('src.core.discovery.arp.collect_from_arp_cache'):
+            mock_inst = MagicMock()
+            mock_inst.map.side_effect = mock_map
+            mock_inst.__enter__.return_value = mock_inst
+            mock_inst.__exit__.return_value = False
+            mock_exec.return_value = mock_inst
+
+            sweep_subnet_for_arp({})
+            # Gateway slice (10.50.0.x) must be included
+            gw_probes = [ip for ip in probed_ips if ip.startswith('10.50.0.')]
+            self.assertGreater(len(gw_probes), 200)
+            # Self slice (10.50.3.x) must also be included
+            self_probes = [ip for ip in probed_ips if ip.startswith('10.50.3.')]
+            self.assertGreater(len(self_probes), 200)
+
+    def test_collect_from_arp_broadcast_clamps_slash_22(self):
+        """Task 2.1: /22 network (1024 addresses) clamps to /24 to prevent broadcast storm."""
+        from scapy.all import ARP
+        from src.core.discovery.arp import collect_from_arp_broadcast
+
+        captured_pdst = []
+        def mock_srp(req, **kwargs):
+            if req.haslayer(ARP):
+                captured_pdst.append(req[ARP].pdst)
+            return [], []
+
+        with patch('src.core.discovery.arp.get_network_info', return_value={'ip': '192.168.4.50', 'network': '192.168.4.0/22'}), \
+             patch('src.core.discovery.arp.srp', side_effect=mock_srp):
+            collect_from_arp_broadcast({}, timeout=0.1)
+            self.assertTrue(len(captured_pdst) > 0)
+            # Must have been clamped to /24 instead of /22
+            self.assertEqual(captured_pdst[0], '192.168.4.0/24')
+
+    # ===== 6. Stage 2 (P1) Task 2.3: Multicast Sensors & LLMNR Parsing =====
+    def test_collect_mdns_sensors_sets_qu_unicast_bit(self):
+        """Task 2.3: collect_mdns_sensors must set QU (unicast-response) bit 0x8001 in query."""
+        from src.core.discovery.multicast import collect_mdns_sensors
+
+        sent_payloads = []
+        class MockSocket:
+            def __init__(self, *args, **kwargs): pass
+            def settimeout(self, t): pass
+            def setsockopt(self, *args): pass
+            def sendto(self, data, dst):
+                sent_payloads.append((data, dst))
+            def recvfrom(self, bufsize):
+                raise socket.timeout()
+            def close(self): pass
+
+        with patch('socket.socket', return_value=MockSocket()):
+            collect_mdns_sensors(timeout=0.01)
+            self.assertTrue(len(sent_payloads) > 0)
+            data, dst = sent_payloads[0]
+            self.assertEqual(dst, ('224.0.0.251', 5353))
+            # Verify QU bit \x80\x01 is set at the end of the query (QTYPE=0x000c, QCLASS=0x8001)
+            self.assertTrue(data.endswith(b'\x00\x0c\x80\x01'),
+                            f"mDNS query must have QU unicast response bit (0x8001), got: {data[-4:]!r}")
+
+    def test_parse_llmnr_response_filters_wildcard_asterisk(self):
+        """Task 2.3: LLMNR question echoing '*' must NOT be assigned as the device hostname."""
+        from src.core.discovery.multicast import _parse_dns_identity
+
+        # DNS answer structure echoing question '*' but without host record
+        query_payload = (
+            b'\x00\x01\x80\x00\x00\x01\x00\x00\x00\x00\x00\x00'
+            b'\x01*\x00\x00\x01\x00\x01'
+        )
+        res = _parse_dns_identity(query_payload, protocol="llmnr")
+        self.assertNotEqual(res.get('hostname'), '*', "LLMNR wildcard '*' must not become device hostname")
+
+    def test_clear_discovery_caches(self):
+        """Task 2.3: clear_discovery_caches must purge _SSDP_DISCOVERED and _MDNS_DISCOVERED."""
+        from src.core.discovery.multicast import (
+            clear_discovery_caches, _SSDP_DISCOVERED, _MDNS_DISCOVERED
+        )
+        _SSDP_DISCOVERED['192.168.1.100'] = {'model': 'TestTV'}
+        _MDNS_DISCOVERED['192.168.1.101'] = {'model': 'iPhone'}
+        self.assertIn('192.168.1.100', _SSDP_DISCOVERED)
+        self.assertIn('192.168.1.101', _MDNS_DISCOVERED)
+
+        clear_discovery_caches()
+        self.assertEqual(len(_SSDP_DISCOVERED), 0)
+        self.assertEqual(len(_MDNS_DISCOVERED), 0)
+
+    # ===== 7. Stage 2 (P1) Task 2.4: Scanner Anti-Poisoning & Alien IP Protection =====
+    def test_scan_full_rejects_alien_cross_network_ipv4_in_ipv6_reconciliation(self):
+        """Task 2.4: IPv6 reconciliation must NOT resurrect alien IPv4 from previous networks."""
+        import time
+        from src.core.scanner import NetworkScanner
+
+        NetworkScanner._DEVICE_HISTORY.clear()
+        # Stale entry from a previous home Wi-Fi network (192.168.1.50)
+        NetworkScanner._DEVICE_HISTORY['aa:bb:cc:dd:ee:99'] = {
+            'ip': '192.168.1.50',
+            'mac': 'aa:bb:cc:dd:ee:99',
+            'first_seen': '2026-08-28 12:00:00',
+            'last_seen': '2026-08-28 12:00:00',
+            'last_seen_ts': time.time()
+        }
+
+        # Current network is 10.0.0.0/8
+        mock_discovered_ipv6 = {
+            'aa:bb:cc:dd:ee:99': {
+                'mac': 'aa:bb:cc:dd:ee:99',
+                'link_local': 'fe80::1',
+                'global': None,
+                'addresses': ['fe80::1']
+            }
+        }
+
+        def mock_v6_discover(disc):
+            disc.update(mock_discovered_ipv6)
+
+        with patch('src.core.scanner.get_current_gateway', return_value='10.0.0.1'), \
+             patch('src.core.scanner.get_network_info', return_value={'ip': '10.0.0.5', 'network': '10.0.0.0/8'}), \
+             patch('src.core.scanner.collect_from_arp_cache'), \
+             patch('src.core.scanner.collect_from_arp_broadcast'), \
+             patch('src.core.scanner.collect_from_ndp_cache', side_effect=mock_v6_discover), \
+             patch('src.core.scanner.verify_ipv6_alive', return_value=True), \
+             patch('src.core.scanner.get_mac_from_arp', return_value='00:00:00:00:00:01'), \
+             patch('src.core.scanner.get_self_mac', return_value='00:00:00:00:00:02'), \
+             patch.object(NetworkScanner, '_build_device', side_effect=lambda ip, mac, *_args, **_kwargs: {'ip': ip, 'mac': mac, 'is_online': True}):
+
+            results = NetworkScanner.scan_full(include_multicast_wakeup=False)
+            res_ips = [d['ip'] for d in results]
+            # 192.168.1.50 MUST NOT be present on a 10.0.0.0/8 network
+            self.assertNotIn('192.168.1.50', res_ips, "Alien IP from previous subnet must NOT be injected via IPv6 reconciliation")
+
+    def test_scan_full_candidates_preserves_kernel_arp_over_stale_dhcp(self):
+        """Task 2.4: Fresh kernel ARP mappings in candidates must NOT be overwritten by stale DHCP leases."""
+        from src.core.scanner import NetworkScanner
+
+        def mock_arp_cache(candidates, **kwargs):
+            candidates['192.168.1.50'] = '00:11:22:33:44:01' # Fresh kernel ARP
+
+        mock_dhcp = {
+            '00:11:22:33:44:99': {'ip': '192.168.1.50', 'mac': '00:11:22:33:44:99'} # Stale lease
+        }
+
+        with patch('src.core.scanner.get_current_gateway', return_value='192.168.1.1'), \
+             patch('src.core.scanner.get_network_info', return_value={'ip': '192.168.1.20', 'network': '192.168.1.0/24'}), \
+             patch('src.core.scanner.collect_from_arp_cache', side_effect=mock_arp_cache), \
+             patch('src.core.scanner.dhcp_cache.get_snapshot', return_value=mock_dhcp), \
+             patch('src.core.scanner.get_mac_from_arp', return_value='00:00:00:00:00:01'), \
+             patch('src.core.scanner.get_self_mac', return_value='00:00:00:00:00:02'), \
+             patch.object(NetworkScanner, '_build_device', side_effect=lambda ip, mac, *_args, **_kwargs: {'ip': ip, 'mac': mac, 'is_online': True}):
+
+            results = NetworkScanner.scan_full(include_multicast_wakeup=False)
+            dev = next((d for d in results if d['ip'] == '192.168.1.50'), None)
+            self.assertIsNotNone(dev)
+            self.assertEqual(dev['mac'], '00:11:22:33:44:01', "Fresh kernel ARP entry must not be overwritten by stale DHCP MAC")
+
 if __name__ == '__main__':
     unittest.main()
+
+
+

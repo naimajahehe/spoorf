@@ -2657,5 +2657,74 @@ export async function runDeviceManagerTests() {
         assert.strictEqual((manager as any).devices.has('192.168.1.1'), true, 'Active device must remain in memory');
         console.log('  ✓ Optimization A: _runRetentionSweep executes pruneStaleRandomizedMacs, checkpointWal, and memory eviction');
     }
+
+    // Invariant Protection Test: deleteDevice rejects deleting gateway or self
+    {
+        const python: any = new EventEmitter();
+        const db: any = {
+            getDeviceByMac: async () => null,
+            deleteDevice: async () => {}
+        };
+        const manager = new DeviceManager(python, db);
+        const gw: Device = {
+            ip: '192.168.1.1', mac: '00:11:22:33:44:01', hostname: 'Gateway',
+            vendor: 'Router', device_type: 'Router', os: 'Linux', rtt_ms: 1,
+            open_ports: [], services: [], is_blocked: false, is_online: true, is_gateway: true
+        };
+        const selfDev: Device = {
+            ip: '192.168.1.100', mac: '00:11:22:33:44:02', hostname: 'This PC',
+            vendor: 'Intel', device_type: 'PC', os: 'Windows', rtt_ms: 0,
+            open_ports: [], services: [], is_blocked: false, is_online: true, is_gateway: false, is_self: true
+        };
+        (manager as any).devices.set('192.168.1.1', gw);
+        (manager as any).devices.set('192.168.1.100', selfDev);
+
+        await assert.rejects(
+            () => manager.deleteDevice(gw.mac),
+            /Cannot delete gateway router/
+        );
+
+        await assert.rejects(
+            () => manager.deleteDevice(selfDev.mac),
+            /Cannot delete controller host/
+        );
+        console.log('  ✓ Invariant Protection: deleteDevice rejects deleting gateway and controller host');
+    }
+
+    // License Enforce Test: setSpeedLimit(0) enforces checkCanBlock quota
+    {
+        const python: any = new EventEmitter();
+        python.startSpoof = async () => 'session-test';
+        python.verifyLiveness = async () => true;
+        const db: any = {
+            setDeviceBlocked: async () => {},
+            setDeviceSpeedLimit: async () => {},
+            setDeviceOnlineStatus: async () => {}
+        };
+        const manager = new DeviceManager(python, db);
+        const gw: Device = {
+            ip: '192.168.1.1', mac: '00:11:22:33:44:01', hostname: 'Gateway',
+            vendor: 'Router', device_type: 'Router', os: 'Linux', rtt_ms: 1,
+            open_ports: [], services: [], is_blocked: false, is_online: true, is_gateway: true
+        };
+        const target: Device = {
+            ip: '192.168.1.50', mac: 'aa:11:22:33:44:55', hostname: 'Victim',
+            vendor: 'Generic', device_type: 'Mobile', os: 'Android', rtt_ms: 5,
+            open_ports: [], services: [], is_blocked: false, is_online: true, is_gateway: false
+        };
+        (manager as any).devices.set('192.168.1.1', gw);
+        (manager as any).devices.set('192.168.1.50', target);
+
+        // Mock license with exhausted quota
+        (manager as any).license = {
+            checkCanBlock: () => ({ allowed: false, reason: 'Batas kuota pemutusan tercapai.' })
+        };
+
+        await assert.rejects(
+            () => manager.setSpeedLimit('192.168.1.50', 0),
+            (err: any) => err.name === 'FeatureLimitError' || /Batas kuota pemutusan tercapai/.test(err.message)
+        );
+        console.log('  ✓ License Guard: setSpeedLimit(0) enforces license cut quota');
+    }
 }
 

@@ -238,6 +238,36 @@ export async function runApiRoutesTests() {
         console.log('  ✓ Contract: downstream validation 4xx is mapped without message guessing');
     }
 
+    // Invariant 4 Test: /api/bettercap/syn-scan rejects non-RFC1918 public IP addresses
+    {
+        const manager = {
+            runBettercapSynScan: async () => ({})
+        };
+        const router = createRouter(manager as any);
+        const layer = (router as any).stack.find((item: any) =>
+            item.route?.path === '/api/bettercap/syn-scan' && item.route.methods.post
+        );
+        assert.ok(layer, 'Bettercap syn-scan route must be registered');
+
+        let statusCode = 200;
+        let responseBody: any;
+        const res: any = {
+            status: (code: number) => { statusCode = code; return res; },
+            json: (data: any) => { responseBody = data; return res; }
+        };
+
+        await layer.route.stack[0].handle(
+            { body: { target_ip: '8.8.8.8' } } as any,
+            res,
+            () => {}
+        );
+
+        assert.strictEqual(statusCode, 400, 'Public IP must be rejected with 400');
+        assert.strictEqual(responseBody.success, false);
+        assert.match(responseBody.error, /RFC 1918/i);
+        console.log('  ✓ Invariant 4: /api/bettercap/syn-scan rejects non-RFC1918 public IP');
+    }
+
     // Contract: Gaming status is broadcast once, via the DeviceManager event only.
     {
         class FakeDeviceManager extends EventEmitter {

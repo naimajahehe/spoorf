@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { DeviceManager } from '../services/deviceManager';
+import { DeviceManager, isPrivateIpv4 } from '../services/deviceManager';
 import { LicenseManager, FeatureLimitError, FeatureLockedError } from '../services/licenseManager';
 import {
     isBridgeHttpError,
@@ -195,6 +195,13 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
     router.delete('/api/devices/:mac', async (req: Request, res: Response) => {
         try {
             const { mac } = req.params;
+            const target = deviceManager.getDevice(mac);
+            if (target?.is_gateway) {
+                return res.status(400).json({ success: false, error: 'Cannot delete gateway router (Invariant 1: Gateway Immunity)' });
+            }
+            if (target?.is_self) {
+                return res.status(400).json({ success: false, error: 'Cannot delete controller host (Invariant 2: Controller Self-Protection)' });
+            }
             await deviceManager.deleteDevice(mac);
             res.json({
                 success: true,
@@ -616,6 +623,9 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
             const { target_ip, ports, profile } = req.body;
             if (!target_ip) {
                 return res.status(400).json({ success: false, error: 'Target IP is required' });
+            }
+            if (!isPrivateIpv4(target_ip)) {
+                return res.status(400).json({ success: false, error: 'Target IP must be an RFC 1918 private address' });
             }
             const data = await deviceManager.runBettercapSynScan(target_ip, ports, profile || 'top-20');
             res.json({ success: true, data });

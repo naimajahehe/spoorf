@@ -70,13 +70,12 @@ class SentinelShield:
             logger.debug(f"Notice resolving gateway MAC from Get-NetNeighbor: {e}")
 
         try:
-            from .discovery.arp import scan_arp
-            res = scan_arp(f"{gw_ip}/32", timeout=0.8)
-            for d in res:
-                if d.get('ip') == gw_ip and is_valid_mac(d.get('mac')):
-                    return d['mac'].lower().replace('-', ':')
-        except Exception:
-            pass
+            from .discovery.arp import get_mac_from_arp
+            mac = get_mac_from_arp(gw_ip)
+            if mac and is_valid_mac(mac):
+                return mac.lower().replace('-', ':')
+        except Exception as e:
+            logger.debug(f"Notice resolving gateway MAC from get_mac_from_arp: {e}")
 
         return ""
 
@@ -176,6 +175,10 @@ class SentinelShield:
         def _arp_filter(pkt):
             if not pkt.haslayer(ARP):
                 return False
+            if pkt.haslayer(Ether):
+                ether_src = pkt[Ether].src.lower().replace('-', ':')
+                if ether_src == self_mac:
+                    return False
             arp = pkt[ARP]
             if arp.op in (1, 2) and arp.psrc == gw_ip:
                 hwsrc = arp.hwsrc.lower().replace('-', ':')
@@ -222,6 +225,7 @@ class SentinelShield:
         while not self._sniffer_stop_event.is_set():
             try:
                 sniff(
+                    iface=self._win_alias,
                     filter="arp",
                     prn=_process_packet,
                     lfilter=_arp_filter,
@@ -250,7 +254,7 @@ class SentinelShield:
                         hwdst=gw_mac,
                         pdst=gw_ip
                     )
-                    sendp(pkt, verbose=False)
+                    sendp(pkt, iface=self._win_alias, verbose=False)
             except Exception:
                 pass
 
@@ -272,7 +276,7 @@ class SentinelShield:
                         hwdst="ff:ff:ff:ff:ff:ff",
                         pdst=gw_ip
                     )
-                    sendp(garp_pkt, verbose=False)
+                    sendp(garp_pkt, iface=self._win_alias, verbose=False)
             except Exception:
                 pass
 

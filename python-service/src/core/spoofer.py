@@ -290,6 +290,7 @@ class ARPSpoofer:
         # FASE 2: STEADY-STATE KEEP-ALIVE & TCP-FRIENDLY DUTY-CYCLE THROTTLING
         # Periode siklus 1.2 detik memberi ruang napas bagi TCP Congestion Window
         cycle_period = 1.2
+        was_poisoned = (speed_limit < 100 and not is_redirect)
 
         while not stop_event.is_set():
             try:
@@ -326,11 +327,27 @@ class ARPSpoofer:
                         break
                     continue
 
-                # Jika speed_limit >= 100 (dan bukan redirect), jangan injeksikan paket racun
+                # Jika speed_limit >= 100 (dan bukan redirect), pulihkan ARP jika sebelumnya teracuni
                 if speed_limit >= 100:
+                    if was_poisoned:
+                        try:
+                            restore_v_pkts, restore_gw_pkts = self._build_restore_packets(
+                                victim_ip, victim_mac, gateway_ip, gateway_mac
+                            )
+                            for _ in range(2):
+                                for p in restore_v_pkts:
+                                    sendp(p, iface=iface, verbose=False)
+                                for p in restore_gw_pkts:
+                                    sendp(p, iface=iface, verbose=False)
+                        except Exception as e:
+                            logger.debug(f"Unthrottle restore notice: {e}")
+                        was_poisoned = False
+
                     if stop_event.wait(0.5):
                         break
                     continue
+
+                was_poisoned = True
 
                 if speed_limit <= 0:
                     # MODE FULL BLOCK: Kirim racun dua arah (Victim <-> Gateway)

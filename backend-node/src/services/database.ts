@@ -1011,7 +1011,7 @@ export class DatabaseService {
         if (!this.db) return { deletedDevices: 0, deletedProfiles: 0 };
         const days = Math.max(1, Math.floor(thresholdDays));
 
-        // 1. Hapus entri MAC acak offline usang (> thresholdDays) yang tidak ber-alias personal dan bukan self/gateway
+        // 1. Hapus entri MAC acak offline usang (> thresholdDays) yang tidak ber-alias personal, bukan self/gateway, dan TIDAK diblokir
         const deleteDevicesStmt = this.db.prepare(`
             DELETE FROM devices
             WHERE (is_online = 0 OR is_online IS NULL)
@@ -1019,13 +1019,14 @@ export class DatabaseService {
               AND session_id IS NULL
               AND (is_self IS NULL OR is_self = 0)
               AND (is_gateway IS NULL OR is_gateway = 0)
+              AND (is_blocked IS NULL OR is_blocked = 0)
               AND (alias IS NULL OR alias = '' OR alias = 'Target Device')
               AND last_seen IS NOT NULL
               AND last_seen < datetime('now', 'localtime', '-${days} days')
         `);
         const devResult = deleteDevicesStmt.run();
 
-        // 2. Hapus entri MAC acak yang sudah terarsipkan (is_archived = 1) dan offline > 1 jam
+        // 2. Hapus entri MAC acak yang sudah terarsipkan (is_archived = 1), offline > 1 jam, dan TIDAK diblokir
         const deleteArchivedStmt = this.db.prepare(`
             DELETE FROM devices
             WHERE is_archived = 1
@@ -1034,6 +1035,7 @@ export class DatabaseService {
               AND session_id IS NULL
               AND (is_self IS NULL OR is_self = 0)
               AND (is_gateway IS NULL OR is_gateway = 0)
+              AND (is_blocked IS NULL OR is_blocked = 0)
               AND (alias IS NULL OR alias = '' OR alias = 'Target Device')
               AND last_seen IS NOT NULL
               AND last_seen < datetime('now', 'localtime', '-1 hours')
@@ -1951,7 +1953,9 @@ export class DatabaseService {
                     clearSessionStmt.run(networkId, macKey); // #3: nol-kan session_id basi di DB (upsert ON CONFLICT tak menyentuhnya)
                 }
                 // Perangkat perlu auto-reblock/auto-throttle HANYA jika belum aktif sesi spoof-nya (baru online / ganti MAC / sesi basi)
-                const needsSpoofSession = !existing || !existing.is_online || !sessionId;
+                // INVARIAN 1 & 2: Gateway dan Operator Controller (is_self) TIDAK BOLEH ditarget auto-reblock/throttle!
+                const isTargetSafe = !scanned.is_self && !scanned.is_gateway && !existing?.is_self && !existing?.is_gateway;
+                const needsSpoofSession = isTargetSafe && (!existing || !existing.is_online || !sessionId);
 
                 if (isBlocked && currentSpeedLimit === 0 && needsSpoofSession) {
                     autoReblockTargets.push({

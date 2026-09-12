@@ -524,5 +524,80 @@ class TestSentinelShield(unittest.TestCase):
         self.assertIsNone(self.shield._healing_thread)
         self.assertTrue(failed_healer.joined)
 
+    @patch('src.core.shield.subprocess.check_output', side_effect=Exception("PowerShell unavailable"))
+    @patch('src.core.discovery.arp.get_mac_from_arp', return_value='11:22:33:44:55:66')
+    def test_resolve_gateway_mac_fallback_to_get_mac_from_arp(self, mock_get_mac, mock_subp):
+        """When PowerShell NetNeighbor fails, shield must resolve gateway MAC via get_mac_from_arp."""
+        mac = self.shield._resolve_gateway_mac('192.168.1.1')
+        self.assertEqual(mac, '11:22:33:44:55:66')
+        mock_get_mac.assert_called_once_with('192.168.1.1')
+
+    @patch('src.core.shield.sniff')
+    def test_threat_sniffer_filter_ignores_self_mac_and_binds_iface(self, mock_sniff):
+        """Threat sniffer must bind to win_alias and ignore ARP frames originating from self_mac."""
+        self.shield._gateway_ip = '192.168.1.1'
+        self.shield._gateway_mac = '00:aa:bb:cc:dd:ee'
+        self.shield._self_mac = 'aa:bb:cc:dd:ee:ff'
+        self.shield._win_alias = 'Wi-Fi'
+
+        captured_lfilter = None
+        captured_kwargs = {}
+
+        def fake_sniff(*args, **kwargs):
+            nonlocal captured_lfilter, captured_kwargs
+            captured_lfilter = kwargs.get('lfilter')
+            captured_kwargs = kwargs
+            self.shield._sniffer_stop_event.set()
+
+        mock_sniff.side_effect = fake_sniff
+        self.shield._sniffer_stop_event.clear()
+        self.shield._threat_sniffer_loop()
+
+        self.assertIsNotNone(captured_lfilter)
+        self.assertEqual(captured_kwargs.get('iface'), 'Wi-Fi')
+
+        # Packet with Ether.src == self_mac but hwsrc == blackhole MAC (self-originated)
+        self_pkt = Ether(src='aa:bb:cc:dd:ee:ff', dst='00:aa:bb:cc:dd:ee') / ARP(
+            op=2, psrc='192.168.1.1', pdst='192.168.1.55', hwsrc='02:00:00:11:22:33'
+        )
+        self.assertFalse(captured_lfilter(self_pkt), "Packets originating from self_mac must be ignored by shield filter")
+
+        # Genuine attack packet from an external MAC
+        attacker_pkt = Ether(src='66:77:88:99:aa:bb', dst='00:aa:bb:cc:dd:ee') / ARP(
+            op=2, psrc='192.168.1.1', pdst='192.168.1.55', hwsrc='66:77:88:99:aa:bb'
+        )
+        self.assertTrue(captured_lfilter(attacker_pkt), "Genuine external spoofing packets must be caught by shield filter")
+
+    @patch('src.core.shield.sendp')
+    def test_heartbeat_and_healer_bind_interface(self, mock_sendp):
+        """Heartbeat and Healer loops must explicitly pass iface=self._win_alias to sendp."""
+        self.shield._gateway_ip = '192.168.1.1'
+        self.shield._gateway_mac = '00:aa:bb:cc:dd:ee'
+        self.shield._self_mac = 'aa:bb:cc:dd:ee:ff'
+        self.shield._win_alias = 'Wi-Fi'
+
+        with patch('src.core.shield.get_network_info', return_value={'ip': '192.168.1.100'}):
+            self.shield._heartbeat_stop_event.set()
+            # Run one send in heartbeat loop before exiting
+            self.shield._heartbeat_stop_event = MagicMock()
+            self.shield._heartbeat_stop_event.is_set.side_effect = [False, True]
+            self.shield._heartbeat_stop_event.wait.return_value = True
+            self.shield._heartbeat_loop()
+
+            self.assertEqual(mock_sendp.call_count, 1)
+            _, kwargs = mock_sendp.call_args
+            self.assertEqual(kwargs.get('iface'), 'Wi-Fi')
+
+        mock_sendp.reset_mock()
+        self.shield._healing_stop_event = MagicMock()
+        self.shield._healing_stop_event.is_set.side_effect = [False, True]
+        self.shield._healing_stop_event.wait.return_value = True
+        self.shield._lan_healer_loop()
+
+        self.assertEqual(mock_sendp.call_count, 1)
+        _, kwargs = mock_sendp.call_args
+        self.assertEqual(kwargs.get('iface'), 'Wi-Fi')
+
+
 if __name__ == '__main__':
     unittest.main()

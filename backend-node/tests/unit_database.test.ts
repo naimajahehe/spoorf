@@ -2173,5 +2173,53 @@ export async function runDatabaseTests() {
         await db.close();
         console.log('  ✓ Continuity fusing succeeds and disassociates stale IP even when old un-scanned MAC was marked online');
     }
+
+    // Test: pruneStaleRandomizedMacs must NOT prune blocked devices, and autoReblockTargets must NEVER include self or gateway
+    {
+        const { DatabaseService } = await import('../src/services/database');
+        const db = new DatabaseService(':memory:');
+        await db.init();
+        const raw = (db as any).db;
+        raw.prepare("INSERT INTO networks (id, ssid, gateway_ip, gateway_mac) VALUES ('net_test', 'Test', '192.168.1.1', 'aa:bb:cc:dd:ee:ff')").run();
+
+        // 1. Insert stale unblocked randomized MAC device
+        raw.prepare(`
+            INSERT INTO devices (network_id, mac, ip, hostname, is_randomized_mac, is_online, is_blocked, last_seen)
+            VALUES ('net_test', '26:00:00:00:00:10', '192.168.1.110', 'Stale-Unblocked', 1, 0, 0, datetime('now', 'localtime', '-5 days'))
+        `).run();
+
+        // 2. Insert stale BLOCKED randomized MAC device
+        raw.prepare(`
+            INSERT INTO devices (network_id, mac, ip, hostname, is_randomized_mac, is_online, is_blocked, last_seen)
+            VALUES ('net_test', '26:00:00:00:00:11', '192.168.1.111', 'Stale-Blocked', 1, 0, 1, datetime('now', 'localtime', '-5 days'))
+        `).run();
+
+        // Run garbage collection with 2 days threshold
+        db.pruneStaleRandomizedMacs(2);
+
+        const unblockedDev = raw.prepare('SELECT mac FROM devices WHERE mac = ?').get('26:00:00:00:00:10');
+        const blockedDev = raw.prepare('SELECT mac FROM devices WHERE mac = ?').get('26:00:00:00:00:11');
+
+        assert.strictEqual(unblockedDev, undefined, 'Stale unblocked randomized MAC should be pruned');
+        assert.ok(blockedDev, 'Stale BLOCKED randomized MAC must NOT be pruned by GC');
+
+        // Test autoReblock does not target self or gateway
+        const selfDevice: any = {
+            ip: '192.168.1.100',
+            mac: '26:00:00:00:00:12',
+            hostname: 'Controller-PC',
+            is_self: true,
+            is_gateway: false,
+            is_online: true,
+            is_blocked: true, // anomaly
+            speed_limit: 0,
+            network_id: 'net_test'
+        };
+        const syncResult = await db.syncScanResults([selfDevice], 'net_test');
+        assert.strictEqual(syncResult.autoReblockTargets.length, 0, 'Self device must NEVER be targeted for auto-reblock');
+
+        await db.close();
+        console.log('  ✓ Invariant Protection: GC preserves blocked devices and autoReblock ignores self/gateway');
+    }
 }
 
