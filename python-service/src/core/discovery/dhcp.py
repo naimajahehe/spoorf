@@ -56,6 +56,40 @@ def _serialize_duid(raw_duid) -> str:
     return str(raw_duid).strip()
 
 
+def _decode_fqdn(raw_fqdn: bytes) -> str:
+    """Decode Option 81 Client FQDN (RFC 4702).
+    Format wire:
+    Byte 0: Flags (Bit 2: E bit; 1 = canonical DNS wire format)
+    Byte 1: RCODE1
+    Byte 2: RCODE2
+    Byte 3+: Domain Name
+    """
+    if not raw_fqdn or not isinstance(raw_fqdn, (bytes, bytearray)):
+        return ""
+    if len(raw_fqdn) <= 3:
+        return ""
+    flags = raw_fqdn[0]
+    name_bytes = raw_fqdn[3:]
+    is_wire_format = bool(flags & 0x04)
+    if is_wire_format:
+        labels = []
+        idx = 0
+        while idx < len(name_bytes):
+            length = name_bytes[idx]
+            if length == 0:
+                break
+            idx += 1
+            if idx + length > len(name_bytes):
+                break
+            label = name_bytes[idx:idx+length].decode('utf-8', errors='ignore')
+            if label:
+                labels.append(label)
+            idx += length
+        return '.'.join(labels).rstrip('.')
+    else:
+        return name_bytes.decode('utf-8', errors='ignore').rstrip('\x00').strip()
+
+
 def diff_dhcp_profiles(
     before: Dict[str, Dict[str, Any]],
     after: Dict[str, Dict[str, Any]],
@@ -86,41 +120,48 @@ def diff_dhcp_profiles(
 
 
 class DHCPDiscoveredCache:
-    """
-    Thread-safe & Anti-Contamination Cache untuk temuan passive DHCP sniffer.
-    - Kunci primer adalah MAC address (hardware / persistent randomized).
-    - Smart merge: mempertahankan field bernilai lama jika field paket baru kosong.
-    - Anti IP Churn: pemetaan IP di-reset total jika kepemilikan IP berpindah ke MAC lain.
-    - LRU Eviction: batas memori maksimal 300 perangkat.
-    """
+    """Cache thread-safe untuk menyimpan perangkat yang ditemukan via DHCP."""
+
     def __init__(self, max_capacity: int = 300):
         self._lock = threading.Lock()
         self._cache_by_mac: Dict[str, Dict[str, Any]] = {}
         self._ip_to_mac: Dict[str, str] = {}
         self._max_capacity = max_capacity
 
-    def update(self, mac: str, ip: str, entry: Dict[str, Any]):
-        with self._lock:
-            norm_mac = mac.lower().replace('-', ':') if mac else ''
-            clean_ip = ip.strip() if (ip and is_valid_private_ip(ip)) else ''
+    def update(self, mac: str, ip: str, entry: Dict[str, Any]) -> Dict[str, Any]:
+        """Update atau tambahkan entri DHCP cache berbasis MAC.
+        Mengembalikan salinan dict entri termerge yang paling kaya informasi."""
+        clean_ip = ip.strip() if ip and is_valid_private_ip(ip.strip()) else ''
+        norm_mac = mac.lower().replace('-', ':') if mac else ''
+        observed_at = time.time()
 
-            if not norm_mac and not clean_ip:
-                return
-            observed_at = float(time.time())
+        with self._lock:
+            # PENTING: Bersihkan binding MAC lama jika IP ini sebelumnya pernah diasosiasikan
+            # dengan MAC yang berbeda (DHCP IP reassignment/churn).
+            if clean_ip:
+                stale_macs = [
+                    m for m, data in self._cache_by_mac.items()
+                    if data.get('ip') == clean_ip and m != norm_mac
+                ]
+                for sm in stale_macs:
+                    self._cache_by_mac[sm]['ip'] = ''
 
             # Ambil entri lama jika ada (berdasarkan MAC sebagai identitas tunggal)
             old_entry = self._cache_by_mac.get(norm_mac, {}) if norm_mac else {}
 
             # Smart merge: pertahankan nilai non-empty lama jika nilai baru kosong.
-            # KECUALI jika paket baru menandakan inisiasi/rebind DHCP (DISCOVER=1, REQUEST=3)
+            # KECUALI jika paket baru menandakan inisiasi/rebind DHCPv4 (DISCOVER=1, REQUEST=3)
             # atau pelepasan (RELEASE=7, DECLINE=4) di mana IP lama tidak boleh diresurreksi.
+            # DHCPv6 SOLICIT/REQUEST tidak membawa IPv4 sehingga tidak boleh mereset IP IPv4 yang sah.
+            is_dhcp6 = bool(entry.get('is_dhcp6') or entry.get('protocol') == 'dhcpv6')
             msg_code = entry.get('message_type_code')
-            is_unconfirmed_ip_event = msg_code in (1, 3, 4, 7)
+            is_unconfirmed_ip_event = (not is_dhcp6) and (msg_code in (1, 3, 4, 7))
             resolved_ip = clean_ip if (clean_ip or is_unconfirmed_ip_event) else old_entry.get('ip', '')
 
             merged = {
                 'mac': norm_mac or old_entry.get('mac', ''),
                 'ip': resolved_ip,
+                'ipv6': entry.get('ipv6') or old_entry.get('ipv6', ''),
                 'hostname': entry.get('hostname') or old_entry.get('hostname', ''),
                 'vendor_class': entry.get('vendor_class') or old_entry.get('vendor_class', ''),
                 'dhcp_fingerprint': entry.get('dhcp_fingerprint') or old_entry.get('dhcp_fingerprint', ''),
@@ -128,6 +169,8 @@ class DHCPDiscoveredCache:
                 'fqdn': entry.get('fqdn') or old_entry.get('fqdn', ''),
                 'message_type': entry.get('message_type') or old_entry.get('message_type', ''),
                 'message_type_code': entry.get('message_type_code') if entry.get('message_type_code') is not None else old_entry.get('message_type_code'),
+                'is_dhcp6': entry.get('is_dhcp6') if entry.get('is_dhcp6') is not None else old_entry.get('is_dhcp6', False),
+                'protocol': entry.get('protocol') or old_entry.get('protocol', 'dhcpv4'),
                 'lease_time': entry.get('lease_time') or old_entry.get('lease_time'),
                 'router_ip': entry.get('router_ip') or old_entry.get('router_ip', ''),
                 'server_id': entry.get('server_id') or old_entry.get('server_id', ''),
@@ -307,12 +350,16 @@ def _handle_dhcp6_packet(pkt) -> None:
         if pkt.haslayer(DHCP6OptOptReq):
             reqopts = getattr(pkt[DHCP6OptOptReq], 'reqopts', None)
             if reqopts:
+                try:
+                    oro_set = {int(x) for x in reqopts}
+                except (TypeError, ValueError):
+                    oro_set = set()
                 oro_str = ','.join(str(x) for x in reqopts)
-                if '23' in oro_str and '24' in oro_str and '31' in oro_str:
+                if {23, 24, 31}.issubset(oro_set):
                     dhcp_fingerprint = "Android DHCPv6 Signature"
-                elif '23' in oro_str and '24' in oro_str and '39' in oro_str:
+                elif {23, 24, 39}.issubset(oro_set):
                     dhcp_fingerprint = "Apple iOS/macOS DHCPv6 Signature"
-                elif '44' in oro_str or '47' in oro_str:
+                elif 44 in oro_set or 47 in oro_set:
                     dhcp_fingerprint = "Microsoft Windows DHCPv6 Signature"
                 else:
                     dhcp_fingerprint = f"DHCPv6 Signature (ORO: {oro_str})"
@@ -334,6 +381,8 @@ def _handle_dhcp6_packet(pkt) -> None:
             'fqdn': hostname,
             'message_type': msg_type_name,
             'message_type_code': msg_type_code,
+            'is_dhcp6': True,
+            'protocol': 'dhcpv6',
             'lease_time': '',
             'lease_sec': 0,
             'router_ip': '',
@@ -346,7 +395,10 @@ def _handle_dhcp6_packet(pkt) -> None:
             'last_seen': time.strftime("%Y-%m-%d %H:%M:%S")
         }
 
-        dhcp_cache.update(norm_mac, '', dhcp_entry)
+        enriched = dhcp_cache.update(norm_mac, '', dhcp_entry)
+        if enriched and enriched.get('ip'):
+            dhcp_entry['ip'] = enriched['ip']
+
         logger.info(f"📱 [DHCPv6 Sniffer] ({msg_type_name}): MAC={norm_mac} IPv6={src_ipv6 or '?'} Host='{hostname}' Class='{vendor_class}' DUID='{client_id}' FP='{dhcp_fingerprint}'")
 
         if _dhcp_callback:
@@ -390,17 +442,17 @@ def _handle_dhcp_packet(pkt) -> None:
         raw_host = options.get('hostname')
         hostname = ""
         if isinstance(raw_host, bytes):
-            hostname = raw_host.decode('utf-8', errors='ignore').strip()
+            hostname = raw_host.decode('utf-8', errors='ignore').rstrip('\x00').strip()
         elif isinstance(raw_host, str):
-            hostname = raw_host.strip()
+            hostname = raw_host.rstrip('\x00').strip()
 
         # Option 60: Vendor Class Identifier
         raw_vclass = options.get('vendor_class_id')
         vendor_class = ""
         if isinstance(raw_vclass, bytes):
-            vendor_class = raw_vclass.decode('utf-8', errors='ignore').strip()
+            vendor_class = raw_vclass.decode('utf-8', errors='ignore').rstrip('\x00').strip()
         elif isinstance(raw_vclass, str):
-            vendor_class = raw_vclass.strip()
+            vendor_class = raw_vclass.rstrip('\x00').strip()
 
         # Option 54: Server Identifier (DHCP Server IPv4)
         raw_server_id = options.get('server_id') or options.get(54)
@@ -413,7 +465,7 @@ def _handle_dhcp_packet(pkt) -> None:
                         server_id = s_cand
                 elif isinstance(raw_server_id, str) and is_valid_private_ip(raw_server_id.strip()):
                     server_id = raw_server_id.strip()
-                elif isinstance(raw_server_id, bytes) and len(raw_server_id) == 4:
+                elif isinstance(raw_server_id, (bytes, bytearray)) and len(raw_server_id) == 4:
                     import socket
                     s_cand = socket.inet_ntoa(raw_server_id)
                     if is_valid_private_ip(s_cand):
@@ -429,13 +481,9 @@ def _handle_dhcp_packet(pkt) -> None:
         if raw_prl:
             try:
                 if isinstance(raw_prl, (list, tuple, bytes, bytearray)):
-                    prl_values = [int(value) for value in raw_prl]
-                else:
-                    prl_values = [
-                        int(value.strip())
-                        for value in str(raw_prl).split(',')
-                        if value.strip()
-                    ]
+                    prl_values = [int(x) for x in raw_prl]
+                elif isinstance(raw_prl, str):
+                    prl_values = [int(x.strip()) for x in raw_prl.split(',') if x.strip().isdigit()]
                 prl_values = [
                     value for value in prl_values
                     if 0 <= value <= 255
@@ -460,7 +508,7 @@ def _handle_dhcp_packet(pkt) -> None:
         elif (
             {26, 28, 51, 58, 59}.issubset(prl_set)
             or vclass_lower.startswith('android-dhcp-')
-            or {28, 51, 58}.issubset(prl_set)
+            or ({26, 28, 51, 58}.issubset(prl_set) and 'android' in host_lower)
         ):
             if vclass_lower.startswith('android-dhcp-'):
                 dhcp_fingerprint = f"Android OS Signature ({vendor_class})"
@@ -493,11 +541,10 @@ def _handle_dhcp_packet(pkt) -> None:
         # Option 81: Client FQDN
         raw_fqdn = options.get('client_FQDN')
         fqdn = ""
-        if isinstance(raw_fqdn, bytes):
-            if len(raw_fqdn) > 3:
-                fqdn = raw_fqdn[3:].decode('utf-8', errors='ignore').strip('').strip()
+        if isinstance(raw_fqdn, (bytes, bytearray)):
+            fqdn = _decode_fqdn(raw_fqdn)
         elif isinstance(raw_fqdn, str):
-            fqdn = raw_fqdn.strip()
+            fqdn = raw_fqdn.rstrip('\x00').strip()
 
         # Option 51: IP Address Lease Time (seconds)
         raw_lease = options.get('lease_time') or options.get(51)
@@ -529,6 +576,11 @@ def _handle_dhcp_packet(pkt) -> None:
                         router_ip = candidate
                 elif isinstance(raw_router, str) and is_valid_private_ip(raw_router.strip()):
                     router_ip = raw_router.strip()
+                elif isinstance(raw_router, (bytes, bytearray)) and len(raw_router) == 4:
+                    import socket
+                    candidate = socket.inet_ntoa(raw_router)
+                    if is_valid_private_ip(candidate):
+                        router_ip = candidate
             except:
                 router_ip = ""
 
@@ -661,7 +713,8 @@ def start_dhcp_sniffer(callback=None) -> None:
                     filter="udp and (port 67 or port 68 or port 546 or port 547)",
                     prn=_handle_dhcp_packet,
                     store=False,
-                    stop_filter=lambda p: not _dhcp_sniffer_running
+                    stop_filter=lambda p: not _dhcp_sniffer_running,
+                    timeout=1.0
                 )
             except Exception as e:
                 if not _dhcp_sniffer_running:
@@ -689,4 +742,4 @@ def stop_dhcp_sniffer() -> None:
         pass
 
     if _dhcp_sniffer_thread and _dhcp_sniffer_thread.is_alive():
-        _dhcp_sniffer_thread.join(timeout=0.4)
+        _dhcp_sniffer_thread.join(timeout=1.5)

@@ -104,7 +104,8 @@ def pulse_host(
         try:
             t0 = time.time()
             p = subprocess.run(["ping", "-n", "1", "-w", "800", target_ip], capture_output=True, text=True, timeout=1.2)
-            if "TTL=" in p.stdout or "Reply from" in p.stdout or "Menerima balasan" in p.stdout:
+            stdout_upper = (p.stdout or "").upper()
+            if p.returncode == 0 and "TTL=" in stdout_upper and "UNREACHABLE" not in stdout_upper and "TIDAK DAPAT DIJANGKAU" not in stdout_upper:
                 return max(0.1, round((time.time() - t0) * 1000, 2))
         except Exception:
             pass

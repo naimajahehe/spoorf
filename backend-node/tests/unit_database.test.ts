@@ -2221,5 +2221,141 @@ export async function runDatabaseTests() {
         await db.close();
         console.log('  ✓ Invariant Protection: GC preserves blocked devices and autoReblock ignores self/gateway');
     }
+
+    // Stage 3 Test 4: isHighConfidence must NOT archive another legitimate online device in the same profile
+    {
+        const { DatabaseService } = await import('../src/services/database');
+        const db = new DatabaseService(':memory:');
+        await db.init();
+        const raw = (db as any).db;
+        raw.prepare("INSERT INTO networks (id, ssid, gateway_ip, gateway_mac) VALUES ('net_test', 'Test', '192.168.1.1', 'aa:bb:cc:dd:ee:ff')").run();
+
+        // 1. Laptop A terdaftar dengan profile
+        raw.prepare(`
+            INSERT INTO device_profiles (id, alias, hostname, vendor, device_type, dhcp_fingerprint, dhcp_vendor_class, linked_macs, updated_at)
+            VALUES ('prof_dell_laptop', 'Dell Inspiron', 'DESKTOP-DELL', 'Dell', 'PC / Laptop', '1,3,6,15,31,33,43,44,46,47', 'MSFT 5.0', '["aa:bb:cc:dd:ee:01"]', datetime('now', 'localtime'))
+        `).run();
+        raw.prepare(`
+            INSERT INTO devices (network_id, mac, ip, hostname, vendor, device_type, alias, profile_id, is_online, is_archived, dhcp_fingerprint, dhcp_vendor_class, last_seen)
+            VALUES ('net_test', 'aa:bb:cc:dd:ee:01', '192.168.1.50', 'DESKTOP-DELL', 'Dell', 'PC / Laptop', 'Dell Inspiron', 'prof_dell_laptop', 1, 0, '1,3,6,15,31,33,43,44,46,47', 'MSFT 5.0', datetime('now', 'localtime'))
+        `).run();
+
+        // 2. Laptop B (model & spesifikasi sama) hadir di jaringan dan sama-sama online
+        const laptopA: any = {
+            ip: '192.168.1.50',
+            mac: 'aa:bb:cc:dd:ee:01',
+            hostname: 'DESKTOP-DELL',
+            vendor: 'Dell',
+            device_type: 'PC / Laptop',
+            is_online: true,
+            is_blocked: false,
+            is_gateway: false,
+            is_self: false,
+            dhcp_fingerprint: '1,3,6,15,31,33,43,44,46,47',
+            dhcp_vendor_class: 'MSFT 5.0',
+            network_id: 'net_test'
+        };
+        const laptopB: any = {
+            ip: '192.168.1.51',
+            mac: 'aa:bb:cc:dd:ee:02',
+            hostname: 'DESKTOP-DELL',
+            vendor: 'Dell',
+            device_type: 'PC / Laptop',
+            is_online: true,
+            is_blocked: false,
+            is_gateway: false,
+            is_self: false,
+            dhcp_fingerprint: '1,3,6,15,31,33,43,44,46,47',
+            dhcp_vendor_class: 'MSFT 5.0',
+            network_id: 'net_test'
+        };
+
+        // Keduanya discan online bersamaan
+        await db.syncScanResults([laptopA, laptopB], 'net_test');
+
+        // Verifikasi: Laptop A TIDAK BOLEH diarsipkan dan IP-nya TIDAK BOLEH dihapus!
+        const storedLaptopA = raw.prepare('SELECT is_archived, is_online, ip FROM devices WHERE mac = ?').get('aa:bb:cc:dd:ee:01');
+        assert.strictEqual(storedLaptopA.is_archived, 0, 'Laptop A must NOT be archived by Laptop B joining');
+        assert.strictEqual(storedLaptopA.is_online, 1, 'Laptop A must remain online');
+        assert.strictEqual(storedLaptopA.ip, '192.168.1.50', 'Laptop A must retain its IP address');
+
+        await db.close();
+        console.log('  ✓ Profile Hijack Guard: isHighConfidence does not archive online devices sharing profile');
+    }
+
+    // Stage 3 Test 5: hasBlockedIdentityMatch matches generic factory hostname if seen within 15 minutes
+    {
+        const { DatabaseService } = await import('../src/services/database');
+        const db = new DatabaseService(':memory:');
+        await db.init();
+        const raw = (db as any).db;
+        raw.prepare("INSERT INTO networks (id, ssid, gateway_ip, gateway_mac) VALUES ('net_test', 'Test', '192.168.1.1', 'aa:bb:cc:dd:ee:ff')").run();
+
+        // Device dengan nama pabrik 'Galaxy-A14' diblokir, last_seen 5 menit lalu
+        raw.prepare(`
+            INSERT INTO devices (network_id, mac, ip, hostname, is_blocked, dhcp_fingerprint, dhcp_vendor_class, last_seen)
+            VALUES ('net_test', '26:11:22:33:44:55', '192.168.1.60', 'Galaxy-A14', 1, '1,3,6,15,26,28,51,58,59,43', 'android-dhcp-14', datetime('now', 'localtime', '-5 minutes'))
+        `).run();
+
+        // 1. Check match untuk device yang baru diskonek 5 menit lalu -> harus true
+        const matchFresh = db.hasBlockedIdentityMatch({
+            hostname: 'Galaxy-A14',
+            dhcp_fingerprint: '1,3,6,15,26,28,51,58,59,43',
+            vendor_class: 'android-dhcp-14'
+        }, 'net_test');
+        assert.strictEqual(matchFresh, true, 'Recent disconnect factory hostname must match for instant re-block');
+
+        // 2. Ubah last_seen menjadi 30 menit lalu
+        raw.prepare("UPDATE devices SET last_seen = datetime('now', 'localtime', '-30 minutes') WHERE mac = '26:11:22:33:44:55'").run();
+        const matchOld = db.hasBlockedIdentityMatch({
+            hostname: 'Galaxy-A14',
+            dhcp_fingerprint: '1,3,6,15,26,28,51,58,59,43',
+            vendor_class: 'android-dhcp-14'
+        }, 'net_test');
+        assert.strictEqual(matchOld, false, 'Old factory hostname (>15m) must not match to prevent false positives');
+
+        await db.close();
+        console.log('  ✓ Identity Re-Block: Generic factory hostname matches if seen within 15-minute window');
+    }
+
+    // Stage 3 Test 6: reconcileCanonicalDeviceMacs isolates unblock to the same network_id
+    {
+        const { DatabaseService } = await import('../src/services/database');
+        const db = new DatabaseService(':memory:');
+        await db.init();
+        const raw = (db as any).db;
+
+        // Siapkan 2 network terpisah
+        raw.prepare("INSERT INTO networks (id, ssid, gateway_ip, gateway_mac) VALUES ('net_home', 'Home', '192.168.1.1', 'aa:11:11:11:11:11')").run();
+        raw.prepare("INSERT INTO networks (id, ssid, gateway_ip, gateway_mac) VALUES ('net_office', 'Office', '10.0.0.1', 'bb:22:22:22:22:22')").run();
+
+        // Profil sama
+        raw.prepare(`
+            INSERT INTO device_profiles (id, alias, hostname, updated_at)
+            VALUES ('prof_phone_target', 'Hanif Phone', 'Hanif-Phone', datetime('now', 'localtime'))
+        `).run();
+
+        // Di Home: device online dan TIDAK diblokir (is_blocked = 0)
+        raw.prepare(`
+            INSERT INTO devices (network_id, mac, ip, profile_id, is_online, is_blocked)
+            VALUES ('net_home', '26:aa:bb:cc:dd:01', '192.168.1.50', 'prof_phone_target', 1, 0)
+        `).run();
+
+        // Di Office: device offline dan DIBLOKIR (is_blocked = 1)
+        raw.prepare(`
+            INSERT INTO devices (network_id, mac, ip, profile_id, is_online, is_blocked)
+            VALUES ('net_office', '26:aa:bb:cc:dd:02', '10.0.0.50', 'prof_phone_target', 0, 1)
+        `).run();
+
+        // Eksekusi reconcileCanonicalDeviceMacs
+        (db as any).reconcileCanonicalDeviceMacs();
+
+        // Di Office, device harus TETAP is_blocked = 1 (tidak ter-unblock oleh status unblocked di Home)
+        const officeDev = raw.prepare("SELECT is_blocked FROM devices WHERE network_id = 'net_office' AND mac = '26:aa:bb:cc:dd:02'").get();
+        assert.strictEqual(officeDev.is_blocked, 1, 'Device on foreign network must NOT be unblocked by local network state');
+
+        await db.close();
+        console.log('  ✓ Multi-Network Isolation: reconcileCanonicalDeviceMacs isolates unblock per network_id');
+    }
 }
 

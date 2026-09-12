@@ -2726,5 +2726,169 @@ export async function runDeviceManagerTests() {
         );
         console.log('  ✓ License Guard: setSpeedLimit(0) enforces license cut quota');
     }
+
+    // Stage 3 Test 1: Anti-Self-Cut Guard on Auto-Reblock & Auto-Throttle in scanNetwork
+    {
+        const python: any = new EventEmitter();
+        const spoofedTargets: string[] = [];
+        python.startSpoof = async (targetIp: string) => {
+            spoofedTargets.push(targetIp);
+            return 'sess_spoof_123';
+        };
+        python.scan = async () => ({
+            gateway: { ip: '192.168.1.1', mac: '00:11:22:33:44:01' },
+            self: { ip: '192.168.1.100', mac: '00:11:22:33:44:99' },
+            devices: [
+                { ip: '192.168.1.1', mac: '00:11:22:33:44:01', is_gateway: true, is_self: false, is_online: true },
+                { ip: '192.168.1.100', mac: '00:11:22:33:44:99', is_gateway: false, is_self: true, is_online: true },
+                { ip: '192.168.1.50', mac: 'aa:bb:cc:dd:ee:50', is_gateway: false, is_self: false, is_online: true }
+            ]
+        });
+
+        const db: any = {
+            init: async () => {},
+            getAllDevices: async () => [],
+            syncScanResults: async () => ({
+                allDevices: [
+                    { ip: '192.168.1.1', mac: '00:11:22:33:44:01', is_gateway: true, is_self: false, is_online: true, is_blocked: false, open_ports: [], services: [] },
+                    { ip: '192.168.1.100', mac: '00:11:22:33:44:99', is_gateway: false, is_self: true, is_online: true, is_blocked: false, open_ports: [], services: [] },
+                    { ip: '192.168.1.50', mac: 'aa:bb:cc:dd:ee:50', is_gateway: false, is_self: false, is_online: true, is_blocked: true, open_ports: [], services: [] }
+                ],
+                autoReblockTargets: [
+                    // Anomali: host controller terdaftar di autoReblockTargets
+                    { ip: '192.168.1.100', mac: '00:11:22:33:44:99', is_self: true, is_gateway: false, is_blocked: true, speed_limit: 0 },
+                    // Target sah
+                    { ip: '192.168.1.50', mac: 'aa:bb:cc:dd:ee:50', is_self: false, is_gateway: false, is_blocked: true, speed_limit: 0 }
+                ],
+                autoThrottleTargets: [
+                    // Anomali: host controller terdaftar di autoThrottleTargets
+                    { ip: '192.168.1.100', mac: '00:11:22:33:44:99', is_self: true, is_gateway: false, is_blocked: false, speed_limit: 50 }
+                ],
+                zombieSessionsToStop: []
+            }),
+            setDeviceBlocked: async () => {},
+            setDeviceSpeedLimit: async () => {},
+            setDeviceOnlineStatus: async () => {}
+        };
+
+        const manager = new DeviceManager(python, db);
+        await manager.scanNetwork();
+
+        assert.ok(!spoofedTargets.includes('192.168.1.100'), 'Controller host (is_self) must NEVER be targeted by auto-reblock/throttle');
+        assert.ok(spoofedTargets.includes('192.168.1.50'), 'Legitimate victim target must be auto-reblocked');
+        console.log('  ✓ Core Invariant #2: scanNetwork auto-reblock/throttle strictly filters out is_self controller host');
+    }
+
+    // Stage 3 Test 2: Displaced Device Memory Preservation on DHCP IP Churn
+    {
+        const python: any = new EventEmitter();
+        const db: any = {
+            setDeviceOnlineStatus: async () => {},
+            getDeviceByMac: async () => undefined,
+            hasBlockedIdentityMatch: () => false
+        };
+        const manager = new DeviceManager(python, db);
+
+        // Host lama di 192.168.1.50
+        const devA: Device = {
+            ip: '192.168.1.50', mac: 'aa:bb:cc:dd:ee:01', hostname: 'Phone-A',
+            vendor: 'Samsung', device_type: 'Mobile', os: 'Android', rtt_ms: 5,
+            open_ports: [], services: [], is_blocked: true, is_online: true, is_gateway: false
+        };
+        (manager as any).devices.set('192.168.1.50', devA);
+
+        // DHCP event: Phone B mengambil IP 192.168.1.50
+        await (manager as any)._handleDhcpEvent({
+            ip: '192.168.1.50',
+            mac: 'aa:bb:cc:dd:ee:02',
+            hostname: 'Phone-B',
+            message_type_code: 5 // ACK
+        });
+
+        // Phone A harus tetap ada di memory map di bawah deviceMemKey(devA) ('aa:bb:cc:dd:ee:01') dengan is_online: false
+        const displacedDevA = (manager as any).devices.get('aa:bb:cc:dd:ee:01');
+        assert.ok(displacedDevA, 'Displaced device must remain in memory under its identity key');
+        assert.strictEqual(displacedDevA.is_online, false, 'Displaced device must be marked offline');
+        assert.strictEqual(displacedDevA.is_blocked, true, 'Displaced device block rule must be preserved');
+        assert.strictEqual((manager as any).devices.get('192.168.1.50').mac, 'aa:bb:cc:dd:ee:02', 'New device occupies the IP');
+        console.log('  ✓ Memory Preservation: Displaced device on DHCP IP churn is kept in memory under identity key');
+    }
+
+    // Stage 3 Test 3: Profile Refresh Fault Isolation
+    {
+        const python: any = new EventEmitter();
+        python.profileRefresh = async () => ({
+            visible_count: 2,
+            high_confidence_count: 1,
+            medium_confidence_count: 0,
+            unknown_count: 0,
+            hostname_count: 2,
+            coverage_percentage: 100,
+            sources: {},
+            ap_isolation: {},
+            devices: [
+                {
+                    mac: 'aa:bb:cc:dd:ee:01',
+                    ip: '192.168.1.50',
+                    vendor: 'Apple',
+                    device_type: 'Mobile',
+                    hostname: 'iPhone-1',
+                    os: 'iOS',
+                    vendor_confidence: 90,
+                    type_confidence: 90,
+                    hostname_confidence: 90,
+                    profile_status: 'high',
+                    profile_evidence: [],
+                    profiled_at: '2026-09-12T10:00:00Z',
+                    profile_version: 1
+                },
+                {
+                    mac: 'aa:bb:cc:dd:ee:02',
+                    ip: '192.168.1.51',
+                    vendor: 'Apple',
+                    device_type: 'Mobile',
+                    hostname: 'iPhone-2',
+                    os: 'iOS',
+                    vendor_confidence: 90,
+                    type_confidence: 90,
+                    hostname_confidence: 90,
+                    profile_status: 'high',
+                    profile_evidence: [],
+                    profiled_at: '2026-09-12T10:00:00Z',
+                    profile_version: 1
+                }
+            ]
+        });
+
+        let dbCallCount = 0;
+        const db: any = {
+            updateDeviceProfileAssessment: async (assessment: any) => {
+                dbCallCount++;
+                if (assessment.mac === 'aa:bb:cc:dd:ee:01') {
+                    // Simulasi device 1 offline mendadak saat write DB
+                    throw new Error('Device with MAC aa:bb:cc:dd:ee:01 not found');
+                }
+            }
+        };
+
+        const manager = new DeviceManager(python, db);
+        (manager as any).devices.set('192.168.1.50', {
+            ip: '192.168.1.50', mac: 'aa:bb:cc:dd:ee:01', hostname: 'iPhone-1',
+            is_online: true, is_gateway: false, is_self: false
+        });
+        (manager as any).devices.set('192.168.1.51', {
+            ip: '192.168.1.51', mac: 'aa:bb:cc:dd:ee:02', hostname: 'iPhone-2',
+            is_online: true, is_gateway: false, is_self: false
+        });
+
+        let doneEmitted = false;
+        manager.on('profileRefreshDone', () => { doneEmitted = true; });
+
+        // executeProfileRefresh must NOT throw an unhandled rejection
+        const res = await (manager as any).executeProfileRefresh(null, 'all', (manager as any).profileRefreshGeneration);
+        assert.ok(res.success, 'Profile refresh must succeed despite one target failing persistence');
+        assert.ok(doneEmitted, 'profileRefreshDone event must be emitted');
+        console.log('  ✓ Fault Isolation: Profile refresh isolates single target DB write failure');
+    }
 }
 

@@ -2,6 +2,36 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.23] - 2026-09-12
+
+### Stage 3 (P1): Profiling, Fingerprinting & Backend Reconciliation Hardening
+- **DHCP Profiling & Wire Decoder — `python-service/src/core/discovery/dhcp.py`**:
+  - **RFC 4702 Option 81 FQDN Wire Decoder**: Mengimplementasikan parser format DNS wire (RFC 1035 label length encoding) dan plain ASCII untuk Option 81 FQDN.
+  - **Dual-Stack IPv4 Cache Protection**: Melindungi IPv4 yang telah sah di cache saat paket DHCPv6 SOLICIT/REQUEST masuk tanpa IPv4 (`is_dhcp6` guard), mencegah hilangnya visibilitas dual-stack.
+  - **DHCPv6 ORO Integer Set Membership**: Mengganti pengecekan substring naive (`oro_str`) dengan perbandingan set integer (`{23, 24, 31}`, `{23, 24, 39}`, `44/47 in oro_set`) untuk mencegah false match fingerprint OS.
+  - **Kalibrasi PRL Android**: Menghapus pola longgar `{28, 51, 58}` yang mengklasifikasikan host Linux/IoT generik sebagai Android.
+  - **Pembersihan Null Byte Trailing**: Membersihkan trailing null bytes `\x00` pada Option 12 Hostname dan Option 60 Vendor Class.
+  - **Dukungan Biner Option 3 Router IP**: Menguraikan byte biner 4-oktet Router IP menggunakan `socket.inet_ntoa`.
+  - **Penghapusan Thread Zombie Npcap**: Menambahkan `timeout=1.0` pada Scapy `sniff()` dan memperpanjang `join(timeout=1.5)` pada thread sniffer DHCP saat shutdown.
+- **Rogue DHCP Server Broadcast Attribution — `python-service/src/server.py`**:
+  - Memperbaiki payload event `rogue_dhcp_detected` agar memancarkan `rogue_server_mac` dan `rogue_server_ip` (bukan MAC klien korban).
+- **Multi-Vector Liveness ICMP Reliability — `python-service/src/core/discovery/liveness.py`**:
+  - Mengganti pengecekan naive `"Reply from"` pada output `ping` Windows dengan validasi ketat `"TTL=" in stdout` dan pengecualian status `"UNREACHABLE"`, mencegah host offline divonis online karena respon router ICMP Destination Unreachable.
+- **Device Manager Orchestrator Integrity — `backend-node/src/services/deviceManager.ts`**:
+  - **Penegakan Invarian #1 & #2**: Memfilter ketat `is_self` (operator controller) dan `is_gateway` pada loop `autoReblockTargets` dan `autoThrottleTargets` di `scanNetwork`.
+  - **Preservasi Memori Perangkat Terdestabilisasi**: Mempertahankan perangkat lama yang tergeser pada DHCP IP Churn (`_handleDhcpEvent`) dan konflik IP scan (`scanNetwork`) di dalam `this.devices` dengan kunci identitas `deviceMemKey(dev)` (`is_online = false, ip = ''`), sehingga tetap tampil di tab Offline (BUG-17).
+  - **Dukungan Perangkat Baru Mengambil IP Terdestabilisasi**: Mendukung perangkat baru yang mengklaim IP hasil pergantian DHCP IP churn secara instan di memori.
+  - **Defensive Unpacking Scan Payload**: Mendukung payload `python.scan` baik berupa array langsung `Device[]` maupun objek `{ devices: [...] }`.
+  - **Fault Isolation Profile Refresh**: Menambahkan isolasi `try...catch` pada persistensi asesmen profil agar kegagalan transient satu host tidak menggagalkan seluruh batch refresh.
+- **Database Service & State Persistence — `backend-node/src/services/database.ts`**:
+  - **Profile Hijack Guard**: Memproteksi `isHighConfidence` auto-archive dengan `!hasOtherOnlineInProfile` agar perangkat legitimate yang berbagi tipe/model tidak terarsipkan dan kehilangan IP saat perangkat baru sejenis bergabung.
+  - **Jendela 15 Menit Hostname Pabrik**: Memungkinkan pencocokan `hasBlockedIdentityMatch` untuk hostname generik pabrik jika terlihat dalam 15 menit terakhir (rotasi MAC aktif).
+  - **Isolasi Unblock Multi-Network**: Membatasi `reconcileCanonicalDeviceMacs` per jaringan (`d2.network_id = d1.network_id`) agar unblock di satu Wi-Fi tidak membocorkan unblock ke jaringan lain.
+  - **Indeks Komposit Kueri Cepat**: Menambahkan indeks komposit `idx_devices_dhcp_client_id`, `idx_devices_identity`, dan `idx_device_profiles_alias`.
+- **Pengujian Otomatis & Verifikasi Menyeluruh**:
+  - Menambahkan 5 unit test komprehensif di `python-service/tests/test_unit_dhcp.py` dan 5 unit test di `backend-node/tests/unit_database.test.ts` serta `backend-node/tests/unit_deviceManager.test.ts`.
+  - Hasil verifikasi: **363/363 Python tests PASSED** dan **40/40 Node.js backend tests PASSED** (Total: **403 tests 100% green**).
+
 ## [v2.41.22] - 2026-09-12
 
 ### Stage 2 (P1): Network Discovery, Probing & Topology Integrity Hardening

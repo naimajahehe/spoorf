@@ -320,13 +320,15 @@ async def startup_event():
             "data": device_info
         })
         if device_info.get("is_rogue_dhcp"):
+            r_server_ip = device_info.get("rogue_server_ip") or device_info.get("server_id") or device_info.get("ip")
+            r_server_mac = device_info.get("rogue_server_mac") or device_info.get("mac")
             manager.broadcast({
                 "event": "rogue_dhcp_detected",
                 "data": {
-                    "server_ip": device_info.get("rogue_server_ip") or device_info.get("server_id") or device_info.get("ip"),
-                    "server_mac": device_info.get("mac"),
+                    "server_ip": r_server_ip,
+                    "server_mac": r_server_mac,
                     "gateway_ip": device_info.get("router_ip"),
-                    "message": f"Rogue DHCP Server terdeteksi pada IP {device_info.get('rogue_server_ip') or device_info.get('server_id') or device_info.get('ip')} (MAC: {device_info.get('mac')})"
+                    "message": f"Rogue DHCP Server terdeteksi pada IP {r_server_ip} (MAC: {r_server_mac})"
                 }
             })
     NetworkScanner.start_dhcp_sniffer(callback=on_dhcp_detected)

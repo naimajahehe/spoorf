@@ -597,6 +597,9 @@ export class DatabaseService {
                 CREATE INDEX IF NOT EXISTS idx_devices_ip ON devices(ip);
                 CREATE INDEX IF NOT EXISTS idx_devices_is_archived ON devices(is_archived);
                 CREATE INDEX IF NOT EXISTS idx_devices_profile_id ON devices(profile_id);
+                CREATE INDEX IF NOT EXISTS idx_devices_dhcp_client_id ON devices(network_id, dhcp_client_id);
+                CREATE INDEX IF NOT EXISTS idx_devices_identity ON devices(network_id, hostname, dhcp_fingerprint, dhcp_vendor_class);
+                CREATE INDEX IF NOT EXISTS idx_device_profiles_alias ON device_profiles(alias);
 
                 CREATE TABLE IF NOT EXISTS license_cache (
                     id TEXT PRIMARY KEY DEFAULT 'current_license',
@@ -940,13 +943,18 @@ export class DatabaseService {
         // Mencegah bug rotasi MAC di mana entri offline basi menyebabkan auto-reblock membangkitkan blokir palsu.
         try {
             this.db.prepare(`
-                UPDATE devices 
+                UPDATE devices AS d1
                 SET is_blocked = 0, session_id = NULL, speed_limit = 100
-                WHERE profile_id IN (
-                    SELECT DISTINCT profile_id 
-                    FROM devices 
-                    WHERE is_online = 1 AND is_blocked = 0 AND profile_id IS NOT NULL
-                ) AND is_blocked = 1
+                WHERE d1.is_blocked = 1
+                  AND d1.profile_id IS NOT NULL
+                  AND EXISTS (
+                      SELECT 1
+                      FROM devices AS d2
+                      WHERE d2.network_id = d1.network_id
+                        AND d2.profile_id = d1.profile_id
+                        AND d2.is_online = 1
+                        AND d2.is_blocked = 0
+                  )
             `).run();
         } catch (err) {
             console.warn('Notice repair stale blocked profile rows:', err);
@@ -1163,9 +1171,14 @@ export class DatabaseService {
         const host = (data.hostname || '').trim().toLowerCase();
         const fp = (data.dhcp_fingerprint || '').trim().toLowerCase();
         const vc = (data.vendor_class || '').trim().toLowerCase();
-        if (host && !isGenericFactoryHostname(host) && fp && vc) {
+        if (host && fp && vc) {
             let query = `SELECT 1 FROM devices WHERE is_blocked = 1 AND LOWER(hostname) = ? AND LOWER(dhcp_fingerprint) = ? AND LOWER(dhcp_vendor_class) = ?`;
             const params: any[] = [host, fp, vc];
+            if (isGenericFactoryHostname(host)) {
+                // Untuk hostname pabrik (Galaxy-A14, Redmi), batasi pencocokan hanya bila
+                // target pernah online dalam jendela 15 menit terakhir (indikasi rotasi MAC nyata).
+                query += " AND last_seen > datetime('now', 'localtime', '-15 minutes')";
+            }
             if (networkId) {
                 query += ' AND network_id = ?';
                 params.push(networkId);
@@ -1896,7 +1909,7 @@ export class DatabaseService {
                         (bestReasons.includes('dhcp_prl_signature_match (+30)') || bestReasons.includes('generic_factory_hostname_match (+20)'))
                     );
 
-                    if (bestProfile && (isHighConfidence || isContinuityFusing)) {
+                    if (bestProfile && !hasOtherOnlineInProfile && (isHighConfidence || isContinuityFusing)) {
                         // High Confidence (>= 80%) or Verified Continuity Fusing (>= 60%): Auto-Link & Auto-Reblock
                         const matchTypeLabel = isHighConfidence
                             ? `HIGH CONFIDENCE (${bestScore}%)`
