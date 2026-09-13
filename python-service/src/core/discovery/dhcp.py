@@ -317,23 +317,46 @@ def _handle_dhcp6_packet(pkt) -> None:
             raw_duid = getattr(pkt[DHCP6OptClientId], 'duid', None)
             client_id = _serialize_duid(raw_duid)
 
-        # Option 16: Vendor Class
+        # Option 16: Vendor Class (DHCPv6 RFC 8415 sect 21.16)
         vendor_class = ""
         if pkt.haslayer(DHCP6OptVendorClass):
-            raw_vc = getattr(pkt[DHCP6OptVendorClass], 'vcdata', None)
+            opt_vc = pkt[DHCP6OptVendorClass]
+            raw_vc = getattr(opt_vc, 'vcdata', None)
+            parts = []
             if raw_vc:
-                if isinstance(raw_vc, (list, tuple)):
-                    parts = []
-                    for item in raw_vc:
-                        if isinstance(item, bytes):
-                            parts.append(item.decode('utf-8', errors='ignore'))
-                        else:
-                            parts.append(str(item))
-                    vendor_class = ' '.join(parts).strip()
-                elif isinstance(raw_vc, bytes):
-                    vendor_class = raw_vc.decode('utf-8', errors='ignore').strip()
-                else:
-                    vendor_class = str(raw_vc).strip()
+                items = raw_vc if isinstance(raw_vc, (list, tuple)) else [raw_vc]
+                for item in items:
+                    raw_data = getattr(item, 'data', None) if not isinstance(item, (bytes, str)) else item
+                    if isinstance(raw_data, bytes):
+                        text = raw_data.decode('utf-8', errors='ignore').strip()
+                    elif isinstance(raw_data, str):
+                        text = raw_data.strip()
+                    else:
+                        text = ""
+                    # Cegah representasi nama class Scapy yang bocor (mis. "VENDOR_CLASS_DATA")
+                    if text and text != "VENDOR_CLASS_DATA":
+                        parts.append(text)
+            if parts:
+                vendor_class = ' '.join(parts).strip()
+            elif getattr(opt_vc, 'enterprisenum', None):
+                ep_num = opt_vc.enterprisenum
+                common_enterprises = {
+                    311: "Microsoft",
+                    63: "Apple",
+                    9: "Cisco",
+                    5580: "Huawei",
+                    2011: "Huawei",
+                    11: "Hewlett-Packard",
+                }
+                ep_name = common_enterprises.get(ep_num)
+                if not ep_name:
+                    try:
+                        from scapy.layers.dhcp6 import IANA_ENTERPRISE_NUMBERS
+                        ep_name = IANA_ENTERPRISE_NUMBERS.get(ep_num)
+                    except Exception:
+                        pass
+                if ep_name and str(ep_name) != str(ep_num):
+                    vendor_class = str(ep_name).strip()
 
         # Option 39: FQDN / Hostname
         hostname = ""

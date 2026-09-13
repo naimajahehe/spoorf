@@ -293,5 +293,39 @@ class TestAuthoritativeDhcpIpSelection(unittest.TestCase):
             dhcp_mod._dhcp_callback = orig_cb
 
 
+    def test_dhcp6_vendor_class_extracts_real_data_not_scapy_class_name(self):
+        """BUG REGRESSION: str(objek VENDOR_CLASS_DATA Scapy) menghasilkan label 'VENDOR_CLASS_DATA',
+        membuang teks string biner sebenarnya ('MSFT 5.0'). Parser harus membaca item.data secara benar
+        dan tidak boleh menyimpan nama class 'VENDOR_CLASS_DATA'."""
+        from scapy.all import Ether, IPv6, UDP
+        from scapy.layers.dhcp6 import DHCP6_Solicit, DHCP6OptVendorClass, VENDOR_CLASS_DATA, DHCP6OptClientId, DUID_LLT
+        from src.core.discovery import dhcp as dhcp_mod
+
+        captured_entry = {}
+        def _cb(entry):
+            nonlocal captured_entry
+            captured_entry = entry
+
+        orig_cb = dhcp_mod._dhcp_callback
+        dhcp_mod._dhcp_callback = _cb
+        try:
+            duid = DUID_LLT(lladdr='aa:bb:cc:dd:ee:44', timeval=200)
+            pkt = (
+                Ether(src='aa:bb:cc:dd:ee:44', dst='33:33:00:01:00:02') /
+                IPv6(src='fe80::44', dst='ff02::1:2') /
+                UDP(sport=546, dport=547) /
+                DHCP6_Solicit() /
+                DHCP6OptClientId(duid=duid) /
+                DHCP6OptVendorClass(enterprisenum=311, vcdata=[VENDOR_CLASS_DATA(data=b'MSFT 5.0')])
+            )
+            dhcp_mod._handle_dhcp_packet(pkt)
+            self.assertNotEqual(captured_entry.get('vendor_class'), 'VENDOR_CLASS_DATA',
+                                "Tak boleh menyimpan nama class 'VENDOR_CLASS_DATA'")
+            self.assertEqual(captured_entry.get('vendor_class'), 'MSFT 5.0',
+                             "Harus mengekstrak data string asli dari vcdata")
+        finally:
+            dhcp_mod._dhcp_callback = orig_cb
+
+
 if __name__ == '__main__':
     unittest.main()

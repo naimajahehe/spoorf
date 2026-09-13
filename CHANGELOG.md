@@ -2,6 +2,20 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.25] - 2026-09-13
+
+### DHCP Profiling Bug Fix: Option 16 (Vendor Class) Stringification
+- **Python Service (`python-service/src/core/discovery/dhcp.py`)**:
+  - **Resolusi Kebocoran Class Name Scapy**: Memperbaiki deserialisasi DHCPv6 Option 16 (`DHCP6OptVendorClass`). Objek `VENDOR_CLASS_DATA` pada field `vcdata` sebelumnya diubah menggunakan `str(item)`, yang menghasilkan literal `"VENDOR_CLASS_DATA"` alih-alih data string payload sebenarnya (`item.data.decode('utf-8')`).
+  - **Dukungan IANA Enterprise Number**: Menambahkan fallback pemetaan enterprise number (misal 311: Microsoft, 63: Apple, 9: Cisco, dsb.) jika payload `vcdata` kosong.
+  - **Guard Anti-Bocor**: Memfilter teks bernilai `"VENDOR_CLASS_DATA"` secara eksplisit agar tidak pernah tersimpan di cache memori maupun dikirim ke event bus.
+- **Backend Node Orchestrator (`backend-node/src/services/database.ts`)**:
+  - **Defense-in-Depth Upsert Sanitation**: Menambahkan klausa guard pada query SQLite `ON CONFLICT(network_id, mac) DO UPDATE` agar menolak nilai `dhcp_vendor_class = 'VENDOR_CLASS_DATA'` dan `dhcp_fingerprint` yang terkontaminasi nama class tersebut.
+  - **Pembersihan Database Existing**: Membersihkan 95 record historis di `sentinel.db` yang sebelumnya terkontaminasi literal `"VENDOR_CLASS_DATA"`.
+- **Pengujian & Verifikasi**:
+  - Menambahkan regression test `test_dhcp6_vendor_class_extracts_real_data_not_scapy_class_name` di `python-service/tests/test_unit_dhcp.py`.
+  - 100% lulus seluruh test suite (364 Python unit test, 40 Node.js backend test, 6 Electron supervisor test, serta frontend production build clean).
+
 ## [v2.41.24] - 2026-09-12
 
 ### Stage 4 (P1): Orchestration, WebSocket, Frontend UI & Desktop Packaging Hardening
