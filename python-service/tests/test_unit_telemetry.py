@@ -102,6 +102,21 @@ class TestTelemetryCounters(unittest.TestCase):
         self.assertEqual(result['upload'], 0.0)
         self.assertEqual(sampler.last_iface, 'Ethernet', "iface harus di-reseed ke adapter baru")
 
+    def test_sample_includes_has_ipv6(self):
+        """Telemetry sample() harus menyertakan status has_ipv6 dari get_wifi_info."""
+        from src.core.telemetry import NetworkTelemetrySampler
+        wifi_info = {
+            'connected': True, 'interface': 'Wi-Fi', 'ssid': 'TestNet',
+            'signal': '90%', 'interface_type': 'wifi', 'has_ipv6': True
+        }
+        with patch('src.core.telemetry.get_wifi_info', return_value=wifi_info), \
+             patch('src.core.telemetry.psutil.net_io_counters', _make_net_io(wifi=(1000, 500))):
+            sampler = NetworkTelemetrySampler()
+            result = sampler.sample()
+            self.assertIn('has_ipv6', result, "sample() harus menyertakan field 'has_ipv6'")
+            self.assertTrue(result['has_ipv6'])
+
 
 if __name__ == '__main__':
     unittest.main()
+

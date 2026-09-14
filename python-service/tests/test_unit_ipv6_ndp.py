@@ -193,5 +193,40 @@ fe80::4e14:adff:fe14:ad87%14                  4e-e1-14-14-ad-87  Reachable
         send_ipv6_router_solicitation(discovered)
         self.assertEqual(discovered, {})
 
+    @patch('src.core.scanner.get_self_mac', return_value='11:22:33:44:55:66')
+    @patch('src.core.scanner.psutil.net_if_addrs')
+    def test_scanner_enriches_self_device_with_local_ipv6(self, mock_addrs, mock_self_mac):
+        """Host controller (is_self) harus diperkaya dengan alamat IPv6 adapter lokal."""
+        import socket
+        import psutil
+        class _MockAddr:
+            def __init__(self, family, address):
+                self.family = family
+                self.address = address
+
+        mock_addrs.return_value = {
+            'Wi-Fi': [
+                _MockAddr(getattr(psutil, 'AF_LINK', -1), '11:22:33:44:55:66'),
+                _MockAddr(socket.AF_INET, '192.168.1.50'),
+                _MockAddr(socket.AF_INET6, 'fe80::1122:3344:5566%14'),
+                _MockAddr(socket.AF_INET6, '2404:c0:4051::100'),
+            ]
+        }
+        dev = NetworkScanner._build_device(
+            ip="192.168.1.50",
+            mac="11:22:33:44:55:66",
+            gateway_ip="192.168.1.1",
+            is_active_layer2=True,
+            ipv6_snapshot={}
+        )
+        self.assertIsNotNone(dev)
+        self.assertTrue(dev['is_self'])
+        self.assertTrue(dev['is_dual_stack'])
+        self.assertEqual(dev['ipv6_link_local'], 'fe80::1122:3344:5566')
+        self.assertEqual(dev['ipv6_global'], '2404:c0:4051::100')
+        self.assertIn('2404:c0:4051::100', dev['ipv6_addresses'])
+
+
 if __name__ == '__main__':
     unittest.main()
+

@@ -117,8 +117,10 @@ class NetworkTelemetrySampler:
             'ssid': ssid,
             'signal': signal,
             'interface_type': interface_type,
+            'has_ipv6': bool(wifi_info.get('has_ipv6', False)),
             'download': download_mbps,
             'upload': upload_mbps,
             'latency': latency_ms,
             'timestamp': int(now * 1000)
         }
+

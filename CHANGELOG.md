@@ -2,6 +2,26 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.26] - 2026-09-14
+
+### Dual-Stack (IPv4 · IPv6) Wi-Fi Network & Host/Gateway Visibility
+- **Python Service (`python-service/src/core/telemetry.py` & `scanner.py`)**:
+  - **Telemetry Sampler**: Menambahkan `'has_ipv6'` pada dict hasil `sample()` dari `wifi_info.get('has_ipv6', False)`, mencegah penulisan balik `has_ipv6: false` pada detak telemetri periodik 1 detik.
+  - **Host Controller IPv6 Enrichment**: Pada `scanner.py:scan_full()`, memperkaya entri `This PC` (`is_self: True`) dengan alamat IPv6 global dan link-local yang terpasang pada adapter lokal via `psutil.net_if_addrs()`, serta menandai `is_dual_stack = True`.
+  - **Regression Tests**: Menambahkan unit test `test_sample_includes_has_ipv6` di `test_unit_telemetry.py` dan `test_scanner_enriches_self_device_with_local_ipv6` di `test_unit_ipv6_ndp.py`.
+- **Backend Node Orchestrator (`backend-node/src/services/pythonBridge.ts` & `deviceManager.ts`)**:
+  - **PythonBridge Telemetry Preservasi**: Menjaga nilai `has_ipv6` yang diterima dari Python service pada event stream `telemetry`, mencegah `latestWifiInfo.has_ipv6` tertimpa menjadi `false` oleh broadcast berkala.
+  - **DeviceManager Self Reconciliation**: Memperkaya perangkat `This PC` dengan alamat IPv6 dari network interface mesin lokal pada proses scanning/rekonsiliasi (`ipv6_link_local`, `ipv6_global`, `ipv6_addresses`, `is_dual_stack = true`), memastikan lencana Dual-Stack tampil akurat pada baris This PC.
+- **Frontend React UI (`frontend-react/src/hooks/useWebSocket.ts` & `WifiDetailsPopover.tsx`)**:
+  - **WebSocket Hook State Propagation**: Mempertahankan field `has_ipv6` pada fungsi `applyWifiSnapshot`, listener socket `telemetryStream`, dan `wifiStatus`, dengan memoized equality check agar tidak memicu re-render berlebih.
+  - **WifiDetailsPopover**: Menambahkan lencana `IPv6` pada header popover jaringan Wi-Fi saat aktif, serta menampilkan lencana `Dual-Stack`, `IPv6 Global`, dan `IPv6 Link-Local` pada ringkasan Default Gateway (Router).
+- **Verifikasi & Status Pengujian**:
+  - Python Unit Tests: **366 / 366 PASSED**.
+  - Node.js Backend Tests: **40 / 40 PASSED**.
+  - Electron Supervisor Tests: **6 / 6 PASSED**.
+  - Frontend React Build: **Vite build clean (0 errors)**.
+  - Live Endpoint Validation: Konfirmasi `GET /api/wifi` menghasilkan `has_ipv6: true` dan `GET /api/devices` menyajikan alamat IPv6 global pada `This PC` (`2404:c0:4051:b9b8:556a:4bd7:a79e:d177`) serta `Gateway` (`2404:c0:4051:b9b8::ba`).
+
 ## [v2.41.25] - 2026-09-13
 
 ### DHCP Profiling Bug Fix: Option 16 (Vendor Class) Stringification

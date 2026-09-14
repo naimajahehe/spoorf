@@ -11,6 +11,7 @@ import threading
 import platform
 import concurrent.futures
 import ipaddress
+import psutil
 from typing import List, Dict, Any, Optional
 
 from .network import (
@@ -112,9 +113,33 @@ class NetworkScanner:
         is_self = bool(self_mac and norm_mac == self_mac)
 
         ipv6_info = (ipv6_snapshot or {}).get(norm_mac, {})
-        ipv6_addrs = ipv6_info.get('addresses', [])
+        ipv6_addrs = list(ipv6_info.get('addresses', []))
         ipv6_ll = ipv6_info.get('link_local', '')
         ipv6_glob = ipv6_info.get('global', '')
+
+        if is_self and not ipv6_addrs:
+            try:
+                link_families = (getattr(psutil, 'AF_LINK', None), getattr(socket, 'AF_PACKET', None))
+                for iface_name, addrs in (psutil.net_if_addrs() or {}).items():
+                    mac_found = any(
+                        getattr(a, 'address', '').lower().replace('-', ':') == norm_mac
+                        for a in addrs if getattr(a, 'family', None) in link_families and getattr(a, 'family', None) is not None
+                    )
+                    if mac_found:
+                        for a in addrs:
+                            if getattr(a, 'family', None) == socket.AF_INET6:
+                                clean_addr = str(getattr(a, 'address', '') or '').split('%')[0].strip()
+                                if clean_addr and clean_addr != '::1':
+                                    if clean_addr not in ipv6_addrs:
+                                        ipv6_addrs.append(clean_addr)
+                                    if clean_addr.startswith('fe80:') and not ipv6_ll:
+                                        ipv6_ll = clean_addr
+                                    elif not clean_addr.startswith('fe80:') and not ipv6_glob:
+                                        ipv6_glob = clean_addr
+                        break
+            except Exception as e:
+                logger.debug(f"Self IPv6 extraction notice: {e}")
+
         is_dual = bool(ip and ipv6_addrs)
 
         if is_self:

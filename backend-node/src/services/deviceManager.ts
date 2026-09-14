@@ -1205,11 +1205,34 @@ export class DeviceManager extends EventEmitter {
                             if (activeGwForFilter && !isIpInSameSubnet(a.address, activeGwForFilter.ip)) {
                                 continue;
                             }
+                            const v6Addrs: string[] = [];
+                            let v6LinkLocal = '';
+                            let v6Global = '';
+                            for (const x of addrs) {
+                                if (x.family === 'IPv6' && x.address) {
+                                    const cleanV6 = x.address.split('%')[0].trim();
+                                    if (cleanV6 && cleanV6 !== '::1') {
+                                        if (!v6Addrs.includes(cleanV6)) v6Addrs.push(cleanV6);
+                                        if (cleanV6.startsWith('fe80:') && !v6LinkLocal) {
+                                            v6LinkLocal = cleanV6;
+                                        } else if (!cleanV6.startsWith('fe80:') && !v6Global) {
+                                            v6Global = cleanV6;
+                                        }
+                                    }
+                                }
+                            }
+
                             const selfIdx = rawScanned.findIndex(d => d.ip === a.address || d.mac.toLowerCase() === a.mac.toLowerCase());
                             if (selfIdx >= 0) {
                                 rawScanned[selfIdx].is_self = true;
                                 rawScanned[selfIdx].is_online = true;
                                 rawScanned[selfIdx].hostname = os.hostname();
+                                if (v6Addrs.length > 0) {
+                                    rawScanned[selfIdx].ipv6_addresses = v6Addrs;
+                                    rawScanned[selfIdx].ipv6_link_local = v6LinkLocal || rawScanned[selfIdx].ipv6_link_local;
+                                    rawScanned[selfIdx].ipv6_global = v6Global || rawScanned[selfIdx].ipv6_global;
+                                    rawScanned[selfIdx].is_dual_stack = true;
+                                }
                             } else {
                                 // OS operator dideteksi DINAMIS (bukan hardcode) agar benar
                                 // di komputer pengguna mana pun.
@@ -1236,7 +1259,11 @@ export class DeviceManager extends EventEmitter {
                                     is_blocked: false,
                                     rtt_ms: 0.1,
                                     open_ports: [],
-                                    services: []
+                                    services: [],
+                                    ipv6_link_local: v6LinkLocal || undefined,
+                                    ipv6_global: v6Global || undefined,
+                                    ipv6_addresses: v6Addrs,
+                                    is_dual_stack: v6Addrs.length > 0
                                 });
                             }
                         }

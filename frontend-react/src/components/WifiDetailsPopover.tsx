@@ -21,6 +21,8 @@ export interface WifiInfo {
     signal?: string;
     state?: string;
     bssid?: string;
+    interface_type?: 'wifi' | 'ethernet' | 'tethering' | 'unknown';
+    has_ipv6?: boolean;
 }
 
 interface Props {
@@ -123,9 +125,16 @@ export const WifiDetailsPopover: FC<Props> = ({
                             <Wifi size={16} />
                         </div>
                         <div>
-                            <h3 className="text-xs font-bold text-white tracking-wide truncate max-w-[200px]">
-                                {wifiInfo.ssid || 'Wi-Fi Network'}
-                            </h3>
+                            <div className="flex items-center gap-1.5">
+                                <h3 className="text-xs font-bold text-white tracking-wide truncate max-w-[180px]">
+                                    {wifiInfo.ssid || 'Wi-Fi Network'}
+                                </h3>
+                                {wifiInfo.has_ipv6 && (
+                                    <span className="px-1.5 py-0.5 text-[9px] font-mono font-bold text-sky-300 bg-sky-950/80 border border-sky-500/30 rounded">
+                                        IPv6
+                                    </span>
+                                )}
+                            </div>
                             <p className="text-[11px] text-zinc-400 font-mono">
                                 {wifiInfo.connected ? 'Status: Terhubung' : 'Status: Terputus'}
                             </p>
@@ -214,14 +223,33 @@ export const WifiDetailsPopover: FC<Props> = ({
                     {/* Network Gateway Quick Details */}
                     {gateway && (
                         <div className="bg-[#181a22] border border-zinc-800 rounded-xl p-3 space-y-1.5 text-[11px]">
-                            <div className="text-[10px] font-bold uppercase tracking-wider text-zinc-400 flex items-center gap-1.5 mb-1">
-                                <Radio size={12} className="text-amber-400" />
-                                <span>Default Gateway (Router)</span>
+                            <div className="text-[10px] font-bold uppercase tracking-wider text-zinc-400 flex items-center justify-between mb-1">
+                                <div className="flex items-center gap-1.5">
+                                    <Radio size={12} className="text-amber-400" />
+                                    <span>Default Gateway (Router)</span>
+                                </div>
+                                {gateway.is_dual_stack && (
+                                    <span className="px-1.5 py-0.5 text-[9px] font-mono font-bold text-sky-400 bg-sky-950/60 border border-sky-500/30 rounded">
+                                        Dual-Stack
+                                    </span>
+                                )}
                             </div>
                             <div className="flex justify-between">
                                 <span className="text-zinc-400">IP Gateway:</span>
                                 <span className="font-mono text-white font-medium">{gateway.ip}</span>
                             </div>
+                            {gateway.ipv6_global && (
+                                <div className="flex justify-between items-start gap-2">
+                                    <span className="text-zinc-400 shrink-0">IPv6 Global:</span>
+                                    <span className="font-mono text-sky-300 break-all text-right text-[10px] select-all">{gateway.ipv6_global}</span>
+                                </div>
+                            )}
+                            {gateway.ipv6_link_local && (
+                                <div className="flex justify-between items-start gap-2">
+                                    <span className="text-zinc-400 shrink-0">IPv6 Link-Local:</span>
+                                    <span className="font-mono text-zinc-300 break-all text-right text-[10px] select-all">{gateway.ipv6_link_local}</span>
+                                </div>
+                            )}
                             <div className="flex justify-between">
                                 <span className="text-zinc-400">MAC Gateway:</span>
                                 <span className="font-mono text-zinc-300">{gateway.mac}</span>

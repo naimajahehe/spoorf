@@ -211,11 +211,13 @@ export function useWebSocket() {
         if (!wifi) return;
         const isConn = Boolean(wifi.connected);
         const ssid = wifi.ssid || '';
+        const hasIpv6 = Boolean(wifi.has_ipv6);
         setWifiInfo({
             connected: isConn,
             ssid,
             signal: wifi.signal || '',
             interface_type: wifi.interface_type || 'wifi',
+            has_ipv6: hasIpv6,
             state: wifi.state || (isConn ? 'connected' : 'disconnected')
         });
         if (isConn && ssid) {
@@ -511,15 +513,18 @@ export function useWebSocket() {
                 const ssid = data.ssid || '';
                 const signal = data.signal || '';
                 const ifType = (data as any).interface_type || 'wifi';
+                const hasIpv6 = typeof (data as any).has_ipv6 === 'boolean' ? (data as any).has_ipv6 : undefined;
 
                 // Optimasi performa: Hindari re-render jika status Wi-Fi identik
                 setWifiInfo(prev => {
+                    const resolvedHasIpv6 = hasIpv6 !== undefined ? hasIpv6 : Boolean(prev?.has_ipv6);
                     if (
                         prev &&
                         prev.connected === isConn &&
                         prev.ssid === ssid &&
                         prev.signal === signal &&
-                        prev.interface_type === ifType
+                        prev.interface_type === ifType &&
+                        Boolean(prev.has_ipv6) === resolvedHasIpv6
                     ) {
                         return prev; // Referensi sama persis, React tidak memicu re-render
                     }
@@ -529,6 +534,7 @@ export function useWebSocket() {
                         ssid,
                         signal,
                         interface_type: ifType,
+                        has_ipv6: resolvedHasIpv6,
                         state: isConn ? 'connected' : 'disconnected'
                     };
                 });
@@ -542,12 +548,26 @@ export function useWebSocket() {
             if (data) {
                 recordLiveStateChange(['wifi']);
                 const isConn = Boolean(data.connected);
-                setWifiInfo({
-                    connected: isConn,
-                    ssid: data.ssid || '',
-                    signal: data.signal || '',
-                    interface_type: data.interface_type || 'wifi',
-                    state: isConn ? 'connected' : 'disconnected'
+                const hasIpv6 = Boolean(data.has_ipv6);
+                setWifiInfo(prev => {
+                    if (
+                        prev &&
+                        prev.connected === isConn &&
+                        prev.ssid === (data.ssid || '') &&
+                        prev.signal === (data.signal || '') &&
+                        prev.interface_type === (data.interface_type || 'wifi') &&
+                        Boolean(prev.has_ipv6) === hasIpv6
+                    ) {
+                        return prev;
+                    }
+                    return {
+                        connected: isConn,
+                        ssid: data.ssid || '',
+                        signal: data.signal || '',
+                        interface_type: data.interface_type || 'wifi',
+                        has_ipv6: hasIpv6,
+                        state: isConn ? 'connected' : 'disconnected'
+                    };
                 });
                 if (isConn && data.ssid) {
                     try { localStorage.setItem('sentinel_last_ssid', data.ssid); } catch {}

@@ -361,7 +361,9 @@ export class PythonBridge extends EventEmitter {
                     signal: event.data.signal || '',
                     interface_type: event.data.interface_type || 'wifi',
                     state: event.data.connected ? 'connected' : 'disconnected',
-                    has_ipv6: Boolean(event.data.has_ipv6)
+                    has_ipv6: event.data.has_ipv6 !== undefined
+                        ? Boolean(event.data.has_ipv6)
+                        : (this.latestWifiInfo?.has_ipv6 ?? false)
                 };
             }
             this.emit('telemetry', event.data);
