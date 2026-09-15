@@ -425,7 +425,10 @@ export function useWebSocket() {
                 op.reject(new Error('Koneksi terputus saat operasi berlangsung'));
             });
             pendingToggleOpsRef.current.clear();
-            setWifiInfo(prev => ({ ...prev, connected: false, state: 'disconnected' }));
+            // Diskoneksi Socket.IO lokal (127.0.0.1:5000) bukan berarti antarmuka jaringan fisik terputus.
+            // Pertahankan status wifiInfo terakhir dan ubah state menjadi 'detecting' agar tidak memicu
+            // false-positive "Tidak Ada Jaringan" di header UI saat socket lokal reconnect sesaat.
+            setWifiInfo(prev => ({ ...prev, state: 'detecting' }));
             setTelemetry(prev => ({ ...prev, connected: false, download: 0, upload: 0, latency: 0 }));
             console.log('WebSocket disconnected');
             setIsConnected(false);

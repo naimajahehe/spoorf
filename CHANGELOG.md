@@ -2,6 +2,30 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.32] - 2026-09-15
+
+### Anti-Flapping Robust Network Detection & Local IPC Decoupling
+- **Block-Aware Multi-Interface WLAN Resolver (`python-service/src/core/network.py`)**:
+  - Memisahkan parsing `netsh wlan show interfaces` per-blok antarmuka via fungsi modular `parse_netsh_wlan_interfaces`. Menghilangkan bug di mana antarmuka virtual sekunder (*Microsoft Wi-Fi Direct Virtual Adapter* atau *Mobile Hotspot*) yang berstatus `disconnected` menimpa adapter Wi-Fi fisik utama yang sedang terhubung.
+  - Menggunakan regex word boundary `\b(connected|terhubung)\b` dan pengecekan negatif `\b(disconnected|terputus)\b` untuk mencegah string `'disconnected'` keliru dicocokkan sebagai `'connected'`.
+  - Menaikkan subproses timeout dari `1.5s` ke `3.0s` untuk mencegah kegagalan baca saat Windows sibuk atau Npcap sedang menyuntik/menangkap paket.
+- **Universal Wi-Fi Fallback & Anti-Flapping Cache Protection (`python-service/src/core/network.py`)**:
+  - Menghapus pengecualian diskriminatif terhadap adapter Wi-Fi pada Fallback #2 `psutil`. Saat `netsh` gagal atau timeout, sistem memvalidasi adapter fisik yang `isup` dengan IP privat RFC 1918 dan default gateway yang sah, mempertahankan status `connected: True` dan retensi SSID terakhir dari cache.
+  - Menyematkan perlindungan anti-flapping pada cache Wi-Fi: jika cache sebelumnya `connected=True` dan sample sesaat menghasilkan diskoneksi, status `connected` tetap dipertahankan selama default gateway di kernel OS masih terbukti aktif.
+- **Intranet / Offline LAN Gateway Fallback (`python-service/src/core/network.py`)**:
+  - Pada `get_active_ip()`, jika koneksi UDP ke `8.8.8.8` gagal (karena PC berada di jaringan LAN tertutup/tanpa akses internet publik), sistem secara otomatis melakukan query rute internal ke IP default gateway lokal (`s.connect((gw, 80))`), mencegah kegagalan deteksi IP aktif di jaringan lokal.
+- **Watchdog Transient Interface Miss Guard (`python-service/src/core/network.py`)**:
+  - Pada `is_network_changed()`, jika `curr_interface` terbaca kosong akibat *transient socket miss*, watchdog mengembalikan `False` (bukan memicu *panic reset* palsu dan penghapusan sesi spoofing).
+- **Decoupling Local Socket Disconnect from Physical Wi-Fi State (`frontend-react/src/hooks/useWebSocket.ts`)**:
+  - Memperbaiki event `newSocket.on('disconnect')`: diskoneksi Socket.IO lokal (`localhost:5000`) tidak lagi memaksa status jaringan fisik menjadi `connected: false` / `state: 'disconnected'`, melainkan menandai `state: 'detecting'` dan mempertahankan SSID terakhir. Hal ini menghilangkan kedipan palsu *"Tidak Ada Jaringan"* saat jendela Electron di-minimize atau backend me-reconnect sesaat.
+- **Test Suite Updates (`python-service/tests/test_unit_network.py`)**:
+  - Menambahkan 8 unit test baru: parsing single/multi-interface, penolakan substring disconnected, dukungan locale bahasa Indonesia, fallback timeout Wi-Fi, anti-flapping retention, fallback router offline, dan stabilitas watchdog antarmuka kosong.
+- **Verifikasi & Status Pengujian**:
+  - Python Unit Tests: **379 / 379 PASSED (100% OK)**.
+  - Node.js Backend Tests: **48 / 48 PASSED (100% OK)**.
+  - Frontend Build: **0 Errors, 100% Clean Bundle**.
+  - Total: **427 Automated Tests 100% Green**.
+
 ## [v2.41.31] - 2026-09-15
 
 ### Default-Deny for Unknown Occupants & Hostname Continuity (R-1, R-3)

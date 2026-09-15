@@ -11,8 +11,11 @@ from src.core.network import (
     is_valid_mac,
     get_self_mac,
     get_current_gateway,
+    get_active_ip,
     get_network_info,
     get_wifi_info,
+    clear_wifi_cache,
+    parse_netsh_wlan_interfaces,
     has_ipv6_connectivity,
     is_network_changed
 )
@@ -294,6 +297,158 @@ class TestCoreNetwork(unittest.TestCase):
              patch('psutil.net_if_stats', return_value=stats), \
              patch('src.core.network.netifaces.gateways', return_value=gateways):
             self.assertTrue(has_ipv6_connectivity())
+
+    # ===== 5. Anti-Flapping, Multi-Interface, and Robust Fallback Tests =====
+    def test_parse_netsh_wlan_interfaces_single_connected(self):
+        sample_output = """There is 1 interface on the system:
+
+    Name                   : Wi-Fi
+    Description            : RZ616 Wi-Fi 6E 160MHz
+    State                  : connected
+    SSID                   : Office_5G
+    AP BSSID               : 9a:4a:6b:15:75:e8
+    Radio type             : 802.11ax
+    Channel                : 36
+    Signal                 : 85%
+"""
+        parsed = parse_netsh_wlan_interfaces(sample_output)
+        self.assertTrue(parsed.get('connected'))
+        self.assertEqual(parsed.get('ssid'), 'Office_5G')
+        self.assertEqual(parsed.get('interface'), 'Wi-Fi')
+        self.assertEqual(parsed.get('signal'), '85%')
+
+    def test_parse_netsh_wlan_interfaces_multi_adapter_prioritizes_connected(self):
+        """Uji output dengan 2 antarmuka: Wi-Fi aktif + Virtual Wi-Fi Direct terputus."""
+        multi_output = """There are 2 interfaces on the system:
+
+    Name                   : Wi-Fi
+    Description            : RZ616 Wi-Fi 6E 160MHz
+    State                  : connected
+    SSID                   : MyHomeWiFi
+    AP BSSID               : 11:22:33:44:55:66
+    Radio type             : 802.11ac
+    Channel                : 44
+    Signal                 : 90%
+
+    Name                   : Local Area Connection* 9
+    Description            : Microsoft Wi-Fi Direct Virtual Adapter
+    State                  : disconnected
+    Radio type             : 802.11ac
+"""
+        parsed = parse_netsh_wlan_interfaces(multi_output)
+        # Antarmuka primer yang connected harus terpilih, BUKAN tertimpa oleh antarmuka kedua yang disconnected!
+        self.assertTrue(parsed.get('connected'))
+        self.assertEqual(parsed.get('ssid'), 'MyHomeWiFi')
+        self.assertEqual(parsed.get('interface'), 'Wi-Fi')
+
+    def test_parse_netsh_wlan_interfaces_rejects_disconnected(self):
+        """Pastikan substring 'disconnected' TIDAK dianggap 'connected'."""
+        disconn_output = """There is 1 interface on the system:
+
+    Name                   : Wi-Fi
+    State                  : disconnected
+"""
+        parsed = parse_netsh_wlan_interfaces(disconn_output)
+        self.assertFalse(parsed.get('connected'))
+
+    def test_parse_netsh_wlan_interfaces_supports_indonesian_locale(self):
+        """Uji dukungan bahasa Indonesia (Keadaan: terhubung / terputus)."""
+        id_output_conn = """Ada 1 antarmuka pada sistem:
+
+    Nama                   : Wi-Fi
+    Keadaan                : terhubung
+    SSID                   : Warkop_Kopi
+    Sinyal                 : 75%
+"""
+        parsed = parse_netsh_wlan_interfaces(id_output_conn)
+        self.assertTrue(parsed.get('connected'))
+        self.assertEqual(parsed.get('ssid'), 'Warkop_Kopi')
+
+        id_output_disconn = """Ada 1 antarmuka pada sistem:
+
+    Nama                   : Wi-Fi
+    Keadaan                : terputus
+"""
+        parsed_dis = parse_netsh_wlan_interfaces(id_output_disconn)
+        self.assertFalse(parsed_dis.get('connected'))
+
+    def test_get_wifi_info_windows_fallback_to_psutil_when_netsh_timeout(self):
+        """Bila netsh timeout pada kartu Wi-Fi, fallback psutil harus mendeteksi Wi-Fi sebagai connected."""
+        import subprocess as _sp
+        import socket as _s
+        clear_wifi_cache()
+
+        addrs = {
+            'Wi-Fi': [
+                self._fake_addr(_s.AF_INET, '192.168.1.150'),
+            ]
+        }
+        stats = {'Wi-Fi': self._fake_stats(True)}
+
+        with patch('src.core.network.sys.platform', 'win32'), \
+             patch('subprocess.check_output', side_effect=_sp.TimeoutExpired(['netsh'], 3.0)), \
+             patch('src.core.network.get_current_gateway', return_value='192.168.1.1'), \
+             patch('psutil.net_if_stats', return_value=stats), \
+             patch('psutil.net_if_addrs', return_value=addrs):
+            wifi = get_wifi_info()
+            self.assertTrue(wifi['connected'])
+            self.assertEqual(wifi['interface_type'], 'wifi')
+            self.assertEqual(wifi['state'], 'connected')
+
+    def test_get_wifi_info_anti_flapping_retains_cache_when_gateway_alive(self):
+        """Bila cache sebelumnya connected, dan sample sesaat menghasilkan disconnected saat gateway masih ada,
+        anti-flapping harus mempertahankan status connected."""
+        import socket as _s
+        clear_wifi_cache()
+
+        # 1. Seed cache awal: connected
+        with patch('src.core.network.sys.platform', 'win32'), \
+             patch('subprocess.check_output', return_value="Name : Wi-Fi\nState : connected\nSSID : SolidWiFi\nSignal : 80%\n"), \
+             patch('src.core.network.get_current_gateway', return_value='192.168.1.1'):
+            first = get_wifi_info()
+            self.assertTrue(first['connected'])
+            self.assertEqual(first['ssid'], 'SolidWiFi')
+
+        # 2. Paksa expire cache TTL
+        import src.core.network as _net
+        _net._WIFI_INFO_CACHE_TIME = 0.0
+
+        # 3. Sample kedua: netsh gagal dan psutil kosong (glitch sesaat), TAPI gateway masih aktif di OS
+        with patch('src.core.network.sys.platform', 'win32'), \
+             patch('subprocess.check_output', return_value="Name : Wi-Fi\nState : disconnected\n"), \
+             patch('psutil.net_if_stats', return_value={}), \
+             patch('src.core.network.get_current_gateway', return_value='192.168.1.1'):
+            second = get_wifi_info()
+            # Anti-flapping mempertahankan state connected
+            self.assertTrue(second['connected'])
+            self.assertEqual(second['ssid'], 'SolidWiFi')
+
+    def test_get_active_ip_offline_router_fallback(self):
+        """Bila 8.8.8.8 gagal di-connect (intranet offline), get_active_ip harus fallback ke gateway lokal."""
+        with patch('src.core.network.get_current_gateway', return_value='192.168.10.1'):
+            mock_sock = unittest.mock.MagicMock()
+            def fake_connect(addr):
+                if addr[0] == '8.8.8.8':
+                    raise OSError("No route to host")
+                elif addr[0] == '192.168.10.1':
+                    return None
+                raise OSError("Refused")
+
+            mock_sock.connect.side_effect = fake_connect
+            mock_sock.getsockname.return_value = ('192.168.10.55', 0)
+            mock_sock.__enter__.return_value = mock_sock
+
+            with patch('src.core.network.socket.socket', return_value=mock_sock):
+                ip = get_active_ip()
+                self.assertEqual(ip, '192.168.10.55')
+
+    def test_network_changed_ignores_empty_curr_interface(self):
+        """Bila curr_interface kosong (glitch pembacaan transien), jangan memicu network_changed."""
+        curr_gw = '192.168.1.1'
+        prev_iface = 'Wi-Fi'
+        with patch('src.core.network.get_current_gateway', return_value=curr_gw), \
+             patch('src.core.network.get_network_info', return_value={'interface': ''}):
+            self.assertFalse(is_network_changed(curr_gw, prev_iface))
 
 
 if __name__ == '__main__':

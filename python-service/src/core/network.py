@@ -102,6 +102,19 @@ def get_active_ip() -> Optional[str]:
                 return ip
     except Exception:
         pass
+
+    # Fallback untuk jaringan intranet / LAN terisolasi tanpa akses internet publik
+    try:
+        gw = get_current_gateway()
+        if gw and is_valid_private_ip(gw):
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.connect((gw, 80))
+                ip = s.getsockname()[0]
+                if is_valid_private_ip(ip):
+                    return ip
+    except Exception:
+        pass
+
     return None
 
 def get_current_gateway() -> str:
@@ -280,6 +293,64 @@ def has_ipv6_connectivity() -> bool:
     return False
 
 
+def parse_netsh_wlan_interfaces(output: str) -> Dict[str, Any]:
+    """
+    Parse output 'netsh wlan show interfaces' per blok antarmuka.
+    Mencegah adapter virtual sekunder (Wi-Fi Direct / Mobile Hotspot) yang terputus
+    menimpa adapter Wi-Fi fisik utama yang sedang terhubung.
+    """
+    interfaces = []
+    current_iface: Dict[str, Any] = {}
+
+    for line in output.splitlines():
+        line_str = line.strip()
+        if not line_str or ':' not in line_str:
+            continue
+        key, val = [x.strip() for x in line_str.split(':', 1)]
+        key_lower = key.lower()
+
+        # Deteksi awal blok antarmuka baru: baris Name / Nama
+        if any(k in key_lower for k in ('name', 'nama')) and not any(k in key_lower for k in ('network', 'jaringan', 'profil', 'profile', 'ssid')):
+            if current_iface:
+                interfaces.append(current_iface)
+                current_iface = {}
+            current_iface['interface'] = val
+            continue
+
+        if current_iface is not None:
+            val_lower = val.lower()
+            if any(k in key_lower for k in ('state', 'keadaan', 'status')):
+                is_disconnected = bool(re.search(r'\b(disconnected|terputus)\b', val_lower))
+                is_connected = bool(re.search(r'\b(connected|terhubung)\b', val_lower)) and not is_disconnected
+                current_iface['connected'] = is_connected
+            elif 'bssid' in key_lower:
+                current_iface['bssid'] = val
+            elif 'ssid' in key_lower:
+                current_iface['ssid'] = val
+            elif any(k in key_lower for k in ('signal', 'sinyal')):
+                current_iface['signal'] = val
+            elif 'radio' in key_lower:
+                current_iface['radio_type'] = val
+            elif any(k in key_lower for k in ('channel', 'saluran')):
+                current_iface['channel'] = val
+
+    if current_iface:
+        interfaces.append(current_iface)
+
+    # 1. Prioritaskan antarmuka yang terhubung dan memiliki SSID
+    for iface in interfaces:
+        if iface.get('connected') and iface.get('ssid'):
+            return iface
+
+    # 2. Antarmuka yang terhubung meski tanpa SSID terurai
+    for iface in interfaces:
+        if iface.get('connected'):
+            return iface
+
+    # 3. Kembalikan antarmuka pertama bila tidak ada yang terhubung
+    return interfaces[0] if interfaces else {}
+
+
 def get_wifi_info() -> Dict[str, Any]:
     """
     Universal Network Resolver:
@@ -308,46 +379,28 @@ def get_wifi_info() -> Dict[str, Any]:
         wifi_info['has_ipv6'] = has_ipv6_connectivity()
         return wifi_info
 
-    # 1. Coba deteksi interface Wi-Fi via netsh wlan
+    # 1. Coba deteksi interface Wi-Fi via netsh wlan dengan timeout aman (3.0s)
     try:
         output = subprocess.check_output(
             ["netsh", "wlan", "show", "interfaces"],
             stderr=subprocess.DEVNULL,
             text=True,
-            timeout=1.5
+            timeout=3.0
         )
-        lines = output.splitlines()
-        for line in lines:
-            line_str = line.strip()
-            if not line_str or ':' not in line_str:
-                continue
-            key, val = [x.strip() for x in line_str.split(':', 1)]
-            key_lower = key.lower()
-            val_lower = val.lower()
-
-            if any(k in key_lower for k in ('state', 'keadaan', 'status')):
-                wifi_info['connected'] = any(s in val_lower for s in ('connected', 'terhubung'))
-            elif 'bssid' in key_lower:
-                wifi_info['bssid'] = val
-            elif 'ssid' in key_lower:
-                wifi_info['ssid'] = val
-            elif any(k in key_lower for k in ('signal', 'sinyal')):
-                wifi_info['signal'] = val
-            elif 'radio' in key_lower:
-                wifi_info['radio_type'] = val
-            elif any(k in key_lower for k in ('channel', 'saluran')):
-                wifi_info['channel'] = val
-            elif any(k in key_lower for k in ('name', 'nama')) and not wifi_info['ssid']:
-                wifi_info['interface'] = val
+        parsed = parse_netsh_wlan_interfaces(output)
+        if parsed:
+            wifi_info.update(parsed)
     except Exception as e:
         logger.debug(f"Notice netsh wifi info: {e}")
 
-    # 2. Universal Fallback: Jika Wi-Fi tidak terhubung, periksa apakah terhubung via Ethernet LAN / Tethering
-    if not wifi_info['connected']:
+    # 2. Universal Fallback: Jika Wi-Fi belum terdeteksi terhubung via netsh,
+    # periksa apakah terhubung via adapter fisik (Wi-Fi, Ethernet LAN, USB Tethering)
+    # melalui psutil dan ketersediaan gateway privat aktif.
+    if not wifi_info.get('connected'):
         try:
             import psutil
             gw = get_current_gateway()
-            if gw and gw != "0.0.0.0":
+            if gw and is_valid_private_ip(gw):
                 stats = psutil.net_if_stats()
                 addrs = psutil.net_if_addrs()
                 for iface_name, stat in stats.items():
@@ -357,29 +410,30 @@ def get_wifi_info() -> Dict[str, Any]:
                     if_addrs = addrs.get(iface_name, [])
                     for a in if_addrs:
                         if a.family == socket.AF_INET and not a.address.startswith('127.') and not a.address.startswith('169.254.'):
-                                if any(x in name_lower for x in ('ethernet', 'local area', 'lan', 'eth')):
-                                    wifi_info['connected'] = True
-                                    wifi_info['ssid'] = 'Ethernet (LAN)'
-                                    wifi_info['signal'] = '100%'
-                                    wifi_info['interface'] = iface_name
-                                    wifi_info['interface_type'] = 'ethernet'
-                                    break
-                                elif any(x in name_lower for x in ('rndis', 'tether', 'cellular', 'mobile')):
-                                    wifi_info['connected'] = True
+                            if is_valid_private_ip(a.address):
+                                is_wifi = any(x in name_lower for x in ('wi-fi', 'wifi', 'wlan', 'wireless'))
+                                is_tether = any(x in name_lower for x in ('rndis', 'tether', 'cellular', 'mobile'))
+                                is_eth = any(x in name_lower for x in ('ethernet', 'local area', 'lan', 'eth'))
+
+                                wifi_info['connected'] = True
+                                wifi_info['interface'] = iface_name
+
+                                if is_wifi:
+                                    wifi_info['interface_type'] = 'wifi'
+                                    prev_ssid = _WIFI_INFO_CACHE.get('ssid') if _WIFI_INFO_CACHE else ''
+                                    wifi_info['ssid'] = prev_ssid or 'Wi-Fi'
+                                    wifi_info['signal'] = _WIFI_INFO_CACHE.get('signal') or '100%'
+                                elif is_tether:
+                                    wifi_info['interface_type'] = 'tethering'
                                     wifi_info['ssid'] = 'Mobile / USB Hotspot'
                                     wifi_info['signal'] = '100%'
-                                    wifi_info['interface'] = iface_name
-                                    wifi_info['interface_type'] = 'tethering'
-                                    break
-                                elif not wifi_info['connected'] and 'wi-fi' not in name_lower and 'wlan' not in name_lower:
-                                    wifi_info['connected'] = True
-                                    wifi_info['ssid'] = f"Koneksi LAN ({iface_name})"
-                                    wifi_info['signal'] = '100%'
-                                    wifi_info['interface'] = iface_name
+                                else:
                                     wifi_info['interface_type'] = 'ethernet'
-                                    break
-                        if wifi_info['connected']:
-                            break
+                                    wifi_info['ssid'] = 'Ethernet (LAN)' if is_eth else f"Koneksi LAN ({iface_name})"
+                                    wifi_info['signal'] = '100%'
+                                break
+                    if wifi_info['connected']:
+                        break
         except Exception as e:
             logger.debug(f"Notice universal network fallback: {e}")
 
@@ -387,6 +441,12 @@ def get_wifi_info() -> Dict[str, Any]:
     wifi_info['has_ipv6'] = has_ipv6_connectivity()
 
     with _WIFI_CACHE_LOCK:
+        # Anti-flapping: Jika cache sebelumnya connected=True dan tiba-tiba terputus sesaat,
+        # pastikan gateway benar-benar hilang sebelum mengonfirmasi disconnected.
+        if _WIFI_INFO_CACHE and _WIFI_INFO_CACHE.get('connected') and not wifi_info['connected']:
+            gw_check = get_current_gateway()
+            if gw_check and is_valid_private_ip(gw_check):
+                wifi_info = dict(_WIFI_INFO_CACHE)
         _WIFI_INFO_CACHE = dict(wifi_info)
         _WIFI_INFO_CACHE_TIME = now
 
@@ -408,6 +468,8 @@ def is_network_changed(prev_gateway: str, prev_interface: str, prev_gateway_mac:
         curr_interface = info.get('interface', '')
     except:
         curr_interface = ''
+    if not curr_interface:
+        return False
     if prev_gateway != curr_gateway or prev_interface != curr_interface:
         logger.warning(f"🔥 JARINGAN BERUBAH! Gateway: {prev_gateway}->{curr_gateway}, Iface: {prev_interface}->{curr_interface}")
         return True
