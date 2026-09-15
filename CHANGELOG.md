@@ -2,6 +2,24 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.29] - 2026-09-15
+
+### Dynamic ARP Reconciliation & Identity Re-Binding (Zero Stale IP-to-MAC Spoofing)
+- **Python Liveness Pulse Enrichment (`python-service/src/core/discovery/liveness.py`)**:
+  - **Live Resolved MAC Capture**: Memperbarui fungsi `pulse_host` agar saat Vektor ARP menerima jawaban dari `target_ip`, MAC aktual yang merespons (`rcv_mac`) dicatat ke `resolved_mac` (bukan diabaikan jika berbeda dari `target_mac`).
+  - **Kernel ARP Fallback**: Jika host membalas via Vektor 2 (ICMP ping), fungsi secara otomatis membaca tabel ARP kernel lokal via `get_mac_from_arp(target_ip)` untuk menangkap MAC terbaru.
+  - **Test Suite**: Menambahkan unit test `test_pulse_host_captures_resolved_mac_when_arp_differs` di `tests/test_unit_liveness.py`.
+- **Node.js Pre-Flight Reconciliation & Safety Guards (`backend-node/src/services/deviceManager.ts`)**:
+  - **Dynamic Target Re-Binding**: Pada `_verifyPreFlightLiveness`, jika `targetPulse.resolved_mac` berbeda dari catatan memori (`device.mac`), sistem secara otomatis merekonsiliasi target ke MAC yang sedang aktif secara fisik di jaringan (mengatasi pergeseran IP / MAC acak pada smartphone Android/iOS).
+  - **Invariant 1 Guard (Gateway Immunity)**: Memastikan jika IP target menyelesaikan ke MAC Gateway, pemblokiran langsung ditolak (`Cannot target gateway router`).
+  - **Invariant 2 Guard (Controller Self-Protection)**: Memastikan jika IP target menyelesaikan ke MAC PC Operator, pemblokiran langsung ditolak (`Cannot target operator host`).
+  - **Stale Session Cleanup**: Menghentikan sesi spoof lama pada MAC sebelumnya sebelum membangun sesi fresh untuk MAC baru.
+  - **Test Suite**: Menambahkan test suite `backend-node/tests/unit_reconciliation.test.ts` (3 tests: auto-rebind, Invariant 1 guard, Invariant 2 guard) dan mendaftarkannya ke `run_tests.ts`.
+- **Verifikasi & Status Pengujian**:
+  - Python Unit Tests: **370 / 370 PASSED (100% OK)**.
+  - Node.js Backend Tests: **43 / 43 PASSED (100% OK)**.
+  - Total: **413 Automated Tests 100% Green**.
+
 ## [v2.41.28] - 2026-09-14
 
 ### Zero-HWID Transition: Account-Centric & Concurrent Session Architecture

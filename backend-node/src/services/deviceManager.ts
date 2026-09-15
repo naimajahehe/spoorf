@@ -861,6 +861,56 @@ export class DeviceManager extends EventEmitter {
                 gatewayIp
             );
             const targetPulse = pulseResult ? pulseResult[device.ip] : null;
+
+            // ⚡ [Dynamic ARP Reconciliation] Periksa apakah ada MAC aktif berbeda yang menjawab untuk IP ini
+            if (targetPulse && targetPulse.resolved_mac) {
+                const liveMac = String(targetPulse.resolved_mac).toLowerCase();
+                const currentMac = device.mac.toLowerCase();
+                if (liveMac !== currentMac) {
+                    // INVARIANT 1: Gateway Immunity
+                    const gw = this.findGateway();
+                    if (gw && gw.mac.toLowerCase() === liveMac) {
+                        throw new Error(`Cannot target gateway router (${device.ip} resolves to gateway MAC ${liveMac})`);
+                    }
+                    // INVARIANT 2: Controller Self-Protection
+                    const selfDev = Array.from(this.devices.values()).find(d => d.is_self);
+                    if (selfDev && selfDev.mac.toLowerCase() === liveMac) {
+                        throw new Error(`Cannot target operator host (${device.ip} resolves to host MAC ${liveMac})`);
+                    }
+
+                    console.log(`🔄 [Pre-Flight Dynamic Re-Bind] IP ${device.ip} shifted from ${currentMac} to live MAC ${liveMac}. Reconciling target!`);
+                    await this._clearStaleSpoofSession(device);
+
+                    let existingLiveDevice: Device | undefined;
+                    for (const [, d] of this.devices.entries()) {
+                        if (d.mac.toLowerCase() === liveMac) {
+                            existingLiveDevice = d;
+                            break;
+                        }
+                    }
+
+                    if (existingLiveDevice) {
+                        const oldKey = deviceMemKey(existingLiveDevice);
+                        if (oldKey !== device.ip) {
+                            this.devices.delete(oldKey);
+                        }
+                        existingLiveDevice.ip = device.ip;
+                        existingLiveDevice.is_online = true;
+                        this.devices.set(device.ip, existingLiveDevice);
+                        Object.assign(device, existingLiveDevice);
+                    } else {
+                        device.mac = liveMac;
+                        device.is_online = true;
+                        this.devices.set(device.ip, device);
+                    }
+
+                    await this.db.saveDevice(device, this.currentNetworkId).catch(console.warn);
+                    this.emit('deviceUpdated', device);
+                    this.emit('devicesUpdated', Array.from(this.devices.values()));
+                    return; // Terbukti hidup dan telah disinkronkan ke live MAC
+                }
+            }
+
             if (targetPulse && targetPulse.is_alive === false) {
                 // Cek apakah perangkat baru saja bermigrasi ke IP lain sebelum menyatakan offline
                 let migratedIp: string | undefined;
@@ -939,7 +989,14 @@ export class DeviceManager extends EventEmitter {
                 throw new Error(`Perangkat ${name} tidak merespons (Offline / sudah tidak terhubung ke Wi-Fi).`);
             }
         } catch (err: any) {
-            if (err.message && err.message.includes('tidak merespons')) {
+            if (
+                err.message && (
+                    err.message.includes('tidak merespons') ||
+                    err.message.includes('Cannot target') ||
+                    err.message.includes('gateway') ||
+                    err.message.includes('operator')
+                )
+            ) {
                 throw err;
             }
             console.warn('Notice in pre-flight liveness check:', err.message);

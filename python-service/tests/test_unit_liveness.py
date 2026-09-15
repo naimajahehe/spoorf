@@ -236,6 +236,22 @@ class TestUnitLiveness(unittest.TestCase):
             self.assertFalse(res['is_alive'], "Host must NOT be alive if responding MAC does not match target MAC")
 
     @patch('src.core.discovery.liveness.srp')
+    @patch('src.core.discovery.liveness.get_self_mac', return_value='00:11:22:33:44:00')
+    def test_pulse_host_captures_resolved_mac_when_arp_differs(self, mock_self_mac, mock_srp):
+        """ARP reply from a DIFFERENT MAC must be captured as resolved_mac."""
+        different_reply = Ether(src="56:e9:8d:38:1c:97", dst="00:11:22:33:44:00") / ARP(
+            op=2,
+            hwsrc="56:e9:8d:38:1c:97",
+            psrc="192.168.1.88"
+        )
+        mock_srp.return_value = ([(None, different_reply)], [])
+
+        with patch('src.core.discovery.liveness.subprocess.run', return_value=MagicMock(stdout='', returncode=1)):
+            res = pulse_host("192.168.1.88", "40:23:43:aa:5a:f1", timeout=0.1, retry=False)
+            self.assertEqual(res.get('resolved_mac'), "56:e9:8d:38:1c:97",
+                             "resolved_mac must capture the live MAC that actually answered at the target IP")
+
+    @patch('src.core.discovery.liveness.srp')
     @patch('src.core.discovery.liveness.subprocess.run')
     def test_pulse_host_icmp_ping_uses_single_probe(self, mock_run, mock_srp):
         """Task 2.2: ICMP ping probe must use -n 1 (single probe) to avoid worker starvation."""

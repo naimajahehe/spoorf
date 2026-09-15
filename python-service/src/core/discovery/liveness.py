@@ -20,6 +20,7 @@ from typing import Dict, Any, List, Optional, Callable
 from scapy.all import Ether, ARP, srp, conf
 from ..network import get_self_mac, get_network_info, is_valid_mac, is_valid_private_ip
 from .ipv6_ndp import verify_ipv6_alive
+from .arp import get_mac_from_arp
 from ...utils.logger import logger
 
 # Global persistent thread pool untuk pulse probing (menghindari blocking shutdown wait=True)
@@ -48,7 +49,8 @@ def pulse_host(
         'is_alive': False,
         'vector': 'none',
         'rtt_ms': 0.0,
-        'timestamp': time.time()
+        'timestamp': time.time(),
+        'resolved_mac': None
     }
 
     if not is_valid_private_ip(target_ip) or not is_valid_mac(target_mac):
@@ -70,6 +72,7 @@ def pulse_host(
     effective_src_ip = my_ip if (my_ip and is_valid_private_ip(my_ip)) else "0.0.0.0"
 
     start_time = time.time()
+    resolved_mac_holder = [None]
 
     def _probe_unicast_arp(timeout_val: float) -> Optional[float]:
         """Vektor 1: Layer 2 Direct Unicast & Broadcast ARP Burst."""
@@ -93,6 +96,8 @@ def pulse_host(
             for _, rcv in ans:
                 if rcv.haslayer(ARP):
                     rcv_mac = rcv[ARP].hwsrc.lower().replace('-', ':')
+                    if is_valid_mac(rcv_mac):
+                        resolved_mac_holder[0] = rcv_mac
                     if rcv_mac == norm_mac:
                         return max(0.1, round((t1 - t0) * 1000, 2))
         except Exception as e:
@@ -134,6 +139,21 @@ def pulse_host(
                 pass
         return None
 
+    def _finalize_resolved_mac():
+        if resolved_mac_holder[0]:
+            result['resolved_mac'] = resolved_mac_holder[0]
+        elif result['is_alive']:
+            try:
+                cached = get_mac_from_arp(target_ip)
+                if cached and is_valid_mac(cached):
+                    result['resolved_mac'] = cached
+                else:
+                    result['resolved_mac'] = norm_mac
+            except Exception:
+                result['resolved_mac'] = norm_mac
+        else:
+            result['resolved_mac'] = None
+
     # TRI-VECTOR ASYNC RACE (Non-Blocking Global Pool)
     effective_timeout = max(0.40, timeout)
     ping_timeout_ms = min(2600, int(effective_timeout * 1000))
@@ -152,6 +172,7 @@ def pulse_host(
                 result['is_alive'] = True
                 result['vector'] = futures[fut]
                 result['rtt_ms'] = rtt
+                _finalize_resolved_mac()
                 return result
     except concurrent.futures.TimeoutError:
         pass
@@ -160,6 +181,7 @@ def pulse_host(
 
     total_duration_ms = round((time.time() - start_time) * 1000, 2)
     result['rtt_ms'] = total_duration_ms
+    _finalize_resolved_mac()
     return result
 
 def pulse_batch(
