@@ -2,6 +2,23 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.31] - 2026-09-15
+
+### Default-Deny for Unknown Occupants & Hostname Continuity (R-1, R-3)
+- **Unknown Occupant Default-Deny (R-1, `backend-node/src/services/deviceManager.ts`)**:
+  - Menutup celah pemotongan tamu asing yang belum pernah masuk pemindaian (*unscanned guest hole*). Jika IP target saat ini dijawab oleh MAC yang sama sekali belum terdaftar di `this.devices`, sistem menolak pemotongan otomatis dengan pesan keselamatan informatif: `"Perangkat target offline: IP ... saat ini ditempati oleh perangkat asing (...) yang belum terdaftar. Silakan lakukan Scan terlebih dahulu."`.
+- **Hostname Continuity Fusing (R-3, `backend-node/src/services/deviceManager.ts`)**:
+  - Memperluas deteksi kesinambungan identitas perangkat: selain pencocokan `profile_id`, jika perangkat membagikan `hostname` non-generik yang identik (misal `"a55-milik-hanif"` atau `"Galaxy-A55"`), sistem secara sah mengizinkan auto-rebind meskipun profiling numerik di latar belakang belum selesai.
+- **True Canonical Object Convergence (`backend-node/src/services/deviceManager.ts`)**:
+  - Menyeragamkan penanganan objek kanonik di kedua pemanggil utama (`blockDevice` baris 1765 dan `setDeviceSpeedLimit` baris 2125), memastikan referensi objek `device` di caller dan di Map `this.devices` selalu sinkron 100%.
+- **Test Suite Updates (`backend-node/tests/unit_reconciliation.test.ts` & `run_tests.ts`)**:
+  - Test 1 diperbarui untuk menguji penolakan *Default-Deny* terhadap occupant tak dikenal (R-1).
+  - Test 8 ditambahkan untuk memvalidasi kesinambungan identitas berbasis hostname (R-3).
+- **Verifikasi & Status Pengujian**:
+  - Python Unit Tests: **371 / 371 PASSED (100% OK)**.
+  - Node.js Backend Tests: **48 / 48 PASSED (100% OK)**.
+  - Total: **419 Automated Tests 100% Green**.
+
 ## [v2.41.30] - 2026-09-15
 
 ### Hardening Dynamic ARP Reconciliation & Identity Collision Protection (T-1 to T-6)

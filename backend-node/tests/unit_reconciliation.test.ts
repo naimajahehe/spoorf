@@ -70,7 +70,7 @@ function createMockSetup() {
 export async function runReconciliationTests() {
     console.log('\n--- [Node] Testing Dynamic ARP Reconciliation & Safety Guards ---');
 
-    // Test 1: Auto-rebind target to live MAC
+    // Test 1: R-1 Guard - Rejects auto-rebind when live MAC is an unknown occupant (Default-Deny)
     {
         const { manager, python, spoofCalls } = createMockSetup();
 
@@ -92,6 +92,7 @@ export async function runReconciliationTests() {
         };
         (manager as any).devices.set(staleTarget.ip, staleTarget);
 
+        // Unknown occupant responds at 192.168.1.105 (not present in manager.devices)
         python.pulseLiveness = async () => ({
             '192.168.1.105': {
                 ip: '192.168.1.105',
@@ -101,14 +102,15 @@ export async function runReconciliationTests() {
             }
         });
 
-        const blocked = await manager.blockDevice('192.168.1.105', '192.168.1.1');
+        await assert.rejects(
+            async () => {
+                await manager.blockDevice('192.168.1.105', '192.168.1.1');
+            },
+            /belum terdaftar/i
+        );
 
-        assert.strictEqual(spoofCalls.length, 1);
-        assert.strictEqual(spoofCalls[0].victimIp, '192.168.1.105');
-        assert.strictEqual(spoofCalls[0].victimMac, '56:e9:8d:38:1c:97');
-        assert.strictEqual(blocked.mac, '56:e9:8d:38:1c:97');
-        assert.strictEqual(blocked.is_blocked, true);
-        console.log('  ✓ Pre-Flight ARP: automatically re-binds target to live MAC when resolved_mac differs from stale memory');
+        assert.strictEqual(spoofCalls.length, 0, 'Unknown occupant must NEVER be blindly blocked');
+        console.log('  ✓ R-1 Guard: Rejects auto-rebind when live MAC is an unknown occupant (Default-Deny)');
     }
 
     // Test 2: Invariant 1 - Rejects Gateway
@@ -408,5 +410,62 @@ export async function runReconciliationTests() {
         assert.strictEqual(spoofCalls.length, 1);
         assert.strictEqual(blocked.is_blocked, true);
         console.log('  ✓ T-3 Error Boundary: Soft warning mentioning "gateway" is not falsely re-thrown as fatal');
+    }
+
+    // Test 8: R-3 Hostname Continuity - Allows re-bind when devices share identical non-generic hostname (even without profile_id)
+    {
+        const { manager, python, spoofCalls } = createMockSetup();
+
+        const staleDevice: Device = {
+            ip: '192.168.1.140',
+            mac: '40:23:43:aa:5a:f1',
+            hostname: 'a55-milik-hanif',
+            vendor: 'Samsung',
+            device_type: 'Mobile Phone',
+            os: 'Android 14',
+            is_gateway: false,
+            is_self: false,
+            is_online: true,
+            is_blocked: false,
+            speed_limit: 100,
+            rtt_ms: 10.0,
+            open_ports: [],
+            services: []
+        };
+        (manager as any).devices.set(staleDevice.ip, staleDevice);
+
+        const liveDevice: Device = {
+            ip: '192.168.1.140',
+            mac: '56:e9:8d:38:1c:97',
+            hostname: 'a55-milik-hanif',
+            vendor: 'Samsung',
+            device_type: 'Mobile Phone',
+            os: 'Android 14',
+            is_gateway: false,
+            is_self: false,
+            is_online: true,
+            is_blocked: false,
+            speed_limit: 100,
+            rtt_ms: 2.0,
+            open_ports: [],
+            services: []
+        };
+        (manager as any).devices.set(liveDevice.mac, liveDevice);
+
+        python.pulseLiveness = async () => ({
+            '192.168.1.140': {
+                ip: '192.168.1.140',
+                mac: '40:23:43:aa:5a:f1',
+                is_alive: true,
+                resolved_mac: '56:e9:8d:38:1c:97'
+            }
+        });
+
+        const blocked = await manager.blockDevice('192.168.1.140', '192.168.1.1');
+        assert.strictEqual(spoofCalls.length, 1);
+        assert.strictEqual(spoofCalls[0].victimMac, '56:e9:8d:38:1c:97');
+        assert.strictEqual(blocked.mac, '56:e9:8d:38:1c:97');
+        assert.strictEqual(blocked.is_blocked, true);
+        console.log('  ✓ R-3 Continuity: Allows re-bind when devices share identical non-generic hostname');
     }
 }

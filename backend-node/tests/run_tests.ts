@@ -85,7 +85,7 @@ async function main() {
 
     try {
         await runReconciliationTests();
-        passed += 7;
+        passed += 8;
     } catch (err: any) {
         console.error('❌ Reconciliation Test Failed:', err);
         failed++;

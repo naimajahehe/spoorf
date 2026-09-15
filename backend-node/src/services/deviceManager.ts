@@ -900,42 +900,45 @@ export class DeviceManager extends EventEmitter {
                         }
                     }
 
-                    if (existingLiveDevice) {
-                        const isSameProfile = Boolean(
-                            existingLiveDevice.profile_id &&
-                            device.profile_id &&
-                            existingLiveDevice.profile_id === device.profile_id
-                        );
+                    // R-3 CONTINUITY MATCHING (Profile ID atau Hostname non-generik yang sama)
+                    const isSameIdentity = Boolean(
+                        existingLiveDevice && (
+                            (existingLiveDevice.profile_id && device.profile_id && existingLiveDevice.profile_id === device.profile_id) ||
+                            (device.hostname && existingLiveDevice.hostname &&
+                             device.hostname !== 'Unknown' && existingLiveDevice.hostname !== 'Unknown' &&
+                             device.hostname.toLowerCase() === existingLiveDevice.hostname.toLowerCase())
+                        )
+                    );
 
-                        // Jika perangkat yang hidup memiliki profil/identitas berbeda yang aktif,
+                    if (existingLiveDevice) {
+                        // Jika perangkat yang hidup memiliki identitas/profil berbeda,
                         // tolak auto-rebind untuk mencegah salah potong perangkat tamu yang tidak bersalah.
-                        if (!isSameProfile) {
+                        if (!isSameIdentity) {
                             const occupantName = (existingLiveDevice.alias && existingLiveDevice.alias.trim()) ||
                                                  (existingLiveDevice.hostname && existingLiveDevice.hostname.trim()) ||
                                                  existingLiveDevice.ip ||
                                                  existingLiveDevice.mac;
                             throw new Error(`Perangkat target offline: IP ${device.ip} saat ini ditempati oleh perangkat lain (${occupantName} / ${liveMac}).`);
                         }
+                    } else {
+                        // 🛡️ R-1 FIX (DEFAULT-DENY FOR UNKNOWN OCCUPANT):
+                        // liveMac sama sekali belum dikenal di sistem (belum pernah di-scan).
+                        // Jangan adopsi buta & jangan potong, tolak dengan instruksi scan agar tamu baru aman dari salah potong.
+                        throw new Error(`Perangkat target offline: IP ${device.ip} saat ini ditempati oleh perangkat asing (${liveMac}) yang belum terdaftar. Silakan lakukan Scan terlebih dahulu.`);
                     }
 
                     console.log(`🔄 [Pre-Flight Dynamic Re-Bind] IP ${device.ip} shifted from ${currentMac} to live MAC ${liveMac}. Reconciling target!`);
                     await this._clearStaleSpoofSession(device);
 
-                    // T-5 CANONICAL OBJECT UNIFICATION:
-                    if (existingLiveDevice) {
-                        const oldKey = deviceMemKey(existingLiveDevice);
-                        if (oldKey !== device.ip) {
-                            this.devices.delete(oldKey);
-                        }
-                        existingLiveDevice.ip = device.ip;
-                        existingLiveDevice.is_online = true;
-                        this.devices.set(device.ip, existingLiveDevice);
-                        Object.assign(device, existingLiveDevice);
-                    } else {
-                        device.mac = liveMac;
-                        device.is_online = true;
-                        this.devices.set(device.ip, device);
+                    // Canonical Object Unification (device selalu menjadi referensi kanonik tunggal):
+                    const oldKey = deviceMemKey(existingLiveDevice);
+                    if (oldKey !== device.ip) {
+                        this.devices.delete(oldKey);
                     }
+                    Object.assign(device, existingLiveDevice);
+                    device.ip = device.ip;
+                    device.is_online = true;
+                    this.devices.set(device.ip, device);
 
                     await this.db.saveDevice(device, this.currentNetworkId).catch(console.warn);
                     this.emit('deviceUpdated', device);
@@ -2085,7 +2088,7 @@ export class DeviceManager extends EventEmitter {
     }
 
     private async _setSpeedLimitImpl(ip: string, limit: number, gatewayIp?: string): Promise<Device> {
-        const device = this.devices.get(ip);
+        let device = this.devices.get(ip);
         if (!device) {
             throw new Error(`Device with IP ${ip} not found`);
         }
@@ -2119,7 +2122,7 @@ export class DeviceManager extends EventEmitter {
 
         if (cleanLimit < 100) {
             // Pre-Flight Validation: Verifikasi apakah target benar-benar aktif di jaringan L2
-            await this._verifyPreFlightLiveness(device, gateway.ip);
+            device = await this._verifyPreFlightLiveness(device, gateway.ip);
         }
 
         if (cleanLimit === 100) {
