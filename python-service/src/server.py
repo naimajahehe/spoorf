@@ -281,7 +281,7 @@ def network_watchdog_thread():
                     transparent_gateway.stop_all()
                     spoofer.refresh_interface()
                     dhcp_cache.clear()
-                    scanner._DEVICE_HISTORY.clear()
+                    scanner.clear_history()  # lock-safe wipe (hindari race dgn iterasi terkunci)
                     clear_wifi_cache()
                     clear_discovery_caches()
                     try:

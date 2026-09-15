@@ -1,5 +1,5 @@
 import assert from 'assert';
-import { shouldRespawnAfterExit, buildTreeKillArgs, isAllowedNavigation } from '../src/supervisor-logic';
+import { shouldRespawnAfterExit, buildTreeKillArgs, isAllowedNavigation, signProtocolAction, isProtocolActionAuthorized } from '../src/supervisor-logic';
 
 export async function runSupervisorLogicTests() {
     console.log('\n--- [Electron] Testing Supervisor Respawn & Kill Logic ---');
@@ -64,5 +64,36 @@ export async function runSupervisorLogicTests() {
         assert.strictEqual(isAllowedNavigation('http://127.0.0.1:50001/', cur, origins), false, 'port berbeda dengan prefix sama harus ditolak');
         assert.strictEqual(isAllowedNavigation('https://evil.com/', cur, origins), false, 'origin asing harus ditolak');
         console.log('  ✓ ULTRAREVIEW #1: isAllowedNavigation menutup bypass userinfo/subdomain/port');
+    }
+
+    // ULTRAREVIEW (batch): protocol handler spoorf:// tak boleh menghormati action=block dari
+    //    URL sembarang. Aksi berbahaya (block) HANYA sah bila membawa token HMAC yang ditandatangani
+    //    proses main untuk (action,ip,mac) persis itu. Aksi read-only (inspect) tetap sah tanpa token.
+    {
+        const secret = 'a'.repeat(64); // rahasia per-sesi (di produksi: crypto.randomBytes)
+        const ip = '192.168.1.50';
+        const mac = 'aa:bb:cc:dd:ee:ff';
+
+        // Token sah dari main mengizinkan block untuk (action,ip,mac) yang cocok.
+        const token = signProtocolAction(secret, 'block', ip, mac);
+        assert.strictEqual(isProtocolActionAuthorized(secret, 'block', ip, mac, token), true, 'token sah harus mengizinkan block');
+
+        // KERENTANAN INTI: URL block yang dibuat sembarang (tanpa token / token palsu) HARUS ditolak.
+        assert.strictEqual(isProtocolActionAuthorized(secret, 'block', ip, mac, ''), false, 'block tanpa token harus ditolak');
+        assert.strictEqual(isProtocolActionAuthorized(secret, 'block', ip, mac, 'deadbeef'), false, 'block token palsu harus ditolak');
+
+        // Token untuk (ip,mac) lain tak boleh dipakai ulang menargetkan gateway/perangkat lain.
+        const otherToken = signProtocolAction(secret, 'block', '192.168.1.1', '00:11:22:33:44:55');
+        assert.strictEqual(isProtocolActionAuthorized(secret, 'block', ip, mac, otherToken), false, 'token target lain harus ditolak');
+
+        // Rahasia berbeda (mis. sesi lain) tak boleh memvalidasi.
+        assert.strictEqual(isProtocolActionAuthorized('b'.repeat(64), 'block', ip, mac, token), false, 'rahasia berbeda harus ditolak');
+
+        // Aksi read-only inspect tetap sah tanpa token (notifikasi normal tak boleh rusak).
+        assert.strictEqual(isProtocolActionAuthorized(secret, 'inspect', ip, mac, ''), true, 'inspect tanpa token tetap sah');
+
+        // Aksi tak dikenal ditolak.
+        assert.strictEqual(isProtocolActionAuthorized(secret, 'nuke', ip, mac, ''), false, 'aksi tak dikenal harus ditolak');
+        console.log('  ✓ ULTRAREVIEW #1(sec): protocol handler menolak block tak-terautentikasi, inspect read-only tetap jalan');
     }
 }

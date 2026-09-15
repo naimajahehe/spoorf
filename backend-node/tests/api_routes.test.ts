@@ -482,4 +482,44 @@ export async function runApiRoutesTests() {
         assert.match(responseBody.error, /VIP Arsenal/i);
         console.log('  ✓ Licensing: Bettercap mutation routes reject Free tier with 403');
     }
+
+    // ULTRAREVIEW #3: DELETE /api/devices/:mac must look the target up BY MAC (not by IP).
+    // getDevice(ip) reads the IP-keyed memory map, so passing a MAC always returned undefined and
+    // the Invariant 1/2 guards never fired — a gateway/self delete fell through to a generic 500.
+    {
+        const gateway: any = { ip: '192.168.1.1', mac: 'aa:bb:cc:00:00:01', is_gateway: true, is_self: false };
+        let deleteCalled = false;
+        const manager = {
+            // IP-keyed lookup: a MAC never matches, mirroring the real getDevice(ip).
+            getDevice: (_key: string) => undefined,
+            // Identity lookup used by the fixed route.
+            getDeviceByMac: (mac: string) =>
+                mac.toLowerCase() === gateway.mac ? gateway : undefined,
+            deleteDevice: async () => { deleteCalled = true; }
+        };
+        const router = createRouter(manager as any);
+        const layer = (router as any).stack.find((item: any) =>
+            item.route?.path === '/api/devices/:mac' && item.route.methods.delete
+        );
+        assert.ok(layer, 'DELETE /api/devices/:mac route must be registered');
+
+        let statusCode = 200;
+        let responseBody: any;
+        const res: any = {
+            status: (code: number) => { statusCode = code; return res; },
+            json: (data: any) => { responseBody = data; return res; }
+        };
+
+        await layer.route.stack[0].handle(
+            { params: { mac: gateway.mac } } as any,
+            res,
+            () => {}
+        );
+
+        assert.strictEqual(statusCode, 400, 'Deleting the gateway (by MAC) must be rejected with 400');
+        assert.strictEqual(responseBody.success, false);
+        assert.match(responseBody.error, /Invariant 1/i);
+        assert.strictEqual(deleteCalled, false, 'deleteDevice must never be reached for the gateway');
+        console.log('  ✓ Invariant 1: DELETE /api/devices/:mac resolves gateway by MAC and returns 400');
+    }
 }

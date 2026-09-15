@@ -31,13 +31,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     closeWindow: () => ipcRenderer.send('window-close'),
     confirmClose: () => ipcRenderer.send('confirm-app-close'),
     focusWindow: () => ipcRenderer.send('window-focus'),
-    isWindowMinimized: () => {
-        try {
-            return ipcRenderer.sendSync('is-window-minimized-sync');
-        } catch {
-            return cachedIsMinimized;
-        }
-    },
+    // Baca status dari cache yang disegarkan event async 'window-minimize-state' (dipancarkan
+    // main saat minimize/restore/show/hide). Hindari ipcRenderer.sendSync yang MEMBLOKIR thread
+    // renderer pada SETIAP notifikasi → mencegah jank saat notifikasi datang beruntun.
+    isWindowMinimized: () => cachedIsMinimized,
     onCloseRequested: (callback: () => void) => {
         const handler = () => callback();
         ipcRenderer.on('request-app-close', handler);

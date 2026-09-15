@@ -775,15 +775,19 @@ export class DeviceManager extends EventEmitter {
                         break;
                     }
                 }
-                await this.db.updateDeviceDhcpProfile({
-                    mac: normMac,
-                    ip: '',
-                    hostname: data.hostname,
-                    vendorClass: data.vendor_class,
-                    fingerprint: data.dhcp_fingerprint,
-                    clientId: data.client_id,
-                    fqdn: data.fqdn
-                }, this.currentNetworkId).catch(console.warn);
+                // Guard sama seperti cabang DHCP-with-IP: metode ini opsional pada DB dev/test.
+                // `.catch()` tak bisa menangkap TypeError sinkron bila metode absen, jadi cek dulu.
+                if (typeof this.db.updateDeviceDhcpProfile === 'function') {
+                    await this.db.updateDeviceDhcpProfile({
+                        mac: normMac,
+                        ip: '',
+                        hostname: data.hostname,
+                        vendorClass: data.vendor_class,
+                        fingerprint: data.dhcp_fingerprint,
+                        clientId: data.client_id,
+                        fqdn: data.fqdn
+                    }, this.currentNetworkId).catch(console.warn);
+                }
 
                 // Periksa apakah MAC ini cocok dengan perangkat terblokir untuk picu re-block cepat
                 try {
@@ -799,8 +803,15 @@ export class DeviceManager extends EventEmitter {
                     console.warn('Notice identity re-block check:', e?.message);
                 }
 
-                // Picu micro-scan agar IP fisik sebenarnya segera diverifikasi via Layer 2 ARP
-                this.debouncedScan(1000);
+                // Picu micro-scan agar IP fisik sebenarnya segera diverifikasi via Layer 2 ARP.
+                // HANYA bila Auto Scan aktif — sejajar dengan gate perangkat-baru di cabang
+                // DHCP-with-IP. Tanpa gate ini, tiap DHCPDISCOVER/DHCPREQUEST (yang di Wi-Fi
+                // ramai tiba ~tiap detik) memicu sweep latar walau pengguna memilih "Scan saja"
+                // atau berada di tier Free — mem-bypass gate lisensi Auto Scan. (Scan re-block
+                // berbasis identitas di atas sengaja TIDAK di-gate: itu penegakan keamanan.)
+                if (this.autoScanEnabled) {
+                    this.debouncedScan(1000);
+                }
             }
         }
     }
@@ -2147,6 +2158,15 @@ export class DeviceManager extends EventEmitter {
 
     getDevice(ip: string): Device | undefined {
         return this.devices.get(ip);
+    }
+
+    /**
+     * Cari perangkat berdasarkan MAC (bukan IP). Peta `devices` di-key oleh IP untuk perangkat
+     * online, jadi getDevice(mac) selalu meleset — jalur yang hanya punya MAC (mis. DELETE
+     * /api/devices/:mac) wajib memakai ini agar invarian Gateway/Self benar-benar tegak.
+     */
+    getDeviceByMac(mac: string): Device | undefined {
+        return this._findDeviceByMac(mac);
     }
 
     /**

@@ -206,7 +206,7 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
     router.delete('/api/devices/:mac', async (req: Request, res: Response) => {
         try {
             const { mac } = req.params;
-            const target = deviceManager.getDevice(mac);
+            const target = deviceManager.getDeviceByMac(mac);
             if (target?.is_gateway) {
                 return res.status(400).json({ success: false, error: 'Cannot delete gateway router (Invariant 1: Gateway Immunity)' });
             }

@@ -138,6 +138,19 @@ class FastSYNScanner:
         start_time = time.time()
         open_ports: List[PortScanResult] = []
 
+        # Port kustom bisa habis seluruhnya setelah sanitasi (mis. [0, 65536, 'abc'] -> []).
+        # ThreadPoolExecutor(max_workers=0) melempar ValueError; kembalikan hasil kosong yang
+        # rapi alih-alih crash 500 ke operator.
+        if not target_ports:
+            return {
+                "target_ip": target_ip,
+                "total_scanned": 0,
+                "open_count": 0,
+                "scan_duration_sec": 0.0,
+                "profile": profile,
+                "open_ports": []
+            }
+
         with ThreadPoolExecutor(max_workers=min(self.max_workers, len(target_ports))) as executor:
             future_to_port = {executor.submit(self._probe_port, target_ip, p): p for p in target_ports}
             for future in as_completed(future_to_port):

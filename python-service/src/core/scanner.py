@@ -79,6 +79,18 @@ class NetworkScanner:
     def get_ap_isolation(cls) -> Dict[str, Any]:
         return dict(cls._LATEST_AP_ISOLATION)
 
+    @classmethod
+    def clear_history(cls) -> None:
+        """Kosongkan riwayat perangkat SAMBIL memegang _HISTORY_LOCK.
+
+        Watchdog jaringan menghapus riwayat pada tiap pergantian AP/jaringan sementara
+        thread scanner mengiterasinya di bawah _HISTORY_LOCK. Mutasi tanpa lock (mis.
+        `_DEVICE_HISTORY.clear()` langsung) bisa berpapasan dengan `list()` terkunci dan
+        memicu 'dictionary changed size during iteration'. Selalu lewat sini.
+        """
+        with cls._HISTORY_LOCK:
+            cls._DEVICE_HISTORY.clear()
+
     # Backward-compatible proxy methods
     get_wifi_info = staticmethod(get_wifi_info)
     get_network_info = staticmethod(get_network_info)

@@ -2890,5 +2890,61 @@ export async function runDeviceManagerTests() {
         assert.ok(doneEmitted, 'profileRefreshDone event must be emitted');
         console.log('  ✓ Fault Isolation: Profile refresh isolates single target DB write failure');
     }
+
+    // ULTRAREVIEW #2: DHCPDISCOVER/DHCPREQUEST without an IP must NOT schedule a background
+    // L2 verification scan when Auto Scan is OFF. On busy Wi-Fi these packets arrive ~every
+    // second; an ungated debouncedScan(1000) meant continuous background sweeps even in
+    // "Scan saja" mode and bypassed the Free-tier auto-scan gate. (The rate-limited identity
+    // re-block scanNetwork() stays ungated by design — it is security enforcement.)
+    {
+        const python: any = new EventEmitter();
+        const db: any = {
+            updateDeviceDhcpProfile: async () => {},
+            hasBlockedIdentityMatch: () => false // no blocked-identity match → isolate the L2 micro-scan
+        };
+        const manager = new DeviceManager(python, db);
+        // Auto Scan OFF (default), so the micro-scan must not be scheduled.
+        assert.strictEqual((manager as any).autoScanEnabled, false);
+
+        await (manager as any)._handleDhcpEvent({ mac: 'de:ad:be:ef:00:11' /* no ip */ });
+        assert.strictEqual(
+            (manager as any).dhcpScanDebounceTimer,
+            null,
+            'No-IP DHCP event must not schedule a scan while Auto Scan is disabled'
+        );
+
+        // Positive control: with Auto Scan ON the micro-scan IS scheduled.
+        (manager as any).autoScanEnabled = true;
+        await (manager as any)._handleDhcpEvent({ mac: 'de:ad:be:ef:00:11' /* no ip */ });
+        assert.notStrictEqual(
+            (manager as any).dhcpScanDebounceTimer,
+            null,
+            'No-IP DHCP event must schedule the L2 verification scan when Auto Scan is enabled'
+        );
+        clearTimeout((manager as any).dhcpScanDebounceTimer);
+        console.log('  ✓ Auto Scan Gate: No-IP DHCP L2 micro-scan honors autoScanEnabled');
+    }
+
+    // ULTRAREVIEW #7: The no-IP DHCP branch must guard the optional db.updateDeviceDhcpProfile
+    // the same way the DHCP-with-IP branch does. `.catch()` cannot swallow the synchronous
+    // TypeError thrown when the method is absent (dev/test DB service), so an unguarded call
+    // would crash the handler.
+    {
+        const python: any = new EventEmitter();
+        const db: any = {
+            // updateDeviceDhcpProfile intentionally ABSENT
+            hasBlockedIdentityMatch: () => false
+        };
+        const manager = new DeviceManager(python, db);
+
+        let threw = false;
+        try {
+            await (manager as any)._handleDhcpEvent({ mac: 'de:ad:be:ef:00:22' /* no ip */ });
+        } catch {
+            threw = true;
+        }
+        assert.strictEqual(threw, false, 'No-IP DHCP event must not throw when db.updateDeviceDhcpProfile is absent');
+        console.log('  ✓ Resilience: No-IP DHCP branch guards optional updateDeviceDhcpProfile');
+    }
 }
 

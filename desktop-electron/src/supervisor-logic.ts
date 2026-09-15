@@ -5,6 +5,59 @@
  * bisa diverifikasi tanpa menjalankan Electron atau men-spawn proses nyata.
  */
 
+import { createHmac, timingSafeEqual } from 'crypto';
+
+/**
+ * Aksi protokol spoorf:// yang berdampak (memutus internet perangkat). Aksi ini WAJIB
+ * membawa token HMAC yang ditandatangani proses main agar tak bisa dipicu URL sembarang.
+ */
+const PRIVILEGED_PROTOCOL_ACTIONS = new Set(['block']);
+/** Aksi read-only yang aman dijalankan tanpa token (mis. membuka panel inspeksi). */
+const READONLY_PROTOCOL_ACTIONS = new Set(['inspect']);
+
+/**
+ * KEAMANAN: tanda tangani (action,ip,mac) dengan rahasia sesi agar hanya URL toast yang
+ * DITERBITKAN proses main yang bisa memicu aksi berdampak. Truncate 32 hex (128-bit) cukup
+ * untuk mencegah pemalsuan sekaligus menjaga URL notifikasi tetap ringkas.
+ */
+export function signProtocolAction(secret: string, action: string, ip: string, mac: string): string {
+    return createHmac('sha256', secret)
+        .update(`${action}|${ip || ''}|${(mac || '').toLowerCase()}`)
+        .digest('hex')
+        .slice(0, 32);
+}
+
+/**
+ * KEAMANAN: apakah aksi protokol boleh diteruskan ke renderer.
+ *
+ * `handleProtocolUrl` mem-parse `spoorf://action=…&ip=…&mac=…` dari sumber APA PUN — proses
+ * lokal lain, atau tautan protokol yang dibuka halaman web via handler OS. Tanpa penjagaan,
+ * `spoorf://action=block&ip=<gateway>` bisa memutus gateway/perangkat arbitrer tanpa konfirmasi.
+ * Aksi berdampak (block) hanya sah bila token HMAC-nya cocok persis untuk (action,ip,mac);
+ * aksi read-only (inspect) tetap diizinkan tanpa token; aksi tak dikenal ditolak.
+ */
+export function isProtocolActionAuthorized(
+    secret: string,
+    action: string | null,
+    ip: string,
+    mac: string,
+    token: string | null
+): boolean {
+    if (!action) return false;
+    if (READONLY_PROTOCOL_ACTIONS.has(action)) return true;
+    if (!PRIVILEGED_PROTOCOL_ACTIONS.has(action)) return false;
+
+    const provided = token || '';
+    const expected = signProtocolAction(secret, action, ip, mac);
+    // Bandingkan timing-safe; panjang harus sama dulu agar timingSafeEqual tak melempar.
+    if (provided.length !== expected.length) return false;
+    try {
+        return timingSafeEqual(Buffer.from(provided), Buffer.from(expected));
+    } catch {
+        return false;
+    }
+}
+
 export interface RespawnContext {
     /** App sedang menutup: jangan pernah respawn. */
     isQuitting: boolean;

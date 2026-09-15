@@ -47,6 +47,16 @@ class TestSynScanSanitizer(unittest.TestCase):
         with self.assertRaises(ValueError):
             scanner.scan_host('8.8.8.8')
 
+    @patch.object(FastSYNScanner, '_probe_port', return_value=None)
+    def test_scan_host_all_ports_invalid_returns_empty(self, _mock_probe):
+        """ULTRAREVIEW #5: a custom ports list that fully fails sanitization must yield an
+        empty scan result, not ValueError('max_workers must be greater than 0')."""
+        scanner = FastSYNScanner()
+        res = scanner.scan_host('192.168.1.50', ports=[0, 65536, 'abc'])
+        self.assertEqual(res['total_scanned'], 0)
+        self.assertEqual(res['open_count'], 0)
+        self.assertEqual(res['open_ports'], [])
+
 
 if __name__ == '__main__':
     unittest.main()

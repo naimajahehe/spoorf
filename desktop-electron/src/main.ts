@@ -4,7 +4,7 @@ import fs from 'fs';
 import crypto from 'crypto';
 import { spawn, ChildProcess } from 'child_process';
 import http from 'http';
-import { shouldRespawnAfterExit, buildTreeKillArgs, isAllowedNavigation } from './supervisor-logic';
+import { shouldRespawnAfterExit, buildTreeKillArgs, isAllowedNavigation, signProtocolAction, isProtocolActionAuthorized } from './supervisor-logic';
 
 // KEAMANAN (P1): Ephemeral IPC Bearer Token (SPEC-010 §2.4 / §3).
 // Di-generate sekali per sesi & disuntik ke env SEBELUM Python di-spawn dan
@@ -13,6 +13,12 @@ import { shouldRespawnAfterExit, buildTreeKillArgs, isAllowedNavigation } from '
 // (:5000 & :8001) dari proses lokal lain di mesin yang sama.
 const SENTINEL_API_TOKEN = crypto.randomBytes(32).toString('hex');
 process.env.SENTINEL_API_TOKEN = SENTINEL_API_TOKEN;
+
+// KEAMANAN: rahasia per-sesi untuk menandatangani aksi protokol spoorf:// yang berdampak.
+// Hanya URL toast yang KAMI terbitkan yang membawa token sah; URL block sembarang dari proses
+// lokal lain / tautan web tak bisa menebak rahasia ini sehingga ditolak handler. Regenerasi tiap
+// peluncuran app membuat token lama tak berlaku.
+const PROTOCOL_SIGNING_SECRET = crypto.randomBytes(32).toString('hex');
 
 // Inisialisasi tema dark native agar seluruh frame dan context menu selaras dengan UI
 nativeTheme.themeSource = 'dark';
@@ -123,6 +129,15 @@ function handleProtocolUrl(urlStr: string) {
         const action = params.get('action');
         const ip = params.get('ip') || '';
         const mac = params.get('mac') || '';
+        const token = params.get('token');
+
+        // KEAMANAN: hanya teruskan aksi yang sah. Aksi berdampak (block) wajib membawa token HMAC
+        // yang KAMI tandatangani; block tak-terautentikasi dari URL sembarang (proses lokal lain,
+        // tautan web via handler OS) DITOLAK di sini — bukan sekadar disembunyikan tombolnya.
+        if (!isProtocolActionAuthorized(PROTOCOL_SIGNING_SECRET, action, ip, mac, token)) {
+            logElectron(`[Protocol] Rejected unauthorized protocol action: action=${action} ip=${ip}`);
+            return;
+        }
 
         if (mainWindow) {
             if (mainWindow.isMinimized()) mainWindow.restore();
@@ -590,7 +605,11 @@ ipcMain.on('show-interactive-notification', (_event, payload) => {
         let actionsXml = '';
         // INVARIAN KEAMANAN: Gateway router dan laptop operator TIDAK PERNAH boleh memiliki tombol cut-off!
         if (!is_gateway && !is_self && (safeIp || safeMac)) {
-            actionsXml += `<action content="⚡ Putuskan Perangkat" arguments="spoorf://action=block&amp;ip=${safeIp}&amp;mac=${safeMac}" activationType="protocol"/>`;
+            // Tandatangani aksi block dgn rahasia sesi: hanya URL yang KAMI terbitkan yang membawa
+            // token sah, sehingga handler menolak block sembarang dari sumber lain. Token hex, jadi
+            // escapeXml no-op; hitung atas ip/mac mentah agar cocok saat di-parse ulang.
+            const blockToken = signProtocolAction(PROTOCOL_SIGNING_SECRET, 'block', ip || '', mac || '');
+            actionsXml += `<action content="⚡ Putuskan Perangkat" arguments="spoorf://action=block&amp;ip=${safeIp}&amp;mac=${safeMac}&amp;token=${blockToken}" activationType="protocol"/>`;
         }
         if (safeIp || safeMac) {
             actionsXml += `<action content="🔍 Lihat Detail" arguments="spoorf://action=inspect&amp;ip=${safeIp}&amp;mac=${safeMac}" activationType="protocol"/>`;
