@@ -67,7 +67,7 @@ export interface ProfileEvidence {
     group: string;
     field: string;
     value: string;
-    strength: number;
+    strength: 'weak' | 'medium' | 'strong' | 'explicit';
     observed_at: string;
 }
 
@@ -232,6 +232,8 @@ export interface AuthStatusResponse {
     license: UserLicense;
     isOfflineGracePeriod: boolean;
     hwid: string;
+    sessionId?: string;
+    session_id?: string;
     cloudEndpoint: string;
 }
 

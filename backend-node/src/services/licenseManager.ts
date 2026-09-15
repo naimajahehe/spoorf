@@ -1,11 +1,10 @@
 import { EventEmitter } from 'events';
 import crypto from 'crypto';
-import os from 'os';
 import { DatabaseService } from './database';
 import { LicenseTier, UserLicense, AuthUser, CachedLicense, AuthStatusResponse } from '../types';
 
 /**
- * KEAMANAN (Anti-SSRF): apakah `candidate` cloudUrl aman menerima kredensial + HWID.
+ * KEAMANAN (Anti-SSRF): apakah `candidate` cloudUrl aman menerima kredensial + Session ID.
  * Harus cocok origin (protokol + host + PORT) DAN path resmi — bukan hanya protokol+host,
  * agar port/path arbitrer pada host yang sama (mis. `:8443/mirror/upload`) tidak lolos.
  */
@@ -81,7 +80,7 @@ export class LicenseManager extends EventEmitter {
     private currentLicense: UserLicense;
     private currentUser: AuthUser | null = null;
     private currentToken: string | null = null;
-    private hwid: string;
+    private sessionId: string;
     private cloudEndpoint: string;
     private isInitialized = false;
 
@@ -90,22 +89,15 @@ export class LicenseManager extends EventEmitter {
         this.db = db;
         this.currentLicense = { ...DEFAULT_FREE_LICENSE };
         this.cloudEndpoint = cloudEndpoint || process.env.SPOORF_CLOUD_URL || 'https://api.spoorf.app/v1';
-        this.hwid = this.generateHardwareFingerprint();
+        this.sessionId = crypto.randomUUID();
     }
 
-    private generateHardwareFingerprint(): string {
-        try {
-            const raw = [
-                os.hostname(),
-                os.platform(),
-                os.arch(),
-                os.cpus()?.[0]?.model || 'generic_cpu',
-                os.totalmem()
-            ].join('|');
-            return crypto.createHash('sha256').update(raw).digest('hex').substring(0, 32).toUpperCase();
-        } catch {
-            return 'HWID-GENERIC-DEFAULT';
-        }
+    /**
+     * Kompatibilitas mundur: properti hwid mengembalikan sessionId (Zero-HWID Architecture).
+     * Tidak lagi membaca komponen fisik CPU/RAM/Motherboard/Hostname.
+     */
+    public get hwid(): string {
+        return this.sessionId;
     }
 
     public async init(): Promise<void> {
@@ -139,6 +131,9 @@ export class LicenseManager extends EventEmitter {
                         expires_at: cached.expires_at,
                         grace_period_until: cached.grace_period_until
                     };
+                    if (cached.hwid || (cached as any).session_id) {
+                        this.sessionId = (cached as any).session_id || cached.hwid;
+                    }
                     console.log(`🔑 [LicenseManager] Restored cached ${cached.tier.toUpperCase()} license for ${this.currentUser.email}`);
                 } else {
                     console.warn('⚠️ [LicenseManager] Cached license grace period expired. Reverting to Free tier.');
@@ -173,7 +168,9 @@ export class LicenseManager extends EventEmitter {
             user: this.currentUser,
             license: this.currentLicense,
             isOfflineGracePeriod,
-            hwid: this.hwid,
+            hwid: this.sessionId,
+            sessionId: this.sessionId,
+            session_id: this.sessionId,
             cloudEndpoint: this.cloudEndpoint
         };
     }
@@ -185,8 +182,8 @@ export class LicenseManager extends EventEmitter {
         cloudUrl?: string;
     }): Promise<AuthStatusResponse> {
         await this.init();
-        // KEAMANAN (P0): Anti-SSRF & pencegahan eksfiltrasi kredensial / HWID.
-        // Kredensial dan hash HWID HANYA boleh dikirim ke endpoint resmi terkonfigurasi.
+        // KEAMANAN (P0): Anti-SSRF & pencegahan eksfiltrasi kredensial / Session ID.
+        // Kredensial dan Session ID HANYA boleh dikirim ke endpoint resmi terkonfigurasi.
         let targetUrl = this.cloudEndpoint;
         if (credentials.cloudUrl) {
             if (isTrustedCloudUrl(credentials.cloudUrl, this.cloudEndpoint)) {
@@ -207,9 +204,10 @@ export class LicenseManager extends EventEmitter {
                     email: credentials.email,
                     password: credentials.password,
                     token: credentials.token,
-                    hwid: this.hwid,
+                    session_id: this.sessionId,
+                    hwid: this.sessionId,
                     platform: process.platform,
-                    app_version: '2.20.0'
+                    app_version: '2.21.0'
                 }),
                 signal: AbortSignal.timeout(800)
             });

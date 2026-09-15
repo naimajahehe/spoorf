@@ -284,6 +284,7 @@ export interface CachedLicense {
     expires_at?: string | null;
     grace_period_until?: string | null;
     hwid?: string;
+    session_id?: string;
     last_synced_at?: string;
 }
 
@@ -293,6 +294,8 @@ export interface AuthStatusResponse {
     license: UserLicense;
     isOfflineGracePeriod: boolean;
     hwid: string;
+    sessionId?: string;
+    session_id?: string;
     cloudEndpoint: string;
 }
 

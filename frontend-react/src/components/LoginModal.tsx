@@ -63,7 +63,7 @@ export const LoginModal: FC<Props> = ({
                                             Spoorfer Cloud Account & Licensing
                                         </h3>
                                         <p className="text-[11px] text-zinc-400 font-mono">
-                                            HWID: {authStatus.hwid.substring(0, 12)}...
+                                            ID Sesi: {(authStatus.sessionId || authStatus.hwid).substring(0, 12)}...
                                         </p>
                                     </div>
                                 </div>

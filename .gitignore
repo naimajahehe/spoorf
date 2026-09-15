@@ -4,10 +4,12 @@
 
 # 1. Environment Variables & Local Secrets
 .env
-.env.local
-.env.development.local
-.env.test.local
-.env.production.local
+.env.*
+*.env
+*.env.*
+# Negasi HARUS terakhir: aturan gitignore, pattern pencocokan TERAKHIR yang menang.
+# Sebelumnya `!.env.example` mendahului `*.env.*` sehingga template tetap ter-ignore.
+!.env.example
 
 # 2. TLS Certificates & Private Keys (Generated dynamically at runtime)
 certs/
@@ -20,7 +22,7 @@ certs/
 *.p12
 *.pfx
 
-# 3. Dependencies
+# 3. Dependencies & Package Managers
 node_modules/
 **/node_modules/
 npm-debug.log*
@@ -28,8 +30,18 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
+.pnpm-store/
 
-# 4. Python Virtual Environments & Bytecode Caches
+# 4. Logs, Diagnostics & Crash Dumps
+*.log
+logs/
+**/logs/
+*.dmp
+*.dump
+core.*
+heapdump-*.heapsnapshot
+
+# 5. Python Virtual Environments, Wheels & Bytecode Caches
 venv/
 **/venv/
 .venv/
@@ -37,13 +49,17 @@ venv/
 *.py[cod]
 *$py.class
 *.so
+*.whl
 .pytest_cache/
 .coverage
 htmlcov/
 .mypy_cache/
 .ruff_cache/
+.tox/
+.nox/
+pip-wheel-metadata/
 
-# 5. Compiled Outputs, Binaries & Installers
+# 6. Compiled Outputs, Binaries & Installers
 dist/
 **/dist/
 python-service/build/
@@ -53,6 +69,8 @@ dist-test/
 **/dist-test/
 spoorf-engine/
 **/spoorf-engine/
+win-unpacked/
+**/*-unpacked/
 *.egg-info/
 .eggs/
 *.exe
@@ -63,20 +81,30 @@ spoorf-engine/
 !desktop-electron/build/
 !desktop-electron/build/**
 
-# 6. Runtime SQLite Database & WAL Logs
+# 7. Runtime SQLite Database & WAL Logs
 data/
 **/data/*.db
 **/data/*.db-wal
 **/data/*.db-shm
 **/data/*.sqlite
 **/data/*.sqlite3
+**/data/targets.json
 *.db
 *.db-wal
 *.db-shm
 *.sqlite
 *.sqlite3
+*-journal
+*.journal
 
-# 7. IDE & OS Generated Files
+# 8. Build Caches & Tooling Artifacts
+*.tsbuildinfo
+.eslintcache
+vite.config.ts.timestamp-*
+.turbo/
+.cache/
+
+# 9. IDE & OS Generated Files
 .idea/
 .vscode/*
 !.vscode/settings.json
@@ -91,7 +119,7 @@ Thumbs.db
 ehthumbs.db
 Desktop.ini
 
-# 8. Graphify Artifacts & Transient Data
+# 10. Graphify Artifacts & Transient Data
 graphify-out/
 **/graphify-out/
 .graphify*

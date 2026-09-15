@@ -34,6 +34,7 @@ def build():
         "--collect-all", "fastapi",
         "--collect-all", "starlette",
         "--collect-all", "uvicorn",
+        "--add-data", "src/core/fingerprint/data;src/core/fingerprint/data",
         "main.py"
     ]
 

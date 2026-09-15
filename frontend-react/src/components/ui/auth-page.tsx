@@ -332,9 +332,9 @@ export const AuthPage: React.FC<AuthPageProps> = ({
                 </div>
 
                 <div className="p-2.5 rounded-xl bg-white/[0.02] border border-white/[0.06] text-[11px] text-zinc-400 flex items-center justify-between">
-                  <span className="font-mono text-zinc-500">HWID Kunci Mesin:</span>
+                  <span className="font-mono text-zinc-500">ID Sesi Klien:</span>
                   <span className="font-mono text-zinc-300 font-medium">
-                    {authStatus?.hwid ? `${authStatus.hwid.substring(0, 14)}...` : "LOCAL-HOST"}
+                    {authStatus?.sessionId || authStatus?.hwid ? `${(authStatus.sessionId || authStatus.hwid).substring(0, 14)}...` : "LOCAL-SESSION"}
                   </span>
                 </div>
               </div>

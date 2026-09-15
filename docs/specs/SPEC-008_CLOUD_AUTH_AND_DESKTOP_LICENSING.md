@@ -83,13 +83,16 @@ NetCut Sentinel is organized into two strictly decoupled systems:
 - Saat aplikasi desktop pertama kali dijalankan (atau saat sesi SQLite lokal belum ada / expired), aplikasi menampilkan **Layar Login Wajib (Full Auth Gate)**.
 - Seluruh engine pemindaian dan manipulasi paket Layer 2 **tidak diizinkan berjalan** sebelum pengguna berhasil masuk.
 
-### 3.2. Frictionless Auto-HWID Device Binding (Pengikatan HWID Otomatis)
-- **User-Friendly Experience:** Pengguna **TIDAK PERLU** mengetahui kode HWID atau menyalinnya secara manual.
-- Pengguna hanya menginput `email` dan `password` (atau klik register di website).
-- Desktop client secara senyap di background mengekstrak HWID unik (`SHA256(hostname + platform + arch + cpu_model + memory)`) dan mengirimkannya bersama kredensial login.
-- Cloud Server memvalidasi kuota slot perangkat pengguna:
-  - Jika HWID cocok atau slot perangkat masih tersedia (misal: Slot 1/1 untuk Pro, Slot 1/3 untuk Family): HWID otomatis diikat ke akun.
-  - Jika kuota slot penuh karena login di komputer lain: Cloud memberikan opsi pemindahan lisensi ramah pengguna (*"Akun aktif di PC lain. Pindahkan lisensi ke perangkat ini?"*).
+### 3.2. Account-Centric & Concurrent Session Management (Zero-HWID Architecture)
+- **Eliminasi HWID (Privacy & Stability First):** Aplikasi desktop **TIDAK LAGI** menginspeksi atau meng-hash komponen hardware pengguna (`CPU`, `RAM`, `Motherboard`, `Hostname`).
+  - *Mencegah HWID Drift:* Pengguna bebas meng-upgrade hardware (RAM/Motherboard/SSD), update BIOS, atau berpindah perangkat tanpa khawatir lisensi terkunci.
+  - *Privasi Penuh:* Mengeliminasi kekhawatiran pengguna bahwa aplikasi bertindak seperti telemetry/spyware.
+  - *Startup Instan:* Menghindari query WMI lambat atau kegagalan izin akses sistem operasi saat startup.
+- **Mekanisme Sesi Klien (Session UUID):**
+  - Setiap instalasi klien meng-generate `session_id` acak berbasis UUIDv4 (`crypto.randomUUID()`).
+- **Pencegahan Penyalahgunaan (Batas Sesi Bersamaan / Concurrent Session Limit):**
+  - Server Cloud mengontrol batas sesi aktif secara simultan (misal: Free = 1 sesi, Pro = 1-2 sesi, VIP = 5 sesi).
+  - *Kick Mechanism:* Jika Akun login di perangkat baru yang melebihi kuota slot sesi, sesi di perangkat lama dicabut (*revoked*) secara otomatis dan kembali ke tier Free pada heartbeat berikutnya.
 
 ### 3.3. Authentication Request Payload (Desktop -> Cloud)
 ```http
@@ -99,9 +102,8 @@ Content-Type: application/json
 {
   "email": "budi@gmail.com",
   "password": "UserPassword123!",
-  "hwid": "9f83a4b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9",
-  "device_name": "Laptop Lenovo Legion",
-  "app_version": "2.20.0",
+  "session_id": "c7a8b9c0-d1e2-4f3a-8b5c-6d7e8f901234",
+  "app_version": "2.21.0",
   "platform": "win32"
 }
 ```

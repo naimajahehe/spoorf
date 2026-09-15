@@ -663,7 +663,9 @@ export const createRouter = (deviceManager: DeviceManager, licenseManager?: Lice
                 user: null,
                 license: { tier: 'free', max_cuts: 1, can_throttle: false, can_gateway: false, can_autoreblock: false, can_arsenal: false, cloud_sync: false },
                 isOfflineGracePeriod: false,
-                hwid: 'HWID-STANDALONE',
+                hwid: 'SESSION-STANDALONE',
+                sessionId: 'SESSION-STANDALONE',
+                session_id: 'SESSION-STANDALONE',
                 cloudEndpoint: 'https://api.spoorf.app/v1'
             });
         }

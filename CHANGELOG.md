@@ -2,6 +2,40 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.28] - 2026-09-14
+
+### Zero-HWID Transition: Account-Centric & Concurrent Session Architecture
+- **Spesifikasi Arsitektur (`docs/specs/SPEC-008_CLOUD_AUTH_AND_DESKTOP_LICENSING.md`)**:
+  - **Zero-HWID Architecture**: Memperbarui Bagian 3.2 dan 3.3. Mengeliminasi ketergantungan *Hardware ID / HWID fingerprinting* (CPU, RAM, Motherboard) demi mencegah *HWID drift* saat pengguna upgrade PC/komponen, mengutamakan privasi pengguna, dan mencegah kegagalan query WMI saat startup.
+  - **Concurrent Session Management**: Menggantikan pengikatan fisik mesin dengan pembatasan sesi bersamaan (*Concurrent Session Limit*) di server cloud serta alur *session revocation* ("Kick device").
+- **Backend Node Orchestrator (`backend-node/src/services/licenseManager.ts` & `types/index.ts`)**:
+  - **Session ID (UUIDv4)**: Menggantikan fungsi pembacaan hardware `generateHardwareFingerprint()` dengan `sessionId = crypto.randomUUID()`.
+  - **Backward Compatibility**: Mempertahankan properti getter `hwid` yang mengembalikan `sessionId` agar kompatibel penuh dengan SQLite `license_cache` dan API lama.
+  - **Payload Login**: Mengirimkan `session_id` dan `hwid` ke Cloud Auth endpoint dengan versi aplikasi `2.21.0`.
+- **Frontend React UI (`frontend-react/src/components/ui/auth-page.tsx` & `LoginModal.tsx`)**:
+  - **UI Label Modernization**: Mengubah label visual footer dari `"HWID Kunci Mesin:"` menjadi `"ID Sesi Klien:"` (`sessionId`).
+  - **Tipe Data**: Menambahkan properti `sessionId?: string; session_id?: string;` pada `AuthStatusResponse`.
+- **Verifikasi & Status Pengujian**:
+  - Python Unit Tests: **366 / 366 PASSED**.
+  - Node.js Backend Tests: **40 / 40 PASSED**.
+  - Frontend React Build: **Vite build clean (0 errors)**.
+
+## [v2.41.27] - 2026-09-14
+
+### Type Contract Alignment & Production Packaging (Electron + PyInstaller)
+- **Desktop Electron Packaging (`desktop-electron/`)**:
+  - **Full Packaging Pipeline**: Berhasil memaketkan aplikasi desktop menjadi NSIS Windows Installer (`Spoorf Sentinel Setup 2.21.0.exe`, ~100.7 MB) di `desktop-electron/dist-installer/`.
+  - **PyInstaller Engine Bundling (`python-service/build_engine.py` & `spoorf-engine.spec`)**: Mengompilasi ulang biner mandiri `spoorf-engine.exe` dengan penyertaan berkas data `oui_registry.json` (`src/core/fingerprint/data`) serta seluruh pembaruan dual-stack IPv6 dan DHCPv6 Option 16.
+  - **Native Modules & ABI**: Membangun ulang modul native `better-sqlite3` untuk ABI Electron 28 (`rebuild:native`).
+- **Frontend React UI (`frontend-react/src/types/index.ts`)**:
+  - **ProfileEvidence Type Alignment**: Menyelaraskan definisi properti `strength` pada interface `ProfileEvidence` dari `number` menjadi `'weak' | 'medium' | 'strong' | 'explicit'` agar sinkron 100% dengan kontrak model Python Service (`evidence.py`) dan Backend Node.js (`backend-node/src/types/index.ts`).
+- **Verifikasi Audit Forensik & Status Pengujian**:
+  - Python Unit Tests: **366 / 366 PASSED**.
+  - Node.js Backend Tests: **40 / 40 PASSED**.
+  - Electron Supervisor Tests: **6 / 6 PASSED**.
+  - Frontend React Build: **Vite build clean (0 errors)**.
+  - NSIS Installer Build: **Clean & verified (exit code 0)**.
+
 ## [v2.41.26] - 2026-09-14
 
 ### Dual-Stack (IPv4 · IPv6) Wi-Fi Network & Host/Gateway Visibility
