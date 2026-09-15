@@ -139,7 +139,29 @@ def pulse_host(
                 pass
         return None
 
+    # TRI-VECTOR ASYNC RACE (Non-Blocking Global Pool)
+    effective_timeout = max(0.40, timeout)
+    ping_timeout_ms = min(2600, int(effective_timeout * 1000))
+
+    arp_fut = _PULSE_EXECUTOR.submit(_probe_unicast_arp, effective_timeout)
+    icmp_fut = _PULSE_EXECUTOR.submit(_probe_icmp_ping, ping_timeout_ms)
+    udp_v6_fut = _PULSE_EXECUTOR.submit(_probe_udp_and_ipv6, effective_timeout)
+
+    futures = {
+        arp_fut: "unicast_arp",
+        icmp_fut: "icmp_ping",
+        udp_v6_fut: "ipv6_ndp"
+    }
+
     def _finalize_resolved_mac():
+        # Jika vektor non-ARP menang balapan lebih dulu, beri kesempatan singkat
+        # agar probe ARP yang sedang berjalan di jaringan lokal menyelesaikan penangkapan MAC fisik nyata.
+        if not resolved_mac_holder[0] and arp_fut:
+            try:
+                arp_fut.result(timeout=0.15)
+            except Exception:
+                pass
+
         if resolved_mac_holder[0]:
             result['resolved_mac'] = resolved_mac_holder[0]
         elif result['is_alive']:
@@ -153,16 +175,6 @@ def pulse_host(
                 result['resolved_mac'] = norm_mac
         else:
             result['resolved_mac'] = None
-
-    # TRI-VECTOR ASYNC RACE (Non-Blocking Global Pool)
-    effective_timeout = max(0.40, timeout)
-    ping_timeout_ms = min(2600, int(effective_timeout * 1000))
-
-    futures = {
-        _PULSE_EXECUTOR.submit(_probe_unicast_arp, effective_timeout): "unicast_arp",
-        _PULSE_EXECUTOR.submit(_probe_icmp_ping, ping_timeout_ms): "icmp_ping",
-        _PULSE_EXECUTOR.submit(_probe_udp_and_ipv6, effective_timeout): "ipv6_ndp"
-    }
 
     # First-to-Respond Winner: Begitu ada 1 vektor yang membalas, langsung kembalikan is_alive: True!
     try:

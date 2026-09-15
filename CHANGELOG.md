@@ -2,6 +2,29 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.30] - 2026-09-15
+
+### Hardening Dynamic ARP Reconciliation & Identity Collision Protection (T-1 to T-6)
+- **Innocent Guest & DHCP Reassignment Protection (T-1, `backend-node/src/services/deviceManager.ts`)**:
+  - Mencegah *unintended collateral cutoff*: Jika IP target saat ini dijawab oleh perangkat lain yang aktif dan memiliki identitas/profil berbeda di memori (`existingLiveDevice.profile_id !== device.profile_id`), auto-rebind otomatis ditolak dengan pesan keselamatan informatif: `"Perangkat target offline: IP ... saat ini ditempati oleh perangkat lain"`.
+  - Mengizinkan auto-rebind hanya ketika perangkat berbagi `profile_id` yang sama (kasus rotasi MAC Android/iOS) atau MAC acak baru yang belum terasosiasi.
+- **Deterministic L2 ARP Physical Capture (T-2, `python-service/src/core/discovery/liveness.py`)**:
+  - Menghilangkan *race condition* timing antara ICMP ping dan ARP probe. Pada `_finalize_resolved_mac`, jika vektor ICMP/IPv6 membalas lebih cepat namun probe ARP masih dalam perjalanan, sistem menunggu probe ARP lokal selesai secara singkat (maksimal 150ms) agar `resolved_mac` tertangkap secara deterministik dari kawat/udara langsung, bukan mengandalkan cache OS yang berpotensi basi.
+  - Menambahkan unit test `test_pulse_host_captures_resolved_mac_even_when_icmp_wins_first` di `test_unit_liveness.py`.
+- **Narrow Error Propagation Boundary (T-3, `backend-node/src/services/deviceManager.ts`)**:
+  - Menghapus klausa string-match telanjang `'gateway'` dan `'operator'` pada blok `catch` pra-eksekusi liveness.
+  - Persempit re-throw eksklusif untuk invariant/guard: `'tidak merespons'`, `'Cannot target'`, dan `'saat ini ditempati oleh'`. Peringatan/error jaringan biasa tetap di-swallow sebagai `console.warn` agar operasi pemblokiran tidak gagal palsu.
+- **Defense-in-Depth Invariant Protection (T-4, `backend-node/src/services/deviceManager.ts`)**:
+  - Memvalidasi `liveMac` langsung terhadap seluruh MAC adapter fisik host lokal (`os.networkInterfaces()`) dan MAC Gateway aktif, memastikan Invariant 1 (Gateway Immunity) dan Invariant 2 (Controller Self-Protection) tidak dapat ditembus meskipun entri terkait belum termaterialisasi di Map `this.devices`.
+- **V8 Canonical Object Unification (T-5, `backend-node/src/services/deviceManager.ts`)**:
+  - Menjadikan `_verifyPreFlightLiveness` mengembalikan objek perangkat kanonik tunggal (`Promise<Device>`), mencegah divergensi referensi objek di Heap V8 antara pemanggil dan Map perangkat.
+- **Exhaustive Automated Test Coverage (T-6, `backend-node/tests/unit_reconciliation.test.ts` & `run_tests.ts`)**:
+  - Menambahkan 4 unit test baru: proteksi tamu tak bersalah (T-1), kesinambungan profil Android/iOS (T-1), pertahanan invariant fisik lokal (T-4), dan isolasi error boundary (T-3).
+- **Verifikasi & Status Pengujian**:
+  - Python Unit Tests: **371 / 371 PASSED (100% OK)**.
+  - Node.js Backend Tests: **47 / 47 PASSED (100% OK)**.
+  - Total: **418 Automated Tests 100% Green**.
+
 ## [v2.41.29] - 2026-09-15
 
 ### Dynamic ARP Reconciliation & Identity Re-Binding (Zero Stale IP-to-MAC Spoofing)

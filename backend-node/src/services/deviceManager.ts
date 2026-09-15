@@ -849,7 +849,7 @@ export class DeviceManager extends EventEmitter {
         }
     }
 
-    private async _verifyPreFlightLiveness(device: Device, gatewayIp: string): Promise<void> {
+    private async _verifyPreFlightLiveness(device: Device, gatewayIp: string): Promise<Device> {
         try {
             const pulseResult = await this.python.pulseLiveness(
                 [{
@@ -867,20 +867,31 @@ export class DeviceManager extends EventEmitter {
                 const liveMac = String(targetPulse.resolved_mac).toLowerCase();
                 const currentMac = device.mac.toLowerCase();
                 if (liveMac !== currentMac) {
-                    // INVARIANT 1: Gateway Immunity
-                    const gw = this.findGateway();
-                    if (gw && gw.mac.toLowerCase() === liveMac) {
+                    // T-4 DEFENSE-IN-DEPTH: INVARIANT 1 - Gateway Immunity
+                    const gw = this.devices.get(gatewayIp) || this.findGateway();
+                    const gwMac = (gw?.mac || '').toLowerCase();
+                    if (gwMac && gwMac === liveMac) {
                         throw new Error(`Cannot target gateway router (${device.ip} resolves to gateway MAC ${liveMac})`);
                     }
-                    // INVARIANT 2: Controller Self-Protection
+
+                    // T-4 DEFENSE-IN-DEPTH: INVARIANT 2 - Controller Self-Protection
                     const selfDev = Array.from(this.devices.values()).find(d => d.is_self);
-                    if (selfDev && selfDev.mac.toLowerCase() === liveMac) {
+                    const localHostMacs = new Set<string>();
+                    try {
+                        for (const addrs of Object.values(os.networkInterfaces())) {
+                            for (const a of addrs || []) {
+                                if (a.mac && a.mac !== '00:00:00:00:00:00') {
+                                    localHostMacs.add(a.mac.toLowerCase());
+                                }
+                            }
+                        }
+                    } catch {}
+                    if ((selfDev && selfDev.mac.toLowerCase() === liveMac) || localHostMacs.has(liveMac)) {
                         throw new Error(`Cannot target operator host (${device.ip} resolves to host MAC ${liveMac})`);
                     }
 
-                    console.log(`🔄 [Pre-Flight Dynamic Re-Bind] IP ${device.ip} shifted from ${currentMac} to live MAC ${liveMac}. Reconciling target!`);
-                    await this._clearStaleSpoofSession(device);
-
+                    // T-1 INNOCENT DEVICE PROTECTION & SEMANTIC IDENTITY GUARD:
+                    // Periksa apakah liveMac sudah terdaftar sebagai perangkat lain yang aktif di memori
                     let existingLiveDevice: Device | undefined;
                     for (const [, d] of this.devices.entries()) {
                         if (d.mac.toLowerCase() === liveMac) {
@@ -889,6 +900,28 @@ export class DeviceManager extends EventEmitter {
                         }
                     }
 
+                    if (existingLiveDevice) {
+                        const isSameProfile = Boolean(
+                            existingLiveDevice.profile_id &&
+                            device.profile_id &&
+                            existingLiveDevice.profile_id === device.profile_id
+                        );
+
+                        // Jika perangkat yang hidup memiliki profil/identitas berbeda yang aktif,
+                        // tolak auto-rebind untuk mencegah salah potong perangkat tamu yang tidak bersalah.
+                        if (!isSameProfile) {
+                            const occupantName = (existingLiveDevice.alias && existingLiveDevice.alias.trim()) ||
+                                                 (existingLiveDevice.hostname && existingLiveDevice.hostname.trim()) ||
+                                                 existingLiveDevice.ip ||
+                                                 existingLiveDevice.mac;
+                            throw new Error(`Perangkat target offline: IP ${device.ip} saat ini ditempati oleh perangkat lain (${occupantName} / ${liveMac}).`);
+                        }
+                    }
+
+                    console.log(`🔄 [Pre-Flight Dynamic Re-Bind] IP ${device.ip} shifted from ${currentMac} to live MAC ${liveMac}. Reconciling target!`);
+                    await this._clearStaleSpoofSession(device);
+
+                    // T-5 CANONICAL OBJECT UNIFICATION:
                     if (existingLiveDevice) {
                         const oldKey = deviceMemKey(existingLiveDevice);
                         if (oldKey !== device.ip) {
@@ -907,7 +940,7 @@ export class DeviceManager extends EventEmitter {
                     await this.db.saveDevice(device, this.currentNetworkId).catch(console.warn);
                     this.emit('deviceUpdated', device);
                     this.emit('devicesUpdated', Array.from(this.devices.values()));
-                    return; // Terbukti hidup dan telah disinkronkan ke live MAC
+                    return device; // Terbukti hidup dan telah disinkronkan ke live MAC
                 }
             }
 
@@ -950,7 +983,7 @@ export class DeviceManager extends EventEmitter {
                         await this.db.updateDeviceIp(device.mac, migratedIp, this.currentNetworkId).catch(console.warn);
                         this.emit('deviceUpdated', device);
                         this.emit('devicesUpdated', Array.from(this.devices.values()));
-                        return;
+                        return device;
                     }
                 }
 
@@ -963,7 +996,7 @@ export class DeviceManager extends EventEmitter {
                 const sinceSeenMs = lastSeenMs > 0 ? Date.now() - lastSeenMs : Infinity;
                 if (sinceSeenMs < TRUST_FRESH_ONLINE_MS) {
                     console.log(`✅ [Pre-Flight Trust-Fresh] ${device.mac} terakhir online ${Math.round(sinceSeenMs / 1000)}s lalu (< ${TRUST_FRESH_ONLINE_MS / 1000}s) — melewati vonis offline, lanjutkan aksi.`);
-                    return;
+                    return device;
                 }
 
                 // Target terbukti offline (tidak membalas Pre-Flight Liveness Probe)
@@ -993,14 +1026,14 @@ export class DeviceManager extends EventEmitter {
                 err.message && (
                     err.message.includes('tidak merespons') ||
                     err.message.includes('Cannot target') ||
-                    err.message.includes('gateway') ||
-                    err.message.includes('operator')
+                    err.message.includes('saat ini ditempati oleh')
                 )
             ) {
                 throw err;
             }
             console.warn('Notice in pre-flight liveness check:', err.message);
         }
+        return device;
     }
 
     async init(): Promise<void> {
@@ -1729,7 +1762,7 @@ export class DeviceManager extends EventEmitter {
         }
 
         // Pre-Flight Validation: Verifikasi apakah target benar-benar aktif di jaringan L2
-        await this._verifyPreFlightLiveness(device, gateway.ip);
+        device = await this._verifyPreFlightLiveness(device, gateway.ip);
 
         let sessionId = device.session_id;
         if (sessionId) {

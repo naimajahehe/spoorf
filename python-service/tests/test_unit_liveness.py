@@ -252,6 +252,24 @@ class TestUnitLiveness(unittest.TestCase):
                              "resolved_mac must capture the live MAC that actually answered at the target IP")
 
     @patch('src.core.discovery.liveness.srp')
+    @patch('src.core.discovery.liveness.get_self_mac', return_value='00:11:22:33:44:00')
+    def test_pulse_host_captures_resolved_mac_even_when_icmp_wins_first(self, mock_self_mac, mock_srp):
+        """T-2: When ICMP ping answers first, resolved_mac must still capture the ARP response MAC."""
+        different_reply = Ether(src="56:e9:8d:38:1c:97", dst="00:11:22:33:44:00") / ARP(
+            op=2,
+            hwsrc="56:e9:8d:38:1c:97",
+            psrc="192.168.1.88"
+        )
+        mock_srp.return_value = ([(None, different_reply)], [])
+
+        # ICMP ping succeeds (wins the race)
+        with patch('src.core.discovery.liveness.subprocess.run', return_value=MagicMock(stdout='Reply from 192.168.1.88: bytes=32 time=2ms TTL=64', returncode=0)):
+            res = pulse_host("192.168.1.88", "40:23:43:aa:5a:f1", timeout=0.2, retry=False)
+            self.assertTrue(res['is_alive'], "Host must be alive since ICMP ping responded")
+            self.assertEqual(res.get('resolved_mac'), "56:e9:8d:38:1c:97",
+                             "resolved_mac must be captured from ARP even though ICMP ping responded first")
+
+    @patch('src.core.discovery.liveness.srp')
     @patch('src.core.discovery.liveness.subprocess.run')
     def test_pulse_host_icmp_ping_uses_single_probe(self, mock_run, mock_srp):
         """Task 2.2: ICMP ping probe must use -n 1 (single probe) to avoid worker starvation."""
