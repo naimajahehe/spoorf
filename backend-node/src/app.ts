@@ -11,6 +11,8 @@ import { createRouter } from './api/routes';
 import { WebSocketManager } from './websocket';
 import { corsOriginCallback, hostGuard, apiTokenGuard } from './security';
 import { registerGracefulShutdown } from './shutdown';
+import { requestLogger } from './middlewares/requestLogger';
+import { logger } from './utils/logger';
 
 // Fail-fast environment validation on boot
 validateEnv();
@@ -19,6 +21,9 @@ const app = express();
 const server = createServer(app);
 
 // Middleware
+// Request Tracing & Correlation: Injects X-Request-Id and attaches req.log
+app.use(requestLogger());
+
 // Security Headers: Helmet hardening with cross-origin resource policy enabled for SPA/Vite
 app.use(helmet({
     crossOriginResourcePolicy: { policy: 'cross-origin' }
@@ -51,7 +56,7 @@ app.use('/', createRouter(deviceManager, licenseManager));
 // Start
 async function start() {
     try {
-        console.log('🗄️ Initializing SQLite database...');
+        logger.info({ module: 'Boot' }, 'Initializing SQLite database...');
         await databaseService.init();
         await licenseManager.init();
         await deviceManager.init();
@@ -60,31 +65,31 @@ async function start() {
         const HOST = env.HOST;
         
         server.on('error', (err: any) => {
-            console.error(`❌ [Backend] Server error on port ${PORT}:`, err?.message || err);
+            logger.error({ module: 'Server', port: PORT, err }, `Server error on port ${PORT}: ${err?.message || err}`);
         });
 
         server.listen(PORT, HOST, () => {
-            console.log(`✅ Server running on http://${HOST}:${PORT} (localhost only)`);
-            console.log(`   WebSocket: ws://${HOST}:${PORT}`);
-            console.log(`   Database: SQLite (Zero-Config) stored in data/sentinel.db`);
+            logger.info({ module: 'Server', host: HOST, port: PORT }, `Server running on http://${HOST}:${PORT} (localhost only)`);
+            logger.info({ module: 'Server' }, `WebSocket: ws://${HOST}:${PORT}`);
+            logger.info({ module: 'Database' }, `Database: SQLite (Zero-Config) stored in data/sentinel.db`);
         });
 
         // Background Python bridge connection and initial scan
         pythonBridge.start().then(async () => {
-            console.log('✅ Python bridge connected');
+            logger.info({ module: 'PythonBridge' }, 'Python bridge connected');
             try {
-                console.log('🔍 Scanning network & synchronizing with SQLite...');
+                logger.info({ module: 'Scanner' }, 'Scanning network & synchronizing with SQLite...');
                 await deviceManager.scanNetwork();
-                console.log('✅ Initial scan & sync complete');
-            } catch (err) {
-                console.warn('⚠️ Initial scan postponed:', err);
+                logger.info({ module: 'Scanner' }, 'Initial scan & sync complete');
+            } catch (err: any) {
+                logger.warn({ module: 'Scanner', err }, `Initial scan postponed: ${err?.message || err}`);
             }
-        }).catch(err => {
-            console.warn('⚠️ Python bridge startup delayed:', err);
+        }).catch((err: any) => {
+            logger.warn({ module: 'PythonBridge', err }, `Python bridge startup delayed: ${err?.message || err}`);
         });
 
-    } catch (error) {
-        console.error('❌ [Backend] Failed to initialize backend services:', error);
+    } catch (error: any) {
+        logger.error({ module: 'Boot', err: error }, `Failed to initialize backend services: ${error?.message || error}`);
     }
 }
 

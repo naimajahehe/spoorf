@@ -1,5 +1,6 @@
 import { Response, Request, NextFunction, RequestHandler } from 'express';
 import { AppError } from '../errors/AppError';
+import { logger } from '../utils/logger';
 import {
     FeatureLimitError,
     FeatureLockedError
@@ -23,7 +24,7 @@ export interface ErrorEnvelope {
     code?: string;
 }
 
-export function respondError(res: Response, err: any, status = 500): void {
+export function respondError(res: Response, err: any, status = 500, req?: Request): void {
     const msg = typeof err?.message === 'string' ? err.message : '';
     const isAppErr = err instanceof AppError;
 
@@ -35,14 +36,6 @@ export function respondError(res: Response, err: any, status = 500): void {
         err.status >= 400 &&
         err.status < 500;
     const isFeatureRestricted = err instanceof FeatureLimitError || err instanceof FeatureLockedError;
-
-    if (isAppErr || isOffline || isDownstreamValidation || isFeatureRestricted) {
-        // eslint-disable-next-line no-console
-        console.warn(`⚠️ [API Warning] ${msg || 'Operational / Domain Warning'}`);
-    } else {
-        // eslint-disable-next-line no-console
-        console.error('[API Error]', err);
-    }
 
     const isOperational =
         isAppErr ||
@@ -64,6 +57,20 @@ export function respondError(res: Response, err: any, status = 500): void {
         responseStatus = 403;
     } else {
         responseStatus = status;
+    }
+
+    const requestId = req?.id || (typeof res.getHeader === 'function' ? (res.getHeader('x-request-id') as string) : undefined);
+    const logContext = {
+        requestId,
+        statusCode: responseStatus,
+        isOperational,
+        errCode: err?.code
+    };
+
+    if (isAppErr || isOffline || isDownstreamValidation || isFeatureRestricted) {
+        logger.warn({ ...logContext, err }, `[API Warning] ${msg || 'Operational / Domain Warning'}`);
+    } else {
+        logger.error({ ...logContext, err }, `[API Error] ${msg || 'Unhandled server error'}`);
     }
 
     const jsonPayload: ErrorEnvelope = {
@@ -88,7 +95,7 @@ export const safeHandler = (fn: (req: Request, res: Response) => Promise<any> | 
         try {
             await fn(req, res);
         } catch (err: any) {
-            respondError(res, err);
+            respondError(res, err, 500, req);
         }
     };
 };

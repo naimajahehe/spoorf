@@ -10,6 +10,7 @@ import { runReconciliationTests } from './unit_reconciliation.test';
 import { runValidationTests } from './unit_validation.test';
 import { runEnvTests } from './unit_env.test';
 import { runErrorTests } from './unit_errors.test';
+import { runLoggerTests } from './unit_logger.test';
 
 async function main() {
     console.log('=====================================================');
@@ -115,6 +116,14 @@ async function main() {
         passed += 6;
     } catch (err: any) {
         console.error('❌ Error Hierarchy Test Failed:', err);
+        failed++;
+    }
+
+    try {
+        await runLoggerTests();
+        passed += 6;
+    } catch (err: any) {
+        console.error('❌ Structured Logging & Tracing Test Failed:', err);
         failed++;
     }
 

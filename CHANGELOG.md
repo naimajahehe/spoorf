@@ -2,6 +2,35 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.41] - 2026-09-17
+
+### High-Performance Structured Logging (Pino) & Request Tracing Context (`backend-node`)
+- **Pino Structured Logger Singleton (`src/utils/logger.ts`)**:
+  - Mengintegrasikan engine logging industri `pino@^10.3.1` dengan zero-blocking asynchronous I/O.
+  - Standard Error Serializer (`pino.stdSerializers.err`): Memastikan seluruh objek `Error` JavaScript tercatat lengkap dengan `stack` dan `message` tanpa tertelan.
+  - Automatic sensitive data redaction: menyensor otomatis header autentikasi (`x-sentinel-token`, `authorization`) dan field kredensial rahasia (`password`, `token`, `key`, `secret`) untuk mencegah kebocoran data sensitif.
+  - Environment-aware transport: Pretty printing berwarna (`pino-pretty@^13.1.3`) pada mode interaktif pengembangan, JSON terstruktur raw berkecepatan tinggi pada produksi, dan mode hening (`silent`) saat pengujian otomatis berjalan.
+  - Helper fungsi `createChildLogger(module, bindings)` untuk pelacakan modular berbasis tag kontekstual (`HTTP`, `Boot`, `Server`, `PythonBridge`, `Scanner`, dll).
+- **Request Tracing & Correlation Middleware (`src/middlewares/requestLogger.ts`)**:
+  - Menyuntikkan correlation ID `req.id` berbasis UUID v4 atau meneruskan `x-request-id` dari klien/upstream jika telah tersedia.
+  - Menetapkan header respons HTTP `X-Request-Id` secara konsisten pada setiap request untuk auditabilitas end-to-end.
+  - Mengikat child logger khusus request ke `req.log` dengan metadata `method`, `path`, `ip`, dan `requestId`.
+  - Mengukur latensi eksekusi HTTP dengan presisi tinggi (`process.hrtime.bigint()`) dan mencatat status penyelesaian respons (2xx info, 4xx warn, 5xx error).
+  - Idempotent Lifecycle Logging: Mendengarkan event `finish` dan `close` secara bersamaan dengan guard idempotensi agar koneksi yang terputus prematur (*client abort*) tetap tercatat tanpa duplikasi log.
+- **Centralized Error Handler Integration (`src/middlewares/errorHandler.ts`)**:
+  - Mengintegrasikan `respondError` dengan `logger`: mencatat warning terstruktur untuk error operasional/validasi, dan error terstruktur lengkap dengan stack trace untuk error sistem tak terduga.
+  - Menyertakan `requestId`, `statusCode`, `isOperational`, dan `errCode` dalam payload log error.
+  - Meneruskan `req` dari `safeHandler` ke `respondError` secara transparan tanpa mengubah antarmuka publik.
+- **Application Startup Logging Modernization (`src/app.ts`)**:
+  - Memasang `requestLogger()` di urutan teratas rantai middleware sebelum proteksi Helmet dan CORS.
+  - Mengganti logging `console.log`, `console.warn`, dan `console.error` yang tidak terstruktur dengan structured logger berbasis Pino (`logger.info`, `logger.warn`, `logger.error`).
+- **Automated Testing & Full Verification**:
+  - Menambahkan test suite baru `tests/unit_logger.test.ts` (6 pengujian terotomatisasi: pembuatan singleton & child logger, auto-generasi UUID v4, preservasi incoming correlation ID, penanganan event finish 4xx/5xx, penanganan client abort/close, dan error serializer).
+  - Pengujian Node.js meningkat dari **63 menjadi 69 tests (100% PASSED)**.
+  - Pengujian Python: **379 / 379 PASSED (100% Green)**.
+  - Frontend React SPA: `tsc && vite build` bersih tanpa kesalahan.
+  - Total pengujian otomatis seluruh sistem: **448 tests 100% Green**.
+
 ## [v2.41.40] - 2026-09-17
 
 ### Centralized Typed Domain Error Hierarchy & Standardized Error Handling (`backend-node`)
