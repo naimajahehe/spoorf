@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import type { FC } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -31,7 +31,8 @@ import {
     Router,
     Laptop,
     Link2,
-    ShieldAlert
+    ShieldAlert,
+    Fingerprint
 } from 'lucide-react';
 import { Tooltip } from './motion/tooltip';
 import { Dock, DockItem, DockSeparator } from './motion/dock';
@@ -85,6 +86,73 @@ export const DeviceTable: FC<Props> = React.memo(({
     const [editAliasValue, setEditAliasValue] = useState<string>('');
     const [deletingDevice, setDeletingDevice] = useState<Device | null>(null);
 
+    // Action feedback states (Morphing expansion feedback for block/unblock)
+    const [actionFeedback, setActionFeedback] = useState<Record<string, {
+        type: 'blocked' | 'unblocked';
+        timestamp: number;
+    }>>({});
+    const feedbackTimersRef = useRef<Record<string, NodeJS.Timeout>>({});
+    const pendingToggleMacRef = useRef<string | null>(null);
+    const prevBlockedStateRef = useRef<Map<string, boolean>>(new Map());
+
+    const triggerFeedback = useCallback((mac: string, type: 'blocked' | 'unblocked') => {
+        if (feedbackTimersRef.current[mac]) {
+            clearTimeout(feedbackTimersRef.current[mac]);
+        }
+        setActionFeedback(prev => ({
+            ...prev,
+            [mac]: { type, timestamp: Date.now() }
+        }));
+        feedbackTimersRef.current[mac] = setTimeout(() => {
+            setActionFeedback(prev => {
+                if (!prev[mac]) return prev;
+                const next = { ...prev };
+                delete next[mac];
+                return next;
+            });
+            delete feedbackTimersRef.current[mac];
+        }, 2600);
+    }, []);
+
+    const clearFeedback = useCallback((mac: string) => {
+        if (feedbackTimersRef.current[mac]) {
+            clearTimeout(feedbackTimersRef.current[mac]);
+            delete feedbackTimersRef.current[mac];
+        }
+        setActionFeedback(prev => {
+            if (!prev[mac]) return prev;
+            const next = { ...prev };
+            delete next[mac];
+            return next;
+        });
+    }, []);
+
+    // Detect authoritative state change for toggled devices
+    useEffect(() => {
+        devices.forEach(dev => {
+            const isBlocked = Boolean(dev.is_blocked || (dev.speed_limit !== undefined && dev.speed_limit < 100));
+            const prevBlocked = prevBlockedStateRef.current.get(dev.mac);
+            if (prevBlocked !== undefined && prevBlocked !== isBlocked) {
+                if (pendingToggleMacRef.current === dev.mac) {
+                    triggerFeedback(dev.mac, isBlocked ? 'blocked' : 'unblocked');
+                    pendingToggleMacRef.current = null;
+                }
+            }
+            prevBlockedStateRef.current.set(dev.mac, isBlocked);
+        });
+    }, [devices, triggerFeedback]);
+
+    useEffect(() => {
+        return () => {
+            Object.values(feedbackTimersRef.current).forEach(clearTimeout);
+        };
+    }, []);
+
+    const handleToggleClick = useCallback((dev: Device) => {
+        pendingToggleMacRef.current = dev.mac;
+        onToggleInternet(dev);
+    }, [onToggleInternet]);
+
     React.useEffect(() => {
         const handleClickOutside = () => {
             setActiveDockKey(null);
@@ -132,8 +200,9 @@ export const DeviceTable: FC<Props> = React.memo(({
     const canSelectAny = selectableDevices.length > 0;
     // selectedIps & expandedIp memakai MAC (kunci stabil), bukan IP: perangkat offline ber-ip=''
     // agar tidak saling co-select / co-expand di kunci kosong (BUG-19).
-    const isAllSelected = canSelectAny && selectableDevices.every(d => selectedIps.includes(d.mac));
-    const isSomeSelected = canSelectAny && selectableDevices.some(d => selectedIps.includes(d.mac)) && !isAllSelected;
+    const selectedSet = React.useMemo(() => new Set(selectedIps), [selectedIps]);
+    const isAllSelected = canSelectAny && selectableDevices.every(d => selectedSet.has(d.mac));
+    const isSomeSelected = canSelectAny && selectableDevices.some(d => selectedSet.has(d.mac)) && !isAllSelected;
 
     const handleToggleRowDetail = (mac: string) => {
         setExpandedIp(prev => (prev === mac ? null : mac));
@@ -269,7 +338,7 @@ export const DeviceTable: FC<Props> = React.memo(({
                 {virtualItems.map((virtualRow) => {
                     const device = sortedDevices[virtualRow.index];
                     if (!device) return null;
-                    const isSelected = selectedIps.includes(device.mac);
+                    const isSelected = selectedSet.has(device.mac);
                     const isExpanded = expandedIp === device.mac;
                     const isInspecting = activeInspectorIp === device.ip;
                     const isOnline = Boolean(device.is_online);
@@ -279,6 +348,7 @@ export const DeviceTable: FC<Props> = React.memo(({
                     const lockedByOther = busyToggleIp != null && !isDeviceBusy;
                     const isInternetActive = !device.is_blocked && (device.speed_limit === undefined || device.speed_limit > 0);
                     const isThrottled = (device.speed_limit ?? 100) > 0 && (device.speed_limit ?? 100) < 100;
+                    const feedback = actionFeedback[device.mac] || (device.ip ? actionFeedback[device.ip] : undefined);
 
                     const deviceName = getResolvedDeviceName(device);
 
@@ -578,158 +648,224 @@ export const DeviceTable: FC<Props> = React.memo(({
                                                             </div>
                                                         </Tooltip>
                                                     ) : (
-                                                        <div className="flex items-center justify-center gap-2">
-                                                            {/* Tooltip 1: Toggle Internet On/Off with Lucide icons (Wifi / WifiHigh / WifiLow / WifiOff / Loader2) & circular box container */}
-                                                            {(() => {
-                                                                const distanceLevel: 'near' | 'medium' | 'far' = (device.is_self || !device.distance_zone || device.distance_zone === 'unknown') ? 'near' : device.distance_zone;
-                                                                const distanceLabel = distanceLevel === 'near' ? 'Dekat' : distanceLevel === 'medium' ? 'Sedang' : 'Jauh';
-                                                                const isActionDisabled = isLoading || lockedByOther || (!isOnline && isInternetActive);
-                                                                const tooltipText = lockedByOther
-                                                                    ? "Menunggu proses perangkat lain selesai…"
-                                                                    : isLoading
-                                                                    ? (isInternetActive ? "Memverifikasi denyut & memutus..." : "Sedang memulihkan koneksi...")
-                                                                    : !isOnline && isInternetActive
-                                                                    ? "Perangkat Offline (Tidak dapat diputus)"
-                                                                    : !isOnline && !isInternetActive
-                                                                    ? "Pulihkan Akses Internet (Hapus Blokir)"
-                                                                    : isInternetActive
-                                                                    ? `Putus Internet • Jarak: ${distanceLabel}${device.estimated_range ? ` (${device.estimated_range})` : ''}`
-                                                                    : "Pulihkan Akses Internet";
+                                                        <div
+                                                            className="w-[164px] mx-auto flex items-center justify-start gap-2 overflow-visible"
+                                                        >
+                                                            {/* Feedback Capsule (Morphs from Wifi button when action succeeds) */}
+                                                            {feedback ? (
+                                                                <motion.div
+                                                                    key={`feedback-pill-${rowKey}`}
+                                                                    initial={{ width: 28, opacity: 0.9 }}
+                                                                    animate={{ width: "auto", opacity: 1 }}
+                                                                    exit={{ width: 28, opacity: 0 }}
+                                                                    transition={{ duration: 0.36, ease: [0.16, 1, 0.3, 1] }}
+                                                                    onClick={(e) => {
+                                                                        e.stopPropagation();
+                                                                        clearFeedback(device.mac);
+                                                                    }}
+                                                                    className={cn(
+                                                                        "h-7 pl-[7px] pr-2.5 rounded-full flex items-center gap-1.5 cursor-pointer select-none shadow-md overflow-hidden whitespace-nowrap shrink-0",
+                                                                        feedback.type === 'blocked'
+                                                                            ? "bg-rose-500/15 border border-rose-500/35 text-rose-300 hover:bg-rose-500/25 shadow-rose-500/10"
+                                                                            : "bg-emerald-500/15 border border-emerald-500/35 text-emerald-300 hover:bg-emerald-500/25 shadow-emerald-500/10"
+                                                                    )}
+                                                                    title="Klik untuk menutup notifikasi"
+                                                                >
+                                                                    {feedback.type === 'blocked' ? (
+                                                                        <>
+                                                                            <WifiOff size={13} className="text-rose-400 shrink-0 drop-shadow-[0_0_6px_rgba(244,63,94,0.45)]" />
+                                                                            <motion.span
+                                                                                initial={{ opacity: 0, x: -10 }}
+                                                                                animate={{ opacity: 1, x: 0 }}
+                                                                                transition={{ duration: 0.3, delay: 0.06, ease: [0.16, 1, 0.3, 1] }}
+                                                                                className="text-[11px] font-semibold tracking-tight whitespace-nowrap"
+                                                                            >
+                                                                                Putus Internet Berhasil
+                                                                            </motion.span>
+                                                                        </>
+                                                                    ) : (
+                                                                        <>
+                                                                            <Check size={13} className="text-emerald-400 shrink-0 drop-shadow-[0_0_6px_rgba(52,211,153,0.45)]" strokeWidth={2.5} />
+                                                                            <motion.span
+                                                                                initial={{ opacity: 0, x: -10 }}
+                                                                                animate={{ opacity: 1, x: 0 }}
+                                                                                transition={{ duration: 0.3, delay: 0.06, ease: [0.16, 1, 0.3, 1] }}
+                                                                                className="text-[11px] font-semibold tracking-tight whitespace-nowrap"
+                                                                            >
+                                                                                Pulihkan Internet Berhasil
+                                                                            </motion.span>
+                                                                        </>
+                                                                    )}
+                                                                </motion.div>
+                                                            ) : (
+                                                                /* Tooltip 1: Toggle Internet On/Off with Lucide icons (Wifi / WifiHigh / WifiLow / WifiOff / Loader2) & circular box container */
+                                                                (() => {
+                                                                    const distanceLevel: 'near' | 'medium' | 'far' = (device.is_self || !device.distance_zone || device.distance_zone === 'unknown') ? 'near' : device.distance_zone;
+                                                                    const distanceLabel = distanceLevel === 'near' ? 'Dekat' : distanceLevel === 'medium' ? 'Sedang' : 'Jauh';
+                                                                    const isActionDisabled = isLoading || lockedByOther || (!isOnline && isInternetActive);
+                                                                    const tooltipText = lockedByOther
+                                                                        ? "Menunggu proses perangkat lain selesai…"
+                                                                        : isLoading
+                                                                        ? (isInternetActive ? "Memverifikasi denyut & memutus..." : "Sedang memulihkan koneksi...")
+                                                                        : !isOnline && isInternetActive
+                                                                        ? "Perangkat Offline (Tidak dapat diputus)"
+                                                                        : !isOnline && !isInternetActive
+                                                                        ? "Pulihkan Akses Internet (Hapus Blokir)"
+                                                                        : isInternetActive
+                                                                        ? `Putus Internet • Jarak: ${distanceLabel}${device.estimated_range ? ` (${device.estimated_range})` : ''}`
+                                                                        : "Pulihkan Akses Internet";
 
-                                                                const renderWifiIcon = () => {
-                                                                    if (isLoading) {
-                                                                        return (
-                                                                            <Loader2
-                                                                                size={14}
-                                                                                className={cn(
-                                                                                    "animate-spin",
-                                                                                    isInternetActive ? "text-amber-400" : "text-rose-400"
-                                                                                )}
-                                                                            />
-                                                                        );
-                                                                    }
-                                                                    if (!isInternetActive) {
-                                                                        return (
-                                                                            <WifiOff
-                                                                                size={14}
-                                                                                className="text-rose-500 transition-transform group-hover:scale-110 drop-shadow-[0_0_6px_rgba(244,63,94,0.4)]"
-                                                                            />
-                                                                        );
-                                                                    }
-                                                                    if (!isOnline) {
+                                                                    const renderWifiIcon = () => {
+                                                                        if (isLoading) {
+                                                                            return (
+                                                                                <Loader2
+                                                                                    size={14}
+                                                                                    className={cn(
+                                                                                        "animate-spin",
+                                                                                        isInternetActive ? "text-amber-400" : "text-rose-400"
+                                                                                    )}
+                                                                                />
+                                                                            );
+                                                                        }
+                                                                        if (!isInternetActive) {
+                                                                            return (
+                                                                                <WifiOff
+                                                                                    size={14}
+                                                                                    className="text-rose-500 transition-transform group-hover:scale-110 drop-shadow-[0_0_6px_rgba(244,63,94,0.4)]"
+                                                                                />
+                                                                            );
+                                                                        }
+                                                                        if (!isOnline) {
+                                                                            return (
+                                                                                <Wifi
+                                                                                    size={14}
+                                                                                    className="text-zinc-500"
+                                                                                />
+                                                                            );
+                                                                        }
+                                                                        if (distanceLevel === 'far') {
+                                                                            return (
+                                                                                <WifiLow
+                                                                                    size={14}
+                                                                                    className="text-emerald-400 group-hover:text-emerald-300 transition-transform group-hover:scale-110 drop-shadow-[0_0_6px_rgba(52,211,153,0.35)]"
+                                                                                />
+                                                                            );
+                                                                        }
+                                                                        if (distanceLevel === 'medium') {
+                                                                            return (
+                                                                                <WifiHigh
+                                                                                    size={14}
+                                                                                    className="text-emerald-400 group-hover:text-emerald-300 transition-transform group-hover:scale-110 drop-shadow-[0_0_6px_rgba(52,211,153,0.35)]"
+                                                                                />
+                                                                            );
+                                                                        }
                                                                         return (
                                                                             <Wifi
                                                                                 size={14}
-                                                                                className="text-zinc-500"
-                                                                            />
-                                                                        );
-                                                                    }
-                                                                    if (distanceLevel === 'far') {
-                                                                        return (
-                                                                            <WifiLow
-                                                                                size={14}
                                                                                 className="text-emerald-400 group-hover:text-emerald-300 transition-transform group-hover:scale-110 drop-shadow-[0_0_6px_rgba(52,211,153,0.35)]"
                                                                             />
                                                                         );
-                                                                    }
-                                                                    if (distanceLevel === 'medium') {
-                                                                        return (
-                                                                            <WifiHigh
-                                                                                size={14}
-                                                                                className="text-emerald-400 group-hover:text-emerald-300 transition-transform group-hover:scale-110 drop-shadow-[0_0_6px_rgba(52,211,153,0.35)]"
-                                                                            />
-                                                                        );
-                                                                    }
+                                                                    };
+
                                                                     return (
-                                                                        <Wifi
-                                                                            size={14}
-                                                                            className="text-emerald-400 group-hover:text-emerald-300 transition-transform group-hover:scale-110 drop-shadow-[0_0_6px_rgba(52,211,153,0.35)]"
-                                                                        />
+                                                                        <div key={`wifi-btn-${rowKey}`} className="shrink-0">
+                                                                            <Tooltip content={tooltipText}>
+                                                                                <button
+                                                                                    type="button"
+                                                                                    disabled={isActionDisabled}
+                                                                                    onClick={isActionDisabled ? undefined : () => handleToggleClick(device)}
+                                                                                    className={cn(
+                                                                                        "size-7 rounded-full flex items-center justify-center transition-all duration-150 outline-none group",
+                                                                                        isActionDisabled
+                                                                                            ? "opacity-35 cursor-not-allowed grayscale bg-zinc-800/40 border border-zinc-700/30"
+                                                                                            : "cursor-pointer active:scale-95",
+                                                                                        isLoading && "cursor-wait opacity-80",
+                                                                                        lockedByOther && "opacity-40 cursor-not-allowed pointer-events-none grayscale",
+                                                                                        !isActionDisabled && (
+                                                                                            isInternetActive
+                                                                                                ? "bg-emerald-500/10 border border-emerald-500/25 hover:bg-emerald-500/20 hover:border-emerald-500/40 hover:scale-110 shadow-sm shadow-emerald-500/10"
+                                                                                                : "bg-rose-500/10 border border-rose-500/25 hover:bg-rose-500/20 hover:border-rose-500/40 hover:scale-110 shadow-sm shadow-rose-500/10"
+                                                                                        )
+                                                                                    )}
+                                                                                    aria-label={isInternetActive ? "Putus Internet" : "Pulihkan Internet"}
+                                                                                >
+                                                                                    {renderWifiIcon()}
+                                                                                </button>
+                                                                            </Tooltip>
+                                                                        </div>
                                                                     );
-                                                                };
-
-                                                                return (
-                                                                    <Tooltip content={tooltipText}>
-                                                                        <button
-                                                                            type="button"
-                                                                            disabled={isActionDisabled}
-                                                                            onClick={isActionDisabled ? undefined : () => onToggleInternet(device)}
-                                                                            className={cn(
-                                                                                "size-7 rounded-full flex items-center justify-center transition-all duration-150 outline-none group",
-                                                                                isActionDisabled
-                                                                                    ? "opacity-35 cursor-not-allowed grayscale bg-zinc-800/40 border border-zinc-700/30"
-                                                                                    : "cursor-pointer active:scale-95",
-                                                                                isLoading && "cursor-wait opacity-80",
-                                                                                lockedByOther && "opacity-40 cursor-not-allowed pointer-events-none grayscale",
-                                                                                !isActionDisabled && (
-                                                                                    isInternetActive
-                                                                                        ? "bg-emerald-500/10 border border-emerald-500/25 hover:bg-emerald-500/20 hover:border-emerald-500/40 hover:scale-110 shadow-sm shadow-emerald-500/10"
-                                                                                        : "bg-rose-500/10 border border-rose-500/25 hover:bg-rose-500/20 hover:border-rose-500/40 hover:scale-110 shadow-sm shadow-rose-500/10"
-                                                                                )
-                                                                            )}
-                                                                            aria-label={isInternetActive ? "Putus Internet" : "Pulihkan Internet"}
-                                                                        >
-                                                                            {renderWifiIcon()}
-                                                                        </button>
-                                                                    </Tooltip>
-                                                                );
-                                                            })()}
-
-                                                            {/* Tooltip 2: Bandwidth -> Security & Telemetry Sidebar */}
-                                                            <Tooltip content="Security & Telemetry">
-                                                                <button
-                                                                    type="button"
-                                                                    onClick={() => onSelectForInspect && onSelectForInspect(device.ip)}
-                                                                    className={cn(
-                                                                        "p-1.5 rounded-md flex items-center justify-center transition-all duration-150 outline-none group cursor-pointer hover:scale-115 active:scale-95",
-                                                                        isInspecting
-                                                                            ? "text-amber-300 drop-shadow-[0_0_8px_rgba(252,211,77,0.4)]"
-                                                                            : isThrottled
-                                                                                ? "text-amber-400 hover:text-amber-300"
-                                                                                : "text-zinc-500 hover:text-zinc-200"
-                                                                    )}
-                                                                    aria-label="Buka Security & Telemetry"
-                                                                >
-                                                                    <Gauge size={16} className="transition-transform group-hover:scale-110" />
-                                                                </button>
-                                                            </Tooltip>
-
-                                                            {/* Tooltip 3: Instagram Redirect */}
-                                                            {onOpenRedirectModal && (
-                                                                <Tooltip content={device.is_redirected ? "Kelola Redirect Instagram" : "Alihkan ke Instagram"}>
-                                                                    <button
-                                                                        type="button"
-                                                                        disabled={isLoading}
-                                                                        onClick={() => onOpenRedirectModal(device)}
-                                                                        className={cn(
-                                                                            "p-1.5 rounded-md flex items-center justify-center transition-all duration-150 outline-none group cursor-pointer hover:scale-115 active:scale-95",
-                                                                            device.is_redirected
-                                                                                ? "text-pink-400 drop-shadow-[0_0_8px_rgba(244,114,182,0.45)]"
-                                                                                : "text-zinc-500 hover:text-pink-400"
-                                                                        )}
-                                                                        aria-label="Redirect Instagram"
-                                                                    >
-                                                                        <InstagramIcon size={15} className="transition-transform group-hover:scale-110" />
-                                                                    </button>
-                                                                </Tooltip>
+                                                                })()
                                                             )}
 
-                                                            {/* Tooltip 4: Info -> Slide-down Bento Detail */}
-                                                            <Tooltip content={isExpanded ? "Tutup Informasi" : "Lihat Informasi Detail"}>
-                                                                <button
-                                                                    type="button"
-                                                                    onClick={() => handleToggleRowDetail(device.mac)}
-                                                                    className={cn(
-                                                                        "p-1.5 rounded-md flex items-center justify-center transition-all duration-150 outline-none group cursor-pointer hover:scale-115 active:scale-95",
-                                                                        isExpanded
-                                                                            ? "text-white drop-shadow-[0_0_6px_rgba(255,255,255,0.4)]"
-                                                                            : "text-zinc-500 hover:text-zinc-200"
-                                                                    )}
-                                                                    aria-label={isExpanded ? "Tutup Info" : "Buka Info"}
-                                                                >
-                                                                    <Info size={16} className="transition-transform group-hover:scale-110" />
-                                                                </button>
-                                                            </Tooltip>
+                                                            {/* Sibling Icons: Slide out to right and disappear when feedback is active */}
+                                                            <AnimatePresence>
+                                                                {!feedback && (
+                                                                    <motion.div
+                                                                        key={`sibling-actions-${rowKey}`}
+                                                                        initial={{ opacity: 0, x: 20, scale: 0.85 }}
+                                                                        animate={{ opacity: 1, x: 0, scale: 1 }}
+                                                                        exit={{ opacity: 0, x: 28, scale: 0.8, transition: { duration: 0.2, ease: "easeOut" } }}
+                                                                        transition={{ type: "spring", stiffness: 450, damping: 28 }}
+                                                                        className="flex items-center gap-2"
+                                                                    >
+                                                                        {/* Tooltip 2: Bandwidth -> Security & Telemetry Sidebar */}
+                                                                        <Tooltip content="Security & Telemetry">
+                                                                            <button
+                                                                                type="button"
+                                                                                onClick={() => onSelectForInspect && onSelectForInspect(device.ip)}
+                                                                                className={cn(
+                                                                                    "p-1.5 rounded-md flex items-center justify-center transition-all duration-150 outline-none group cursor-pointer hover:scale-115 active:scale-95",
+                                                                                    isInspecting
+                                                                                        ? "text-amber-300 drop-shadow-[0_0_8px_rgba(252,211,77,0.4)]"
+                                                                                        : isThrottled
+                                                                                            ? "text-amber-400 hover:text-amber-300"
+                                                                                            : "text-zinc-500 hover:text-zinc-200"
+                                                                                )}
+                                                                                aria-label="Buka Security & Telemetry"
+                                                                            >
+                                                                                <Gauge size={16} className="transition-transform group-hover:scale-110" />
+                                                                            </button>
+                                                                        </Tooltip>
+
+                                                                        {/* Tooltip 3: Instagram Redirect */}
+                                                                        {onOpenRedirectModal && (
+                                                                            <Tooltip content={device.is_redirected ? "Kelola Redirect Instagram" : "Alihkan ke Instagram"}>
+                                                                                <button
+                                                                                    type="button"
+                                                                                    disabled={isLoading}
+                                                                                    onClick={() => onOpenRedirectModal(device)}
+                                                                                    className={cn(
+                                                                                        "p-1.5 rounded-md flex items-center justify-center transition-all duration-150 outline-none group cursor-pointer hover:scale-115 active:scale-95",
+                                                                                        device.is_redirected
+                                                                                            ? "text-pink-400 drop-shadow-[0_0_8px_rgba(244,114,182,0.45)]"
+                                                                                            : "text-zinc-500 hover:text-pink-400"
+                                                                                    )}
+                                                                                    aria-label="Redirect Instagram"
+                                                                                >
+                                                                                    <InstagramIcon size={15} className="transition-transform group-hover:scale-110" />
+                                                                                </button>
+                                                                            </Tooltip>
+                                                                        )}
+
+                                                                        {/* Tooltip 4: Info -> Slide-down Bento Detail */}
+                                                                        <Tooltip content={isExpanded ? "Tutup Informasi" : "Lihat Informasi Detail"}>
+                                                                            <button
+                                                                                type="button"
+                                                                                onClick={() => handleToggleRowDetail(device.mac)}
+                                                                                className={cn(
+                                                                                    "p-1.5 rounded-md flex items-center justify-center transition-all duration-150 outline-none group cursor-pointer hover:scale-115 active:scale-95",
+                                                                                    isExpanded
+                                                                                        ? "text-white drop-shadow-[0_0_6px_rgba(255,255,255,0.4)]"
+                                                                                        : "text-zinc-500 hover:text-zinc-200"
+                                                                                )}
+                                                                                aria-label={isExpanded ? "Tutup Info" : "Buka Info"}
+                                                                            >
+                                                                                <Info size={16} className="transition-transform group-hover:scale-110" />
+                                                                            </button>
+                                                                        </Tooltip>
+                                                                    </motion.div>
+                                                                )}
+                                                            </AnimatePresence>
                                                         </div>
                                                     )}
                                                 </motion.div>
@@ -976,6 +1112,66 @@ export const DeviceTable: FC<Props> = React.memo(({
                                                                             <span className="text-[11px] font-mono text-zinc-500 block truncate mt-1">
                                                                                 {device.web_server ? `Server: ${device.web_server}` : `First: ${device.first_seen || '-'}`}
                                                                             </span>
+                                                                        </div>
+                                                                    </div>
+                                                                )}
+
+                                                                {/* Profiling & DHCP Intelligence (PRO Only) */}
+                                                                {isDeepFingerprintEnabled && Boolean(device.dhcp_fingerprint || device.dhcp_vendor_class || device.dhcp_client_id || device.profile_status) && (
+                                                                    <div className="p-3.5 rounded-xl bg-white/[0.015] border border-white/[0.05] flex flex-col gap-2.5">
+                                                                        <div className="flex items-center justify-between">
+                                                                            <span className="text-[10px] font-mono uppercase tracking-wider text-cyan-400 flex items-center gap-1.5">
+                                                                                <Fingerprint size={12} className="text-cyan-400" />
+                                                                                Sidik Jari Profiling & DHCP (Teknik 3B)
+                                                                            </span>
+                                                                            {device.profile_status && (
+                                                                                <span className={cn(
+                                                                                    "px-2 py-0.5 rounded-full text-[10px] font-medium border",
+                                                                                    device.profile_status === 'high'
+                                                                                        ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/25"
+                                                                                        : device.profile_status === 'medium'
+                                                                                        ? "bg-amber-500/15 text-amber-300 border-amber-500/25"
+                                                                                        : "bg-white/[0.04] text-zinc-400 border-white/[0.08]"
+                                                                                )}>
+                                                                                    {device.profile_status === 'high' ? 'Keyakinan Tinggi' : device.profile_status === 'medium' ? 'Keyakinan Sedang' : 'Belum Dikenali'}
+                                                                                </span>
+                                                                            )}
+                                                                        </div>
+                                                                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 text-xs">
+                                                                            {device.dhcp_fingerprint && (
+                                                                                <div className="p-2 rounded-lg bg-black/30 border border-white/[0.04]">
+                                                                                    <span className="text-[10px] text-zinc-500 font-mono block mb-0.5">OS Signature (Opt 55)</span>
+                                                                                    <span className="text-[11px] font-mono text-cyan-300 block truncate" title={device.dhcp_fingerprint}>
+                                                                                        {device.dhcp_fingerprint}
+                                                                                    </span>
+                                                                                </div>
+                                                                            )}
+                                                                            {device.dhcp_vendor_class && (
+                                                                                <div className="p-2 rounded-lg bg-black/30 border border-white/[0.04]">
+                                                                                    <span className="text-[10px] text-zinc-500 font-mono block mb-0.5">Vendor Class (Opt 60)</span>
+                                                                                    <span className="text-[11px] font-mono text-zinc-200 block truncate" title={device.dhcp_vendor_class}>
+                                                                                        {device.dhcp_vendor_class}
+                                                                                    </span>
+                                                                                </div>
+                                                                            )}
+                                                                            {device.dhcp_client_id && (
+                                                                                <div className="p-2 rounded-lg bg-black/30 border border-white/[0.04] flex items-center justify-between">
+                                                                                    <div className="min-w-0 flex-1">
+                                                                                        <span className="text-[10px] text-zinc-500 font-mono block mb-0.5">Hardware DUID (Opt 61)</span>
+                                                                                        <span className="text-[11px] font-mono text-zinc-300 block truncate" title={device.dhcp_client_id}>
+                                                                                            {device.dhcp_client_id}
+                                                                                        </span>
+                                                                                    </div>
+                                                                                    <button
+                                                                                        type="button"
+                                                                                        onClick={(e) => handleCopy(`duid-${device.mac}`, device.dhcp_client_id || '', e)}
+                                                                                        className="p-1 rounded text-zinc-500 hover:text-white transition-colors shrink-0 ml-1"
+                                                                                        title="Salin DUID"
+                                                                                    >
+                                                                                        {copiedKey === `duid-${device.mac}` ? <Check size={11} className="text-emerald-400" /> : <Copy size={11} />}
+                                                                                    </button>
+                                                                                </div>
+                                                                            )}
                                                                         </div>
                                                                     </div>
                                                                 )}

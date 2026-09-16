@@ -63,7 +63,7 @@ export function isHighConfidenceProfile(device: ProfileDevice): boolean {
     );
 }
 
-function isMediumConfidenceProfile(device: ProfileDevice): boolean {
+export function isMediumConfidenceProfile(device: ProfileDevice): boolean {
     if (isHighConfidenceProfile(device)) return false;
     return normalize(device.profile_status) === 'medium';
 }

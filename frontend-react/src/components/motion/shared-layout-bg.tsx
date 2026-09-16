@@ -1,7 +1,7 @@
 import React, { forwardRef } from 'react';
 
 export interface SharedLayoutBgProps extends React.HTMLAttributes<HTMLElement> {
-    as?: any;
+    as?: React.ElementType;
     children?: React.ReactNode;
     inset?: number;
     pillClassName?: string;

@@ -103,6 +103,10 @@ data/
 vite.config.ts.timestamp-*
 .turbo/
 .cache/
+test-results/
+**/test-results/
+playwright-report/
+**/playwright-report/
 
 # 9. IDE & OS Generated Files
 .idea/

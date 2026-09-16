@@ -195,7 +195,7 @@ export const apiClient = {
         return response.data;
     },
 
-    async toggleShield(enabled: boolean, mode: string = 'host_lock', autoRetaliate: boolean = false, lanTargets: any[] = []) {
+    async toggleShield(enabled: boolean, mode: string = 'host_lock', autoRetaliate: boolean = false, lanTargets: string[] = []) {
         const response = await http.post('/api/shield/toggle', {
             enabled,
             mode,

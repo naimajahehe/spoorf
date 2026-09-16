@@ -9,6 +9,8 @@
     "test:dhcp-profiling": "node scripts/test-dhcp-profiling.mjs",
     "test:refresh-sequencer": "node scripts/test-refresh-sequencer.mjs",
     "test:profile-coverage": "node scripts/test-profile-coverage.mjs",
+    "test:e2e": "playwright test",
+    "test": "npm run test:dhcp-profiling && npm run test:refresh-sequencer && npm run test:profile-coverage && npm run test:e2e",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -35,6 +37,7 @@
     "tailwind-merge": "^3.6.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.63.0",
     "@types/node": "^26.4.0",
     "@types/react": "^18.2.15",
     "@types/react-dom": "^18.2.7",

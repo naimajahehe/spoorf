@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef, useDeferredValue, useCallback } from 'react';
+import { useState, useEffect, useMemo, useRef, useDeferredValue, useCallback, Suspense, lazy } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
     Menu,
@@ -42,11 +42,6 @@ import { DeviceTable } from './components/DeviceTable';
 import { AgentScanProgress } from './components/AgentScanProgress';
 import { SecurityTelemetrySidebar } from './components/SecurityTelemetrySidebar';
 import { InstagramRedirectModal } from './components/InstagramRedirectModal';
-import { TransparentGatewayView } from './components/TransparentGatewayView';
-import { BettercapArsenalView } from './components/BettercapArsenalView';
-import { ActivityLogView } from './components/ActivityLogView';
-import { SettingsView } from './components/SettingsView';
-import { DocumentationView } from './components/DocumentationView';
 import { NewDeviceToast, ToastDeviceItem } from './components/NewDeviceToast';
 import { DisconnectedDeviceToast } from './components/DisconnectedDeviceToast';
 import { OnlineDeviceToast } from './components/OnlineDeviceToast';
@@ -58,7 +53,6 @@ import { WebPreviewModal } from './components/WebPreviewModal';
 import { DhcpReconnectModal } from './components/DhcpReconnectModal';
 import { WifiDetailsPopover } from './components/WifiDetailsPopover';
 import { DashboardWelcomeView } from './components/DashboardWelcomeView';
-import { GamingModeWidget } from './components/GamingModeWidget';
 import { LoginModal } from './components/LoginModal';
 import { UpgradeProModal } from './components/UpgradeProModal';
 import { ConfirmExitDialog } from './components/ConfirmExitDialog';
@@ -73,9 +67,24 @@ import { apiClient } from './api/client';
 import { sortDevices } from './lib/deviceSort';
 import { playChimeSound, requestNotificationPermission, sendDesktopNotification, isNotificationMuted, setNotificationMuted } from './lib/notifications';
 import { ThemeMode, getInitialTheme, applyTheme, toggleTheme } from './lib/theme';
-import { hasDhcpEvidence } from './lib/dhcpProfiling';
+import { calculateProfileCoverage } from './lib/profileCoverage';
 import { cn } from './lib/utils';
 import './App.css';
+
+// Code-Split Dynamic Imports untuk tampilan sekunder agar bundle awal tetap ringan (< 500 KB)
+const TransparentGatewayView = lazy(() => import('./components/TransparentGatewayView').then(m => ({ default: m.TransparentGatewayView })));
+const BettercapArsenalView = lazy(() => import('./components/BettercapArsenalView').then(m => ({ default: m.BettercapArsenalView })));
+const ActivityLogView = lazy(() => import('./components/ActivityLogView').then(m => ({ default: m.ActivityLogView })));
+const SettingsView = lazy(() => import('./components/SettingsView').then(m => ({ default: m.SettingsView })));
+const DocumentationView = lazy(() => import('./components/DocumentationView').then(m => ({ default: m.DocumentationView })));
+const GamingModeWidget = lazy(() => import('./components/GamingModeWidget').then(m => ({ default: m.GamingModeWidget })));
+
+const ViewLoadingFallback = () => (
+    <div className="w-full h-72 flex flex-col items-center justify-center gap-3 text-zinc-500">
+        <div className="size-8 rounded-full border-2 border-emerald-500/30 border-t-emerald-400 animate-spin" />
+        <span className="text-xs font-mono text-zinc-400">Memuat modul Sentinel...</span>
+    </div>
+);
 
 type FilterTab = 'all' | 'online' | 'throttled' | 'blocked';
 
@@ -278,9 +287,10 @@ function App() {
 
     // Synchronize mute state across tabs/windows or custom events
     useEffect(() => {
-        const handleMuteChange = (e: any) => {
-            if (e?.detail && typeof e.detail.muted === 'boolean') {
-                setIsMuted(e.detail.muted);
+        const handleMuteChange = (e: Event) => {
+            const custom = e as CustomEvent<{ muted?: boolean }>;
+            if (custom?.detail && typeof custom.detail.muted === 'boolean') {
+                setIsMuted(custom.detail.muted);
             } else {
                 setIsMuted(isNotificationMuted());
             }
@@ -302,9 +312,10 @@ function App() {
     }, [theme]);
 
     useEffect(() => {
-        const handleThemeChange = (e: any) => {
-            if (e?.detail && (e.detail.theme === 'light' || e.detail.theme === 'dark')) {
-                setTheme(e.detail.theme);
+        const handleThemeChange = (e: Event) => {
+            const custom = e as CustomEvent<{ theme?: ThemeMode }>;
+            if (custom?.detail && (custom.detail.theme === 'light' || custom.detail.theme === 'dark')) {
+                setTheme(custom.detail.theme);
             }
         };
         window.addEventListener('sentinel-theme-changed', handleThemeChange);
@@ -315,7 +326,7 @@ function App() {
         setTheme(prev => toggleTheme(prev));
     };
 
-    const fetchApIsolation = async () => {
+    const fetchApIsolation = useCallback(async () => {
         try {
             const res = await apiClient.getApIsolation();
             if (res && res.data) {
@@ -324,9 +335,9 @@ function App() {
         } catch {
             // ignore
         }
-    };
+    }, []);
 
-    const handleRefreshApIsolation = async () => {
+    const handleRefreshApIsolation = useCallback(async () => {
         setIsRefreshingApIsolation(true);
         try {
             const res = await apiClient.getApIsolation();
@@ -336,7 +347,7 @@ function App() {
         } finally {
             setIsRefreshingApIsolation(false);
         }
-    };
+    }, []);
 
     const handleToggleMute = () => {
         setIsMuted(prev => {
@@ -1073,17 +1084,36 @@ function App() {
     }, [dedupedDevices]);
 
     const dhcpUnprofiledCount = useMemo(() => {
-        return dedupedDevices.filter(
-            d => !d.is_gateway && !d.is_self && d.is_online && !hasDhcpEvidence(d)
-        ).length;
+        return calculateProfileCoverage(dedupedDevices).unknown;
     }, [dedupedDevices]);
 
     // Checkbox selection handlers (Gateway tidak dapat dipilih).
     // NOTE: selectedIps menyimpan MAC (bukan IP) sebagai kunci pilihan — perangkat offline
     // ber-ip='' semuanya akan bertumpuk di satu kunci kosong bila memakai IP (BUG-19). MAC unik
     // per perangkat, jadi perangkat offline tetap dapat dipilih satu per satu.
-    const handleToggleSelect = (mac: string) => {
-        const target = devices.find(d => d.mac === mac);
+    const devicesRef = useRef(devices);
+    devicesRef.current = devices;
+    const authStatusRef = useRef(authStatus);
+    authStatusRef.current = authStatus;
+    const loadingIpsRef = useRef(loadingIps);
+    loadingIpsRef.current = loadingIps;
+    const blockRef = useRef(block);
+    blockRef.current = block;
+    const unblockRef = useRef(unblock);
+    unblockRef.current = unblock;
+    const gatewayIpRef = useRef(gatewayIp);
+    gatewayIpRef.current = gatewayIp;
+    const filteredDevicesRef = useRef(filteredDevices);
+    filteredDevicesRef.current = filteredDevices;
+    const selectedIpsRef = useRef(selectedIps);
+    selectedIpsRef.current = selectedIps;
+
+    // Checkbox selection handlers (Gateway tidak dapat dipilih).
+    // NOTE: selectedIps menyimpan MAC (bukan IP) sebagai kunci pilihan — perangkat offline
+    // ber-ip='' semuanya akan bertumpuk di satu kunci kosong bila memakai IP (BUG-19). MAC unik
+    // per perangkat, jadi perangkat offline tetap dapat dipilih satu per satu.
+    const handleToggleSelect = useCallback((mac: string) => {
+        const target = devicesRef.current.find(d => d.mac === mac);
         if (target?.is_gateway) return;
 
         setSelectedIps(prev => {
@@ -1093,39 +1123,41 @@ function App() {
                 return [...prev, mac];
             }
         });
-    };
+    }, []);
 
-    const handleToggleSelectAll = () => {
-        const selectableMacs = filteredDevices.filter(d => !d.is_gateway).map(d => d.mac);
-        const isAllVisibleSelected = selectableMacs.length > 0 && selectableMacs.every(mac => selectedIps.includes(mac));
+    const handleToggleSelectAll = useCallback(() => {
+        const selectableMacs = filteredDevicesRef.current.filter(d => !d.is_gateway).map(d => d.mac);
+        const currentSelected = selectedIpsRef.current;
+        const isAllVisibleSelected = selectableMacs.length > 0 && selectableMacs.every(mac => currentSelected.includes(mac));
 
         if (isAllVisibleSelected) {
             setSelectedIps(prev => prev.filter(mac => !selectableMacs.includes(mac)));
         } else {
             setSelectedIps(prev => Array.from(new Set([...prev, ...selectableMacs])));
         }
-    };
+    }, []);
 
-
-    const handleManualCheckWifi = async () => {
+    const handleManualCheckWifi = useCallback(async () => {
         setIsCheckingWifi(true);
         await checkWifi();
         setTimeout(() => setIsCheckingWifi(false), 800);
-    };
+    }, [checkWifi]);
 
     // 2-Second Freeze Toggle Handler
-    const handleToggleInternet = async (device: Device) => {
+    const handleToggleInternet = useCallback(async (device: Device) => {
         const toggleKey = (device.ip && device.ip.trim() !== '') ? device.ip : device.mac;
         // Kunci sekuensial global: abaikan klik bila ADA operasi lain berjalan (tombol lain nonaktif total),
         // baris ini sendiri sedang loading, atau target gateway.
-        const isSelfLoading = (Boolean(device.ip) && loadingIps.has(device.ip)) || (Boolean(device.mac) && loadingIps.has(device.mac));
-        if (busyToggleRef.current !== null || busyToggleIp !== null || isSelfLoading || device.is_gateway) return;
+        const currentLoading = loadingIpsRef.current;
+        const isSelfLoading = (Boolean(device.ip) && currentLoading.has(device.ip)) || (Boolean(device.mac) && currentLoading.has(device.mac));
+        if (busyToggleRef.current !== null || isSelfLoading || device.is_gateway) return;
 
         // Free tier block limit guard
+        const currentAuth = authStatusRef.current;
         if (!device.is_blocked && (device.speed_limit === undefined || device.speed_limit >= 100)) {
-            if (authStatus?.license?.tier === 'free') {
-                const activeBlockedCount = devices.filter(d => d.is_blocked).length;
-                const limit = authStatus.license.max_cuts || 5;
+            if (currentAuth?.license?.tier === 'free') {
+                const activeBlockedCount = devicesRef.current.filter(d => d.is_blocked).length;
+                const limit = currentAuth.license.max_cuts || 5;
                 if (activeBlockedCount >= limit) {
                     setUpgradeModalState({
                         isOpen: true,
@@ -1147,9 +1179,9 @@ function App() {
         try {
             // Menunggu penyelesaian NYATA dari backend (loading sampai benar-benar putus/pulih), bukan timer.
             if (device.is_blocked || (device.speed_limit !== undefined && device.speed_limit < 100)) {
-                await unblock(device.ip && device.ip.trim() !== '' ? device.ip : device.mac);
+                await unblockRef.current(device.ip && device.ip.trim() !== '' ? device.ip : device.mac);
             } else {
-                await block(device.ip, gatewayIp);
+                await blockRef.current(device.ip, gatewayIpRef.current);
             }
         } catch {
             // Kegagalan (blockError/unblockError, atau timeout 12s) — pesan backend sudah ditampilkan
@@ -1164,16 +1196,10 @@ function App() {
             busyToggleRef.current = null;
             setBusyToggleIp(null);
         }
-    };
+    }, []);
 
-    const devicesRef = useRef(devices);
-    devicesRef.current = devices;
     const handleToggleInternetRef = useRef(handleToggleInternet);
     handleToggleInternetRef.current = handleToggleInternet;
-    const blockRef = useRef(block);
-    blockRef.current = block;
-    const gatewayIpRef = useRef(gatewayIp);
-    gatewayIpRef.current = gatewayIp;
 
     // Listener untuk aksi interaktif dari notifikasi native Windows (tombol "Putuskan Perangkat" dan "Lihat Detail")
     useEffect(() => {
@@ -1573,6 +1599,7 @@ function App() {
 
                     {/* Scrollable Main Content Viewport */}
                     <main className="flex-1 w-full min-w-0 overflow-y-auto px-6 lg:px-8 py-6 box-border overscroll-y-contain">
+                        <Suspense fallback={<ViewLoadingFallback />}>
                         {activeNav === 'dashboard' ? (
                             <DashboardWelcomeView
                                 authStatus={authStatus}
@@ -2172,6 +2199,7 @@ function App() {
                         </ScrollReveal>
                         </>
                     )}
+                        </Suspense>
                 </main>
                 </div>
                 </div>

@@ -13,13 +13,18 @@ import {
     Smartphone,
     Laptop,
     Radio,
-    Cpu
+    Cpu,
+    Tv,
+    Printer,
+    Tablet,
+    Gamepad2
 } from 'lucide-react';
 import { Device, ProfileRefreshSummary } from '../types';
 import { apiFetch } from '../api/client';
 import {
     calculateProfileCoverage,
     isHighConfidenceProfile,
+    isMediumConfidenceProfile,
     isIdentifiedVendor
 } from '../lib/profileCoverage';
 import { getResolvedDeviceName } from '../lib/deviceSort';
@@ -100,10 +105,10 @@ export const DhcpReconnectModal: FC<Props> = ({
                 e instanceof Error ? `Profiling gagal: ${e.message}` : 'Profiling gagal.'
             );
         } finally {
+            setIsProfiling(false);
             setTimeout(() => {
-                setIsProfiling(false);
                 setStatusMessage(null);
-            }, 3000);
+            }, 3500);
         }
     };
 
@@ -133,10 +138,10 @@ export const DhcpReconnectModal: FC<Props> = ({
                 e instanceof Error ? `Penyapuan gagal: ${e.message}` : 'Penyapuan gagal.'
             );
         } finally {
+            setIsOptimizing(false);
             setTimeout(() => {
-                setIsOptimizing(false);
                 setStatusMessage(null);
-            }, 2500);
+            }, 3000);
         }
     };
 
@@ -145,10 +150,24 @@ export const DhcpReconnectModal: FC<Props> = ({
         const os = (device.os || '').toLowerCase();
         const host = (device.hostname || '').toLowerCase();
         const vendor = (device.vendor || '').toLowerCase();
-        if (os.includes('android') || os.includes('ios') || host.includes('phone') || vendor.includes('xiaomi') || vendor.includes('samsung')) {
+        const type = (device.device_type || '').toLowerCase();
+
+        if (type.includes('tv') || host.includes('tv') || os.includes('webos') || os.includes('tizen')) {
+            return <Tv size={14} className="text-purple-400" />;
+        }
+        if (type.includes('printer') || host.includes('print')) {
+            return <Printer size={14} className="text-orange-400" />;
+        }
+        if (type.includes('tablet') || host.includes('ipad') || type.includes('ipad')) {
+            return <Tablet size={14} className="text-cyan-400" />;
+        }
+        if (type.includes('game') || type.includes('console') || host.includes('playstation') || host.includes('xbox') || host.includes('switch')) {
+            return <Gamepad2 size={14} className="text-pink-400" />;
+        }
+        if (type.includes('phone') || os.includes('android') || os.includes('ios') || host.includes('phone') || vendor.includes('xiaomi') || vendor.includes('samsung') || (vendor.includes('apple') && type.includes('mobile'))) {
             return <Smartphone size={14} className="text-blue-400" />;
         }
-        if (os.includes('windows') || os.includes('mac') || host.includes('desktop') || host.includes('laptop')) {
+        if (type.includes('laptop') || type.includes('desktop') || type.includes('pc') || os.includes('windows') || os.includes('mac') || host.includes('desktop') || host.includes('laptop')) {
             return <Laptop size={14} className="text-emerald-400" />;
         }
         return <Cpu size={14} className="text-zinc-400" />;
@@ -364,7 +383,9 @@ export const DhcpReconnectModal: FC<Props> = ({
 
                             <div className="rounded-xl border border-white/[0.06] overflow-hidden divide-y divide-white/[0.04] bg-white/[0.01]">
                                 {eligibleDevices.map((dev) => {
-                                    const identified = isHighConfidenceProfile(dev) || isIdentifiedVendor(dev);
+                                    const isHigh = isHighConfidenceProfile(dev);
+                                    const isMed = !isHigh && (isMediumConfidenceProfile(dev) || isIdentifiedVendor(dev));
+                                    const isIdentified = isHigh || isMed;
                                     const typeLabel = dev.device_type && !dev.device_type.toLowerCase().includes('generic') && dev.device_type.toLowerCase() !== 'unknown'
                                         ? dev.device_type
                                         : null;
@@ -380,7 +401,7 @@ export const DhcpReconnectModal: FC<Props> = ({
                                                         <span className="text-[10px] font-mono text-zinc-500">{dev.ip}</span>
                                                     </div>
                                                     <span className="text-[10px] text-zinc-500 truncate">
-                                                        {identified
+                                                        {isIdentified
                                                             ? [dev.vendor, typeLabel].filter(Boolean).join(' · ')
                                                             : 'Identitas belum terkumpul'}
                                                     </span>
@@ -388,15 +409,20 @@ export const DhcpReconnectModal: FC<Props> = ({
                                             </div>
 
                                             <div className="shrink-0">
-                                                {identified ? (
-                                                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-emerald-500/15 text-emerald-400 border border-emerald-500/25">
+                                                {isHigh ? (
+                                                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-emerald-500/15 text-emerald-400 border border-emerald-500/25" title="Teridentifikasi lengkap dengan keyakinan tinggi">
                                                         <CheckCircle2 size={11} />
-                                                        <span>Teridentifikasi</span>
+                                                        <span>Keyakinan Tinggi</span>
+                                                    </span>
+                                                ) : isMed ? (
+                                                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-amber-500/15 text-amber-400 border border-amber-500/25" title="Vendor atau tipe terdeteksi sebagian">
+                                                        <Fingerprint size={11} />
+                                                        <span>Sedang</span>
                                                     </span>
                                                 ) : (
-                                                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-white/[0.04] text-zinc-400 border border-white/[0.08]">
+                                                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-white/[0.04] text-zinc-400 border border-white/[0.08]" title="Identitas belum terdeteksi (MAC acak / pasif)">
                                                         <HelpCircle size={11} />
-                                                        <span>Belum dikenali</span>
+                                                        <span>Belum Dikenali</span>
                                                     </span>
                                                 )}
                                             </div>

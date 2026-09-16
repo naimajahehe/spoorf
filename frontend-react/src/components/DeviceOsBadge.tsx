@@ -25,7 +25,20 @@ export interface DeviceOsBadgeProps {
 export function formatDeviceOs(os?: string | null, isGateway?: boolean, vendor?: string | null): string {
     if (isGateway) {
         if (os && os.toLowerCase().includes('routeros')) return 'RouterOS';
-        return 'RouterOS';
+        if (os && os.trim() !== '' && os !== '-' && !os.toLowerCase().includes('unknown')) {
+            const osTrimmed = os.trim();
+            const lower = osTrimmed.toLowerCase();
+            if (lower.includes('openwrt')) return 'OpenWrt';
+            if (lower.includes('dd-wrt') || lower.includes('ddwrt')) return 'DD-WRT';
+            if (lower.includes('pfsense')) return 'pfSense';
+            if (lower.includes('opnsense')) return 'OPNsense';
+            if (lower.includes('linux')) return 'Embedded Linux';
+            return osTrimmed;
+        }
+        if (vendor && vendor.trim() !== '' && !vendor.toLowerCase().includes('unknown')) {
+            return `${vendor.trim()} Gateway`;
+        }
+        return 'Router Gateway';
     }
 
     if (!os || os.trim() === '' || os === '-' || os.toLowerCase().includes('unknown')) {

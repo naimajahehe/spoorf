@@ -250,6 +250,34 @@ export interface GamingStatus {
     timestamp: number;
 }
 
+export interface ShieldThreat {
+    id?: string;
+    timestamp: number | string;
+    attacker_mac: string;
+    attacker_ip?: string;
+    target_ip?: string;
+    claimed_ip: string;
+    gateway_ip: string;
+    gateway_mac?: string;
+    type?: string;
+    action_taken?: string;
+    details?: string;
+}
+
+export type ShieldMode = 'host_lock' | 'lan_healing' | 'reflect_counter' | 'paranoid';
+
+export interface ShieldStatus {
+    is_enabled: boolean;
+    mode: ShieldMode;
+    auto_retaliate: boolean;
+    gateway_ip: string;
+    gateway_mac: string;
+    win_alias?: string | null;
+    locked_at?: number | string | null;
+    threats_count: number;
+    latest_threat?: ShieldThreat | null;
+}
+
 export interface GamingTelemetry {
     ping_ms: number;
     jitter_ms: number;

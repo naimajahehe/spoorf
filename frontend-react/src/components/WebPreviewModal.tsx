@@ -131,7 +131,7 @@ export const WebPreviewModal: FC<Props> = ({
                             src={targetUrl}
                             title={`Web Preview ${targetUrl}`}
                             className="w-full h-full border-0"
-                            sandbox="allow-same-origin allow-scripts allow-forms allow-popups"
+                            sandbox="allow-scripts allow-forms allow-popups"
                         />
 
                         {/* Security notice footer bar */}

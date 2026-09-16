@@ -66,7 +66,7 @@ export interface GatewayStatusData {
 
 import { useEffect, useState, useRef, useCallback } from 'react';
 import { io, Socket } from 'socket.io-client';
-import { Device, L7Flow, CAStatus, DnsSpoofRule, SniffedCredential, BettercapStatus, ActivityEvent, AuthStatusResponse, GamingStatus, GamingTelemetry } from '../types';
+import { Device, L7Flow, CAStatus, DnsSpoofRule, SniffedCredential, BettercapStatus, ActivityEvent, AuthStatusResponse, GamingStatus, GamingTelemetry, ShieldStatus, ShieldThreat } from '../types';
 
 const deviceLabel = (d: Partial<Device> | undefined | null): string =>
     (d?.alias && d.alias.trim()) || (d?.hostname && d.hostname.trim()) || d?.ip || 'Perangkat';
@@ -134,7 +134,7 @@ export function useWebSocket() {
         timestamp: Date.now()
     });
     const [wifiInfo, setWifiInfo] = useState<WifiInfo>(getInitialWifiInfo);
-    const [shieldStatus, setShieldStatus] = useState<any>({
+    const [shieldStatus, setShieldStatus] = useState<ShieldStatus>({
         is_enabled: false,
         mode: 'host_lock',
         auto_retaliate: false,
@@ -144,8 +144,8 @@ export function useWebSocket() {
         locked_at: null,
         threats_count: 0
     });
-    const [shieldThreats, setShieldThreats] = useState<any[]>([]);
-    const [shieldThreatAlert, setShieldThreatAlert] = useState<any | null>(null);
+    const [shieldThreats, setShieldThreats] = useState<ShieldThreat[]>([]);
+    const [shieldThreatAlert, setShieldThreatAlert] = useState<ShieldThreat | null>(null);
     const [gamingStatus, setGamingStatus] = useState<GamingStatus>({
         is_enabled: false,
         mode: 'auto_airtime',
@@ -264,8 +264,8 @@ export function useWebSocket() {
             fetchApiJson<{ credentials?: SniffedCredential[] }>('/api/bettercap/credentials?limit=100', signal),
             fetchApiJson<BettercapStatus>('/api/bettercap/status', signal),
             fetchApiJson<{ data?: GamingStatus }>('/api/gaming/status', signal),
-            fetchApiJson<{ data?: any }>('/api/shield/status', signal),
-            fetchApiJson<{ data?: any[] }>('/api/shield/threats', signal),
+            fetchApiJson<{ data?: ShieldStatus }>('/api/shield/status', signal),
+            fetchApiJson<{ data?: ShieldThreat[] }>('/api/shield/threats', signal),
             fetchApiJson<{ wifi?: WifiInfo }>('/api/wifi', signal),
             fetchApiJson<AuthStatusResponse>('/api/auth/status', signal)
         ] as const);
@@ -343,7 +343,7 @@ export function useWebSocket() {
 
         const shieldStatusData = valueOf(shieldStatusResult);
         if (shieldStatusData?.data) {
-            applySnapshot('shieldStatus', () => setShieldStatus(shieldStatusData.data));
+            applySnapshot('shieldStatus', () => setShieldStatus(shieldStatusData.data!));
         }
 
         const shieldThreatsData = valueOf(shieldThreatsResult);
@@ -932,14 +932,14 @@ export function useWebSocket() {
             }
         });
 
-        newSocket.on('shieldStatusChanged', (data: any) => {
+        newSocket.on('shieldStatusChanged', (data: ShieldStatus) => {
             if (data) {
                 recordLiveStateChange(['shieldStatus']);
                 setShieldStatus(data);
             }
         });
 
-        newSocket.on('arpThreatDetected', (data: any) => {
+        newSocket.on('arpThreatDetected', (data: ShieldThreat) => {
             console.warn('🚨 [useWebSocket] ARP Threat Alert:', data);
             recordLiveStateChange(['shieldThreats']);
             setShieldThreatAlert(data);
@@ -971,26 +971,29 @@ export function useWebSocket() {
     const clearDisconnectedDeviceEvent = useCallback(() => setDisconnectedDeviceEvent(null), []);
     const clearRogueDhcpAlert = useCallback(() => setRogueDhcpAlert(null), []);
 
-    const scan = () => {
-        if (!socket?.connected) {
+    const scan = useCallback(() => {
+        const sock = socketRef.current;
+        if (!sock?.connected) {
             setError('Tidak dapat memindai jaringan saat koneksi backend terputus. Tunggu hingga tersambung lalu coba lagi.');
             return;
         }
-        if (isScanning) return;
-        setIsScanning(true);
-        setError(null);
-        socket.emit('scan');
-    };
+        setIsScanning(prev => {
+            if (prev) return prev;
+            setError(null);
+            sock.emit('scan');
+            return true;
+        });
+    }, []);
 
     // Aktif/nonaktifkan Auto Scan di backend (watchdog + scan-saat-perangkat-baru + scan seketika).
     // Pilihan disimpan agar diingat lintas sesi.
-    const setAutoScan = (enabled: boolean) => {
+    const setAutoScan = useCallback((enabled: boolean) => {
         setAutoScanEnabled(enabled);
         try { localStorage.setItem('sentinel_autoscan', enabled ? '1' : '0'); } catch {}
-        if (socket?.connected) {
-            socket.emit('setAutoScan', { enabled });
+        if (socketRef.current?.connected) {
+            socketRef.current.emit('setAutoScan', { enabled });
         }
-    };
+    }, []);
 
     // Selesaikan satu op tertunda ber-key eksak. Mengembalikan true bila ada yang cocok & diselesaikan.
     const settleToggleOpByKey = (key: string, ok: boolean, errorMsg?: string): boolean => {
@@ -1051,20 +1054,22 @@ export function useWebSocket() {
         });
     };
 
-    const block = (ip: string, gatewayIp: string): Promise<void> => {
-        if (!socket?.connected) {
+    const block = useCallback((ip: string, gatewayIp: string): Promise<void> => {
+        const sock = socketRef.current;
+        if (!sock?.connected) {
             const msg = 'Tidak dapat memblokir perangkat saat koneksi backend terputus. Tunggu hingga tersambung lalu coba lagi.';
             setError(msg);
             return Promise.reject(new Error(msg));
         }
         setError(null);
         const done = awaitToggleCompletion(ip);
-        socket.emit('block', { ip, gatewayIp });
+        sock.emit('block', { ip, gatewayIp });
         return done;
-    };
+    }, []);
 
-    const unblock = (identifier: string): Promise<void> => {
-        if (!socket?.connected) {
+    const unblock = useCallback((identifier: string): Promise<void> => {
+        const sock = socketRef.current;
+        if (!sock?.connected) {
             const msg = 'Tidak dapat membuka blokir saat koneksi backend terputus. Tunggu hingga tersambung lalu coba lagi.';
             setError(msg);
             return Promise.reject(new Error(msg));
@@ -1072,20 +1077,21 @@ export function useWebSocket() {
         setError(null);
         const done = awaitToggleCompletion(identifier);
         const isMac = identifier.includes(':') || identifier.includes('-');
-        socket.emit('unblock', isMac ? { mac: identifier } : { ip: identifier });
+        sock.emit('unblock', isMac ? { mac: identifier } : { ip: identifier });
         return done;
-    };
+    }, []);
 
-    const deleteDevice = (mac: string) => {
-        if (!socket?.connected) {
+    const deleteDevice = useCallback((mac: string) => {
+        const sock = socketRef.current;
+        if (!sock?.connected) {
             setError('Tidak dapat menghapus perangkat saat koneksi backend terputus. Tunggu hingga tersambung lalu coba lagi.');
             return;
         }
         setError(null);
-        socket.emit('deleteDevice', { mac });
-    };
+        sock.emit('deleteDevice', { mac });
+    }, []);
 
-    const updateAlias = (mac: string, alias: string) => {
+    const updateAlias = useCallback((mac: string, alias: string) => {
         const normMac = mac.toLowerCase();
         // Simpan alias sebelumnya agar bisa di-rollback bila backend gagal (aliasError)
         const prevDev = deviceRef.current.find(d => d.mac && d.mac.toLowerCase() === normMac);
@@ -1100,8 +1106,9 @@ export function useWebSocket() {
             return updated;
         });
 
-        if (socket && socket.connected) {
-            socket.emit('updateDeviceAlias', { mac, alias });
+        const sock = socketRef.current;
+        if (sock && sock.connected) {
+            sock.emit('updateDeviceAlias', { mac, alias });
         } else {
             apiFetch(`/api/devices/${encodeURIComponent(mac)}/alias`, {
                 method: 'PUT',
@@ -1109,12 +1116,13 @@ export function useWebSocket() {
                 body: JSON.stringify({ alias })
             }).catch(err => console.warn('Error updating alias via REST:', err));
         }
-    };
+    }, []);
 
-    const setSpeedLimit = async (ip: string, limit: number) => {
+    const setSpeedLimit = useCallback(async (ip: string, limit: number) => {
         setError(null);
-        if (socket?.connected) {
-            socket.emit('setSpeedLimit', { ip, limit });
+        const sock = socketRef.current;
+        if (sock?.connected) {
+            sock.emit('setSpeedLimit', { ip, limit });
         } else {
             try {
                 const response = await apiFetch(`/api/devices/${encodeURIComponent(ip)}/limit`, {
@@ -1131,16 +1139,16 @@ export function useWebSocket() {
                 setError(`Gagal mengatur batas kecepatan ${ip}: ${err.message}`);
             }
         }
-    };
+    }, []);
 
-    const checkWifi = async () => {
+    const checkWifi = useCallback(async () => {
         try {
             const data = await fetchApiJson<{ wifi?: WifiInfo }>('/api/wifi');
             if (data?.wifi) applyWifiSnapshot(data.wifi);
         } catch (err) {
             console.warn('Error checking Wi-Fi:', err);
         }
-    };
+    }, [applyWifiSnapshot]);
 
     const subscribeTelemetry = useCallback(() => {
         telemetrySubscribersCountRef.current += 1;

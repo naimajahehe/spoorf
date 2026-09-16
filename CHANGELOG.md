@@ -2,6 +2,105 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.36] - 2026-09-16
+
+### Device Identification & Profiling Pipeline Synchronization
+- **3-Tier Profile Confidence Alignment (`DhcpReconnectModal.tsx`)**:
+  - Menyelaraskan lencana daftar perangkat di modal Identifikasi Perangkat dengan metrik kartu statistik (*Hero Card*):
+    - **Keyakinan Tinggi**: Lencana hijau `CheckCircle2` (*Keyakinan Tinggi*) untuk profil tervalidasi lengkap (`isHighConfidenceProfile`).
+    - **Keyakinan Sedang**: Lencana amber `Fingerprint` (*Sedang*) untuk perangkat dengan vendor atau kategori parsial (`isMediumConfidenceProfile || isIdentifiedVendor`).
+    - **Belum Dikenali**: Lencana abu-abu `HelpCircle` (*Belum Dikenali*) untuk perangkat dengan identitas tersembunyi / acak.
+  - Menghilangkan kontradiksi visual di mana perangkat ber-OUI tanpa profil lengkap sebelumnya diberi lencana hijau secara keliru.
+- **Toolbar Profiling Badge Unification (`App.tsx`)**:
+  - Menghubungkan badge tombol Profiling toolbar langsung ke `calculateProfileCoverage(dedupedDevices).unknown` alih-alih `!hasDhcpEvidence(d)`.
+  - Memastikan angka perangkat belum teridentifikasi pada tombol luar 100% identik dengan angka "Belum Dikenali" di dalam modal.
+- **Instant Action Responsiveness (`DhcpReconnectModal.tsx`)**:
+  - Menghilangkan *artificial delay spinner* 3 detik pada `handleProfileRefresh` dan `handleTriggerWakeup`. `setIsProfiling(false)` dan `setIsOptimizing(false)` kini dieksekusi instan di `finally`, sedangkan *timeout* hanya digunakan untuk meredupkan teks notifikasi secara elegan.
+- **Rich Profiling & DHCP Intelligence Bento Tile (`DeviceTable.tsx`)**:
+  - Menyematkan tile **Sidik Jari Profiling & DHCP (Teknik 3B)** pada baris ekspansi Bento Grid tabel perangkat (khusus Pro/VIP).
+  - Menampilkan Option 55 OS Signature (`dhcp_fingerprint`), Option 60 Vendor Class (`dhcp_vendor_class`), Option 61 Hardware DUID (`dhcp_client_id`) lengkap dengan tombol salin, serta lencana level keyakinan profiling (`profile_status`).
+- **Comprehensive Device Icon Resolution (`DhcpReconnectModal.tsx`)**:
+  - Memperluas `getDeviceIcon` agar mengevaluasi atribut `device.device_type` dari backend (Smart TV, Printer, Tablet, Game Console, IoT) secara presisi alih-alih selalu jatuh ke fallback ikon CPU generik.
+- **Verifikasi & Status Pengujian**:
+  - TypeScript build: **0 Error (built in 9.10s)**.
+  - Frontend Playwright E2E: **5 / 5 PASSED (100% OK)**.
+  - Node.js Backend Tests: **48 / 48 PASSED (100% OK)**.
+  - Python Microservice Tests: **379 / 379 PASSED (100% OK)**.
+  - Total: **432 Automated Tests 100% Green (0 Regresi)**.
+
+## [v2.41.35] - 2026-09-16
+
+### Pure Left-to-Right Unfurl Drawer Action Animation (`DeviceTable.tsx`)
+- **Pinned Left-Anchor & Zero-Shift Unfurl**:
+  - Mengubah kontainer aksi tabel perangkat dari flex centering dinamis menjadi fixed left-aligned cluster (`w-[164px] mx-auto flex items-center justify-start gap-2 overflow-visible`).
+  - Menghilangkan pergeseran batas kiri (anti-ballooning/mengembang dari tengah): tombol aksi Internet terpaku paten di koordinat $x = 0$ ($X_{\text{left}}$ tidak pernah bergeser ke kiri).
+- **Smooth Rightward Slide & Unfurl (`width: 28 -> auto`)**:
+  - Saat tombol putus/pulihkan internet diklik dan berhasil:
+    - Kapsul status membuka seperti laci gulung halus (*drawer unfurl*) murni meluncur ke kanan dari ukuran awal lingkaran 28px ke lebar penuh, dengan kurva easing `[0.16, 1, 0.3, 1]`.
+    - Ikon tetap tajuk di offset $x = 7$px (posisi yang persis sama dengan ikon Wifi sebelumnya), sementara teks label (`Putus Internet Berhasil` / `Pulihkan Internet Berhasil`) meluncur masuk dari kiri ke kanan (`x: -10 -> 0`).
+    - Ketiga ikon pendamping (`Security & Telemetry`, `Instagram`, `Info Detail`) meluncur mulus ke arah kanan (`x: 0 -> 28`, `opacity: 1 -> 0`) seolah terdorong oleh kapsul yang mengembang ke kanan.
+- **Verifikasi & Status Pengujian**:
+  - TypeScript build: **0 Error (built in 9.86s)**.
+  - Frontend Playwright E2E: **5 / 5 PASSED (100% OK)**.
+  - Node.js Backend Tests: **48 / 48 PASSED (100% OK)**.
+  - Python Microservice Tests: **379 / 379 PASSED (100% OK)**.
+  - Total: **432 Automated Tests 100% Green (0 Regresi)**.
+
+## [v2.41.34] - 2026-09-16
+
+### Dynamic Morphing Action Feedback & Micro-Interaction Animation
+- **Tactile Morphing Action Pill (`frontend-react/src/components/DeviceTable.tsx`)**:
+  - Mengimplementasikan umpan balik visual instan (*micro-interaction feedback*) saat pengguna mengklik tombol putus/pulihkan internet pada tabel perangkat:
+    - **Kondisi Awal**: Menampilkan 4 tombol aksi: `[Putus/Pulih Internet]` `[Security & Telemetry]` `[Alihkan ke IG]` `[Info Detail]`.
+    - **Animasi Sukses (Opsi 1 - Morphing Expansion)**: Ketika backend mengonfirmasi pemutusan/pemulihan akses, 3 ikon di sebelahnya meluncur halus ke arah kanan dan memudar (`slide-out right`), sementara tombol putus internet mengembang secara elastis (*spring layout morph*) menjadi kapsul status berpendar:
+      - Saat diputus: `[ ✕ Putus Internet Berhasil ]` berlatar neon merah lembut (`bg-rose-500/15 text-rose-300 border-rose-500/35`).
+      - Saat dipulihkan: `[ ✓ Pulihkan Internet Berhasil ]` berlatar neon hijau lembut (`bg-emerald-500/15 text-emerald-300 border-emerald-500/35`).
+    - **Auto-Revert & Instant Dismiss**: Kapsul status tampil selama 2.6 detik lalu otomatis menyusut kembali ke tombol aslinya sambil memunculkan kembali ke-3 ikon lainnya (`slide-in left`), atau dapat ditutup seketika jika diklik oleh pengguna.
+- **State Change Detection & Isolation**:
+  - Mengisolasi umpan balik per-perangkat melalui referensi `pendingToggleMacRef` dan `prevBlockedStateRef`. Hanya baris perangkat yang diklik yang memicu animasi tanpa memengaruhi baris lain atau pembaruan latar belakang.
+- **Verifikasi & Status Pengujian**:
+  - Frontend Playwright E2E: **5 / 5 PASSED (100% OK)**.
+  - Node.js Backend Tests: **48 / 48 PASSED (100% OK)**.
+  - Python Microservice Tests: **379 / 379 PASSED (100% OK)**.
+  - Total: **432 Automated Tests 100% Green (0 Regresi)**.
+
+## [v2.41.33] - 2026-09-16
+
+### Frontend Architecture Hardening, Code-Splitting & Playwright E2E
+- **React ErrorBoundary & Crash Shield (`frontend-react/src/components/ErrorBoundary.tsx` & `main.tsx`)**:
+  - Menyematkan komponen pelindung `ErrorBoundary` di tingkat teratas root antarmuka. Mencegah fenomena *white-screen of death* jika terjadi unhandled exception pada komponen anak; menyediakan tampilan fallback diagnostik dengan tombol reset state, salin error stack trace, dan muat ulang aplikasi.
+- **Reference Stability & Re-render Elimination (`useWebSocket.ts` & `App.tsx`)**:
+  - Menstabilkan seluruh fungsi callback aksi (`scan`, `setAutoScan`, `block`, `unblock`, `deleteDevice`, `updateAlias`, `setSpeedLimit`, `checkWifi`, `handleToggleSelect`, `handleManualCheckWifi`, `fetchApIsolation`) menggunakan `useCallback` dan referensi ref stabil.
+  - Mengembalikan efektivitas memoization `React.memo(DeviceTable)` sehingga pembaruan throughput/telemetri reguler tidak memicu render ulang beruntun pada baris tabel perangkat.
+- **Dynamic Code-Splitting & Bundle Reduction (`App.tsx`)**:
+  - Memecah 6 modul antarmuka sekunder (`TransparentGatewayView`, `BettercapArsenalView`, `ActivityLogView`, `SettingsView`, `DocumentationView`, `GamingModeWidget`) menggunakan `React.lazy()` dan `<Suspense fallback={<ViewLoadingFallback />}>`.
+  - Menurunkan ukuran bundle awal dari 1.06 MB ke 855 kB (penghematan >200 kB untuk waktu muat awal yang jauh lebih gegas).
+- **Router Gateway Identification Accuracy (`DeviceOsBadge.tsx`)**:
+  - Memperbaiki hardcoded fallback `'RouterOS'` pada `formatDeviceOs`. Gateway non-MikroTik kini mendeteksi vendor secara akurat (`TP-Link Gateway`, `Cisco Gateway`, `Huawei Gateway`, `OpenWrt`, `pfSense`, `Embedded Linux`, dll.) alih-alih dilabeli MikroTik RouterOS secara keliru.
+- **Hygiene & Defense-in-Depth Sanitization**:
+  - Menghapus 6 file usang tak terpakai (*dead code*): `AuthGateScreen.tsx`, `pull-to-refresh.tsx`, `scroll-progress.tsx`, `smooth-scroll.tsx`, `card.tsx`, `checkbox.tsx`.
+  - Menghapus `@import` font Geist duplikat di `App.css` untuk mencegah render-blocking network overhead (font telah di-preload via `index.html`).
+  - Memperbaiki atribut `sandbox` pada `WebPreviewModal.tsx`: mencabut `allow-same-origin` ketika `allow-scripts` aktif untuk mengisolasi server web router/captive portal lokal dari DOM dan storage induk.
+  - Menambahkan `noopener,noreferrer` pada pembukaan tab eksternal di `UpgradeProModal.tsx`.
+- **Playwright E2E Automated Verification (`playwright.config.ts` & `tests/e2e/frontend.spec.ts`)**:
+  - Memasang `@playwright/test` dan Chromium headless engine.
+  - Menulis 5 skenario pengujian E2E otomatis:
+    1. Initial application load & core shell mount.
+    2. Realtime theme switching (Dark Mode <-> Light Mode).
+    3. Seamless navigation across primary & lazy-loaded modular views.
+    4. NetCut filter tabs & search query interactive filtering.
+    5. ErrorBoundary resilience & DOM integrity check.
+- **Phase 2 Audit Hardening & Zero-Side-Effect Optimizations**:
+  - Mengangkat dan menyatukan interface `ShieldThreat`, `ShieldStatus`, dan `ShieldMode` ke `frontend-react/src/types/index.ts` serta menghapus seluruh sisa `any` pada domain Sentinel Shield di `useWebSocket.ts`, `SettingsView.tsx`, dan `api/client.ts`.
+  - Mengoptimasi kompleksitas lookup seleksi perangkat di `DeviceTable.tsx` dari $O(N)$ ke $O(1)$ menggunakan `React.useMemo(() => new Set(selectedIps), [selectedIps])`.
+  - Menstandarisasi pengetikan event listener di `App.tsx` via `CustomEvent` dan prop `icon` pada `CommandPalette.tsx` via `React.ElementType`.
+- **Verifikasi & Status Pengujian**:
+  - Frontend Playwright E2E: **5 / 5 PASSED (100% OK)**.
+  - Frontend Profiling Scripts: **3 / 3 PASSED (100% OK)**.
+  - Node.js Backend Tests: **48 / 48 PASSED (100% OK)**.
+  - Python Microservice Tests: **379 / 379 PASSED (100% OK)**.
+  - Total: **435 Automated Tests 100% Green (0 Regresi)**.
+
 ## [v2.41.32] - 2026-09-15
 
 ### Anti-Flapping Robust Network Detection & Local IPC Decoupling

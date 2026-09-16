@@ -16,7 +16,7 @@ export interface CommandItem {
     group?: string;
     hint?: string;
     keywords?: string[];
-    icon?: any;
+    icon?: React.ElementType;
     badge?: React.ReactNode;
     onSelect: () => void;
 }

@@ -15,31 +15,9 @@ import {
     Info,
     Crosshair
 } from 'lucide-react';
-import { Device } from '../types';
+import { Device, ShieldStatus, ShieldThreat } from '../types';
 
-export interface ShieldStatus {
-    is_enabled: boolean;
-    mode: 'host_lock' | 'lan_healing' | 'reflect_counter';
-    auto_retaliate: boolean;
-    gateway_ip: string;
-    gateway_mac: string;
-    win_alias: string;
-    locked_at: string | null;
-    threats_count: number;
-    latest_threat?: any;
-}
-
-export interface ShieldThreat {
-    id: string;
-    timestamp: string;
-    attacker_ip: string;
-    attacker_mac: string;
-    target_ip: string;
-    claimed_ip: string;
-    type: string;
-    action_taken: string;
-    details: string;
-}
+export type { ShieldStatus, ShieldThreat };
 
 interface SettingsViewProps {
     devices: Device[];
@@ -63,9 +41,11 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     onRefresh
 }) => {
     const [isUpdating, setIsUpdating] = useState(false);
-    const [selectedMode, setSelectedMode] = useState<'host_lock' | 'lan_healing' | 'reflect_counter'>(
-        shieldStatus?.mode || 'host_lock'
-    );
+    const initialMode: 'host_lock' | 'lan_healing' | 'reflect_counter' =
+        (shieldStatus?.mode === 'lan_healing' || shieldStatus?.mode === 'reflect_counter')
+            ? shieldStatus.mode
+            : 'host_lock';
+    const [selectedMode, setSelectedMode] = useState<'host_lock' | 'lan_healing' | 'reflect_counter'>(initialMode);
     const [autoRetaliate, setAutoRetaliate] = useState<boolean>(
         shieldStatus?.auto_retaliate || false
     );

@@ -18,7 +18,7 @@ export const UpgradeProModal: FC<Props> = ({
     if (!isOpen) return null;
 
     const handleOpenCheckout = () => {
-        window.open('https://spoorf.app/pricing', '_blank');
+        window.open('https://spoorf.app/pricing', '_blank', 'noopener,noreferrer');
     };
 
     return (
