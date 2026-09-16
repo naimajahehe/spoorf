@@ -10,8 +10,9 @@ Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem
   - Definisi tipe TypeScript eksplisit dan type-safe di `src/types/logger.ts`.
 - **OpenTelemetry API Integration (`@opentelemetry/api`)**:
   - Mengintegrasikan mixin OTel pada Pino singleton untuk mengekstrak dan menyuntikkan `trace_id` dan `span_id` secara otomatis dari active span konteks eksekusi.
-- **Pure JSON Streaming to Stdout (12-Factor App)**:
-  - Seluruh output log di-stream langsung secara asynchronous dan non-blocking ke `process.stdout`/`process.stderr` tanpa menulis ke file log fisik internal container.
+- **Pure JSON Streaming to Stdout (12-Factor App) & Environment-Aware Terminal Formatting**:
+  - Di environment produksi dan kontainer (`NODE_ENV=production`), logger mengalirkan raw JSON murni berkecepatan tinggi langsung ke `process.stdout` untuk agregasi log shipper.
+  - Di terminal interaktif pengembangan lokal (`NODE_ENV=development`), logger otomatis menggunakan `pino-pretty` untuk menyajikan log berwarna, timestamp lokal ringkas, dan indentasi yang rapi dan nyaman dibaca.
 - **Request Tracing via `pino-http`**:
   - Memodernisasi `src/middlewares/requestLogger.ts` menggunakan engine `pino-http`.
   - Mengimplementasikan `autoLogging.ignore` untuk menyaring otomatis endpoint probe liveness/readiness Kubernetes (`/healthz`, `/livez`, `/readyz`, `/health`, `/api/health`).

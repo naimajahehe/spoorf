@@ -12,6 +12,7 @@ import { env } from '../config/env';
  */
 
 const isTest = env.NODE_ENV === 'test' || process.env.NODE_ENV === 'test' || process.argv.some(arg => /tests?[\\/]|\brun_tests\b/i.test(arg));
+const isDev = env.NODE_ENV === 'development' || (!env.NODE_ENV && process.env.NODE_ENV !== 'production');
 const defaultLogLevel = isTest ? 'silent' : (env.NODE_ENV === 'production' ? 'info' : 'debug');
 
 const redactFields = [
@@ -99,9 +100,34 @@ export const loggerOptions: LoggerOptions = {
 };
 
 /**
- * Pure JSON streaming singleton writing to stdout (12-Factor App)
+ * Factory creating destination stream:
+ * - In local development: uses pino-pretty for clean, human-readable terminal output.
+ * - In production/container: streams pure JSON to stdout (12-Factor App).
+ * - In automated test runs: streams to stdout (with level silent).
  */
-export const logger: Logger = pino(loggerOptions, process.stdout);
+export function createDestinationStream(): any {
+    if (isDev && !isTest) {
+        try {
+            // eslint-disable-next-line @typescript-eslint/no-var-requires
+            const pinoPretty = require('pino-pretty');
+            return pinoPretty({
+                colorize: true,
+                messageKey: 'message',
+                translateTime: 'SYS:standard',
+                ignore: 'pid,hostname',
+                singleLine: false
+            });
+        } catch {
+            return process.stdout;
+        }
+    }
+    return process.stdout;
+}
+
+/**
+ * Observability logger singleton
+ */
+export const logger: Logger = pino(loggerOptions, createDestinationStream());
 
 /**
  * Creates a child logger with contextual tags.
