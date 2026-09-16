@@ -2,6 +2,25 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.42] - 2026-09-17
+
+### Complete Service Layer Structured Logging Migration (`backend-node`)
+- **Zero Raw Console Calls in Core Services**:
+  - Melakukan migrasi menyeluruh 100% pada seluruh service layer dari pemanggilan mentah `console.log`, `console.warn`, dan `console.error` ke contextual Pino child loggers (`createChildLogger`) dengan metadata JSON terstruktur.
+  - Total 117 titik logging di seluruh service layer berhasil dimigrasikan dengan atribut kontekstual `{ ip, mac, networkId, sessionId, duration_ms, err }`.
+- **Domain Service Logger Instances**:
+  - `DeviceManager` (`createChildLogger('DeviceManager')`): Menyusun log terstruktur untuk siklus pemindaian jaringan, deteksi network shift, penanganan disconnections, rekonsiliasi perangkat online/offline, penanganan DHCP event/fast-revival, eksekusi auto-reblock dan auto-throttle, sinkronisasi profil perangkat, serta manajemen sesi isolasi Gaming Mode.
+  - `PythonBridge` (`createChildLogger('PythonBridge')`): Menyusun log terstruktur untuk manajemen koneksi microservice, reconnect backoff, health monitoring WebSocket, pendaftaran dan penghentian sesi spoofing ARP L2, serta pemanggilan REST API mutasi jaringan.
+  - `DatabaseService` (`createChildLogger('Database')`): Menyusun log terstruktur untuk inisialisasi tabel SQLite, migrasi skema, eksekusi checkpoint WAL berkala, pembersihan perangkat usang (retention sweep), dan backfill nama profil.
+  - `LicenseManager` (`createChildLogger('LicenseManager')`): Menyusun log terstruktur untuk pemulihan lisensi dari cache SQLite, kedaluwarsa grace period, dan penegakan verifikasi keamanan domain cloud (anti-SSRF).
+  - `WebSocketServer` (`createChildLogger('WebSocket')`): Menyusun log terstruktur untuk siklus koneksi/diskoneksi klien Socket.IO, pemantauan error, dan inisialisasi adapter real-time.
+- **Verification & Invariant Integrity**:
+  - Memastikan seluruh Core Invariant (Invariant 1: Gateway Immunity, Invariant 2: Controller Anti-Self-Cut, Invariant 4: RFC 1918 Scope Strictness) terlindungi tanpa deviasi logika.
+  - Hasil Pengujian Node.js: **69 / 69 PASSED (100% Green)**.
+  - Hasil Pengujian Python Engine: **379 / 379 PASSED (100% Green)**.
+  - Frontend SPA Build: `tsc && vite build` bersih 100%.
+  - Total pengujian otomatis seluruh ekosistem: **448 tests 100% PASSED**.
+
 ## [v2.41.41] - 2026-09-17
 
 ### High-Performance Structured Logging (Pino) & Request Tracing Context (`backend-node`)

@@ -3,8 +3,10 @@ import { Server as HttpServer } from 'http';
 import { DeviceManager } from '../services/deviceManager';
 import { LicenseManager } from '../services/licenseManager';
 import { isAllowedOrigin, isAllowedHost, isValidApiToken } from '../security';
+import { createChildLogger } from '../utils/logger';
 
 export class WebSocketManager {
+    private readonly log = createChildLogger('WebSocket');
     private io: SocketServer;
 
     constructor(
@@ -82,7 +84,7 @@ export class WebSocketManager {
         });
 
         this.deviceManager.on('autoReblocked', (device: any) => {
-            console.log(`📡 Broadcast autoReblocked event for ${device.hostname || device.ip}`);
+            this.log.info({ event: 'autoReblocked', mac: device.mac, ip: device.ip }, `Broadcast autoReblocked event for ${device.hostname || device.ip}`);
             this.io.emit('autoReblocked', device);
         });
 
@@ -91,7 +93,7 @@ export class WebSocketManager {
         });
 
         this.deviceManager.on('rogueDhcpAlert', (data) => {
-            console.warn(`📡 Broadcast rogueDhcpAlert event for server IP: ${data.server_ip}`);
+            this.log.warn({ event: 'rogueDhcpAlert', serverIp: data.server_ip }, `Broadcast rogueDhcpAlert event for server IP: ${data.server_ip}`);
             this.io.emit('rogueDhcpAlert', data);
         });
 
@@ -140,7 +142,7 @@ export class WebSocketManager {
         });
 
         this.deviceManager.on('arpThreatDetected', (data) => {
-            console.warn(`📡 Broadcast arpThreatDetected alert from MAC: ${data.attacker_mac}`);
+            this.log.warn({ event: 'arpThreatDetected', attackerMac: data.attacker_mac }, `Broadcast arpThreatDetected alert from MAC: ${data.attacker_mac}`);
             this.io.emit('arpThreatDetected', data);
         });
 
@@ -154,14 +156,14 @@ export class WebSocketManager {
 
         if (this.licenseManager) {
             this.licenseManager.on('licenseChanged', (status) => {
-                console.log(`📡 Broadcast licenseStatus updated: ${status.license.tier.toUpperCase()}`);
+                this.log.info({ event: 'licenseStatus', tier: status.license.tier }, `Broadcast licenseStatus updated: ${status.license.tier.toUpperCase()}`);
                 this.io.emit('licenseStatus', status);
             });
         }
     }
 
     private handleConnection(socket: any) {
-            console.log(`Client connected: ${socket.id}`);
+            this.log.info({ socketId: socket.id }, `Client connected: ${socket.id}`);
 
             // Send initial devices from database & memory (disaring ke subnet aktif)
             socket.emit('devices', this.deviceManager.scopeForDisplay(this.deviceManager.getDevices()));
@@ -285,7 +287,7 @@ export class WebSocketManager {
             });
 
             socket.on('disconnect', () => {
-                console.log(`Client disconnected: ${socket.id}`);
+                this.log.info({ socketId: socket.id }, `Client disconnected: ${socket.id}`);
             });
     }
 

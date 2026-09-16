@@ -6,6 +6,7 @@ import { DatabaseService, deriveNetworkId } from './database';
 import { LicenseManager, FeatureLimitError, FeatureLockedError } from './licenseManager';
 import { Device, CutStatus, ProfileAssessment, ProfileRefreshResult } from '../types';
 import type { ScanOptions } from './pythonBridge';
+import { createChildLogger } from '../utils/logger';
 
 // Retensi: perangkat tamu yang offline lebih lama dari ini diarsipkan (bukan dihapus)
 // agar daftar mencerminkan jaringan nyata, bukan riwayat semua tamu. Lihat
@@ -282,6 +283,7 @@ interface PendingGamingDisable {
 }
 
 export class DeviceManager extends EventEmitter {
+    private readonly log = createChildLogger('DeviceManager');
     private devices: Map<string, Device> = new Map();
     private currentNetworkId: string = 'net_default';
     private scanning: boolean = false;
@@ -346,7 +348,7 @@ export class DeviceManager extends EventEmitter {
         // auto-reblock (yang melewati perangkat ber-session_id, mengira sesinya hidup) benar-benar
         // membangun ulang sesi. is_blocked tetap; sesi baru dibuat saat scan/reblock berikutnya.
         this.python.on('pythonReachable', () => {
-            this.reconcileBlocksWithPython().catch(err => console.warn('Notice reconcile on reconnect:', err?.message));
+            this.reconcileBlocksWithPython().catch(err => this.log.warn({ err }, `Notice reconcile on reconnect: ${err?.message || err}`));
         });
 
         this.python.on('networkChanged', async (data) => {
@@ -364,7 +366,7 @@ export class DeviceManager extends EventEmitter {
             const newGwMac = data?.gateway_mac || data?.new_gateway_mac;
             if (newGwMac) {
                 this.currentNetworkId = deriveNetworkId(newGwMac);
-                console.log(`🌐 [DeviceManager] networkChanged: scoped to ${this.currentNetworkId}`);
+                this.log.info({ networkId: this.currentNetworkId }, `networkChanged: scoped to ${this.currentNetworkId}`);
             }
 
             for (const dev of this.devices.values()) {
@@ -384,21 +386,21 @@ export class DeviceManager extends EventEmitter {
                     }
                     this.emit('devicesUpdated', Array.from(this.devices.values()));
                 } catch (err: any) {
-                    console.warn('Notice reloading devices on networkChanged:', err?.message);
+                    this.log.warn({ err }, `Notice reloading devices on networkChanged: ${err?.message || err}`);
                 }
             }
 
             this.emit('networkChanged', data);
-            this.scanNetwork().catch(console.error);
+            this.scanNetwork().catch(err => this.log.error({ err }, 'Scan network on networkChanged failed'));
         });
 
         this.python.on('dhcpDevice', (data) => {
             // Serialisasi mutasi this.devices dari event DHCP agar tidak interleave dengan scan.
-            this.runExclusive(() => this._handleDhcpEvent(data)).catch(console.error);
+            this.runExclusive(() => this._handleDhcpEvent(data)).catch(err => this.log.error({ err }, 'Handle DHCP event failed'));
         });
 
         this.python.on('rogueDhcp', (data) => {
-            console.warn('🚨 [DeviceManager] Rogue DHCP Alert:', data);
+            this.log.warn({ alert: data }, '[DeviceManager] Rogue DHCP Alert');
             this.emit('rogueDhcpAlert', data);
         });
 
@@ -423,7 +425,7 @@ export class DeviceManager extends EventEmitter {
         });
 
         this.python.on('deviceLivenessChanged', (data) => {
-            this.runExclusive(() => this._handleLivenessEvent(data)).catch(console.warn);
+            this.runExclusive(() => this._handleLivenessEvent(data)).catch(err => this.log.warn({ err }, 'Handle liveness event warning'));
         });
 
         this.python.on('shieldStatusChanged', (data) => {
@@ -431,7 +433,7 @@ export class DeviceManager extends EventEmitter {
         });
 
         this.python.on('arpThreatDetected', (data) => {
-            console.warn('🚨 [DeviceManager] ARP Threat Alert:', data);
+            this.log.warn({ alert: data }, '[DeviceManager] ARP Threat Alert');
             this.emit('arpThreatDetected', data);
         });
 
@@ -476,8 +478,8 @@ export class DeviceManager extends EventEmitter {
         for (const dev of this.devices.values()) {
             if (dev.session_id) { dev.session_id = undefined; cleared++; }
         }
-        console.log(`♻️ [Reconcile] ${blocked.length} perangkat terblokir, sebagian tak ter-enforce di Python (session basi: ${cleared}) → memicu scan re-block.`);
-        this.scanNetwork().catch(err => console.warn('Notice reconcile re-block scan:', err?.message));
+        this.log.info({ blockedCount: blocked.length, clearedSessions: cleared }, `[Reconcile] ${blocked.length} perangkat terblokir, sebagian tak ter-enforce di Python (session basi: ${cleared}) -> memicu scan re-block.`);
+        this.scanNetwork().catch(err => this.log.warn({ err }, `Notice reconcile re-block scan: ${err?.message || err}`));
     }
 
     /**
@@ -542,7 +544,7 @@ export class DeviceManager extends EventEmitter {
 
     private async _handleDhcpEvent(data: any): Promise<void> {
         {
-            console.log('⚡ [DeviceManager] DHCP event received:', data);
+            this.log.debug({ data }, '[DeviceManager] DHCP event received');
             const isRelease = data && (
                 data.kind === 'release' ||
                 data.is_release === true ||
@@ -572,7 +574,7 @@ export class DeviceManager extends EventEmitter {
                         // scanNetwork (BUG-17). Tanpa ini, RELEASE membuat perangkat hilang dari UI
                         // sampai rescan berikutnya.
                         this.devices.set(deviceMemKey(dev), dev);
-                        this.db.setDeviceOnlineStatus(dev.mac, false, this.currentNetworkId).catch(console.warn);
+                        this.db.setDeviceOnlineStatus(dev.mac, false, this.currentNetworkId).catch(err => this.log.warn({ mac: dev.mac, err }, 'Failed to set device offline on DHCP release'));
                         this.emit('deviceUpdated', dev);
                         this.emit('deviceDisconnected', dev);
                         updatedAny = true;
@@ -599,7 +601,7 @@ export class DeviceManager extends EventEmitter {
                 if (existingPenalty) {
                     clearTimeout(existingPenalty);
                     this.offlineCooldownTimers.delete(normMac);
-                    console.log(`⚡ [DHCP Fast-Revival] Penalti 30s DIBATALKAN untuk ${normMac} karena sinyal DHCP ${data.message_type || 'aktif'} diterima!`);
+                    this.log.info({ mac: normMac, messageType: data.message_type }, `[DHCP Fast-Revival] Penalti 30s DIBATALKAN untuk ${normMac} karena sinyal DHCP ${data.message_type || 'aktif'} diterima!`);
                 }
 
                 let dev: Device | undefined;
@@ -617,12 +619,12 @@ export class DeviceManager extends EventEmitter {
                 // 2. Cek apakah ada perangkat lain yang sebelumnya menempati data.ip
                 const occupantOfNewIp = this.devices.get(data.ip);
                 if (occupantOfNewIp && occupantOfNewIp.mac.toLowerCase() !== normMac) {
-                    console.log(`🔄 [DHCP IP Churn] IP ${data.ip} berpindah kepemilikan dari ${occupantOfNewIp.mac} ke ${normMac}`);
+                    this.log.info({ ip: data.ip, oldMac: occupantOfNewIp.mac, newMac: normMac }, `[DHCP IP Churn] IP ${data.ip} berpindah kepemilikan dari ${occupantOfNewIp.mac} ke ${normMac}`);
                     occupantOfNewIp.is_online = false;
                     occupantOfNewIp.ip = '';
                     this.devices.delete(data.ip);
                     this.devices.set(deviceMemKey(occupantOfNewIp), occupantOfNewIp);
-                    this.db.setDeviceOnlineStatus(occupantOfNewIp.mac, false, this.currentNetworkId).catch(console.warn);
+                    this.db.setDeviceOnlineStatus(occupantOfNewIp.mac, false, this.currentNetworkId).catch(err => this.log.warn({ mac: occupantOfNewIp.mac, err }, 'Failed to set old occupant offline on DHCP churn'));
                     this.emit('deviceUpdated', occupantOfNewIp);
                     this.emit('deviceDisconnected', occupantOfNewIp);
                 }
@@ -657,7 +659,7 @@ export class DeviceManager extends EventEmitter {
                 if (dev) {
                     // Bersihkan mapping IP lama jika berbeda
                     if (oldIpOfThisMac && oldIpOfThisMac !== data.ip) {
-                        console.log(`⚡ [DHCP IP Migration] Device ${dev.hostname || dev.mac} moved from ${oldIpOfThisMac} to ${data.ip}`);
+                        this.log.info({ mac: dev.mac, hostname: dev.hostname, oldIp: oldIpOfThisMac, newIp: data.ip }, `[DHCP IP Migration] Device ${dev.hostname || dev.mac} moved from ${oldIpOfThisMac} to ${data.ip}`);
                         this.devices.delete(oldIpOfThisMac);
                     }
                     const hostnameShouldChange = Boolean(
@@ -715,9 +717,9 @@ export class DeviceManager extends EventEmitter {
                             dev.session_id = undefined;
                             try {
                                 await this._blockDeviceImpl(dev.ip, gw.ip);
-                                console.log(`🔒 [DHCP Re-Block] Blok ditegakkan ulang untuk ${dev.hostname || dev.mac} di ${dev.ip}`);
+                                this.log.info({ mac: dev.mac, ip: dev.ip }, `[DHCP Re-Block] Blok ditegakkan ulang untuk ${dev.hostname || dev.mac} di ${dev.ip}`);
                             } catch (e: any) {
-                                console.warn(`Notice re-blocking ${dev.mac} on DHCP:`, e?.message);
+                                this.log.warn({ mac: dev.mac, err: e }, `Notice re-blocking ${dev.mac} on DHCP: ${e?.message || e}`);
                             }
                         }
                     }
@@ -735,12 +737,12 @@ export class DeviceManager extends EventEmitter {
                             const now = Date.now();
                             if (now - this.lastIdentityReblockAt >= IDENTITY_REBLOCK_MIN_INTERVAL_MS) {
                                 this.lastIdentityReblockAt = now;
-                                console.log(`🔒 [Identity Re-Block] DHCP MAC baru ${normMac} cocok identitas terblokir → picu re-block scan seketika.`);
-                                this.scanNetwork().catch(err => console.warn('Notice identity re-block scan:', err?.message));
+                                this.log.info({ mac: normMac }, `[Identity Re-Block] DHCP MAC baru ${normMac} cocok identitas terblokir -> picu re-block scan seketika.`);
+                                this.scanNetwork().catch(err => this.log.warn({ err }, `Notice identity re-block scan: ${err?.message || err}`));
                             }
                         }
                     } catch (e: any) {
-                        console.warn('Notice identity re-block check:', e?.message);
+                        this.log.warn({ err: e }, `Notice identity re-block check: ${e?.message || e}`);
                     }
                 }
 
@@ -786,7 +788,7 @@ export class DeviceManager extends EventEmitter {
                         fingerprint: data.dhcp_fingerprint,
                         clientId: data.client_id,
                         fqdn: data.fqdn
-                    }, this.currentNetworkId).catch(console.warn);
+                    }, this.currentNetworkId).catch(err => this.log.warn({ err }, 'Failed to save DHCP profile without IP'));
                 }
 
                 // Periksa apakah MAC ini cocok dengan perangkat terblokir untuk picu re-block cepat
@@ -795,12 +797,12 @@ export class DeviceManager extends EventEmitter {
                         const now = Date.now();
                         if (now - this.lastIdentityReblockAt >= IDENTITY_REBLOCK_MIN_INTERVAL_MS) {
                             this.lastIdentityReblockAt = now;
-                            console.log(`🔒 [Identity Re-Block] DHCP discovery MAC ${normMac} cocok identitas terblokir → picu scan seketika.`);
-                            this.scanNetwork().catch(err => console.warn('Notice identity re-block scan:', err?.message));
+                            this.log.info({ mac: normMac }, `[Identity Re-Block] DHCP discovery MAC ${normMac} cocok identitas terblokir -> picu scan seketika.`);
+                            this.scanNetwork().catch(err => this.log.warn({ err }, `Notice identity re-block scan: ${err?.message || err}`));
                         }
                     }
                 } catch (e: any) {
-                    console.warn('Notice identity re-block check:', e?.message);
+                    this.log.warn({ err: e }, `Notice identity re-block check: ${e?.message || e}`);
                 }
 
                 // Picu micro-scan agar IP fisik sebenarnya segera diverifikasi via Layer 2 ARP.
@@ -835,15 +837,15 @@ export class DeviceManager extends EventEmitter {
             dev.is_online = isOnline;
             if (data.rtt_ms !== undefined) dev.rtt_ms = data.rtt_ms;
             this.devices.set(dev.ip, dev);
-            await this.db.setDeviceOnlineStatus(dev.mac, isOnline, this.currentNetworkId).catch(console.warn);
+            await this.db.setDeviceOnlineStatus(dev.mac, isOnline, this.currentNetworkId).catch(err => this.log.warn({ mac: dev.mac, err }, 'Failed to set online status on liveness pulse'));
             this.emit('deviceUpdated', dev);
 
             if (wasOnline && !isOnline) {
-                console.log(`🔌 [LivenessPulse < 0.75s] Instant Offline Confirmed: ${dev.ip} (${dev.mac}) via vector '${data.vector || 'timeout'}'`);
+                this.log.info({ ip: dev.ip, mac: dev.mac, vector: data.vector || 'timeout' }, `[LivenessPulse < 0.75s] Instant Offline Confirmed: ${dev.ip} (${dev.mac}) via vector '${data.vector || 'timeout'}'`);
                 this.emit('deviceDisconnected', dev);
                 this.emit('devicesUpdated', Array.from(this.devices.values()));
             } else if (!wasOnline && isOnline) {
-                console.log(`⚡ [LivenessPulse < 0.75s] Instant Online Confirmed: ${dev.ip} (${dev.mac}) via vector '${data.vector}'`);
+                this.log.info({ ip: dev.ip, mac: dev.mac, vector: data.vector }, `[LivenessPulse < 0.75s] Instant Online Confirmed: ${dev.ip} (${dev.mac}) via vector '${data.vector}'`);
                 this.emit('devicesUpdated', Array.from(this.devices.values()));
             }
         }
@@ -927,7 +929,7 @@ export class DeviceManager extends EventEmitter {
                         throw new Error(`Perangkat target offline: IP ${device.ip} saat ini ditempati oleh perangkat asing (${liveMac}) yang belum terdaftar. Silakan lakukan Scan terlebih dahulu.`);
                     }
 
-                    console.log(`🔄 [Pre-Flight Dynamic Re-Bind] IP ${device.ip} shifted from ${currentMac} to live MAC ${liveMac}. Reconciling target!`);
+                    this.log.info({ ip: device.ip, oldMac: currentMac, liveMac }, `[Pre-Flight Dynamic Re-Bind] IP ${device.ip} shifted from ${currentMac} to live MAC ${liveMac}. Reconciling target!`);
                     await this._clearStaleSpoofSession(device);
 
                     // Canonical Object Unification (device selalu menjadi referensi kanonik tunggal):
@@ -940,7 +942,7 @@ export class DeviceManager extends EventEmitter {
                     device.is_online = true;
                     this.devices.set(device.ip, device);
 
-                    await this.db.saveDevice(device, this.currentNetworkId).catch(console.warn);
+                    await this.db.saveDevice(device, this.currentNetworkId).catch(err => this.log.warn({ mac: device.mac, err }, 'Failed to save reconciled device'));
                     this.emit('deviceUpdated', device);
                     this.emit('devicesUpdated', Array.from(this.devices.values()));
                     return device; // Terbukti hidup dan telah disinkronkan ke live MAC
@@ -971,19 +973,19 @@ export class DeviceManager extends EventEmitter {
                 }
 
                 if (migratedIp) {
-                    console.log(`⚡ [Pre-Flight Auto-Migration] Target ${device.mac} berpindah dari ${device.ip} ke ${migratedIp} (MAC: ${migratedMac}), memverifikasi IP baru...`);
+                    this.log.info({ mac: device.mac, oldIp: device.ip, newIp: migratedIp, newMac: migratedMac }, `[Pre-Flight Auto-Migration] Target ${device.mac} berpindah dari ${device.ip} ke ${migratedIp} (MAC: ${migratedMac}), memverifikasi IP baru...`);
                     const reCheck = await this.python.pulseLiveness(
                         [{ ip: migratedIp, mac: migratedMac }],
                         gatewayIp
                     );
                     if (reCheck && reCheck[migratedIp] && reCheck[migratedIp].is_alive) {
-                        console.log(`✅ [Pre-Flight Auto-Migration] Target ${migratedMac} TERBUKTI HIDUP di IP baru ${migratedIp}!`);
+                        this.log.info({ mac: migratedMac, ip: migratedIp }, `[Pre-Flight Auto-Migration] Target ${migratedMac} TERBUKTI HIDUP di IP baru ${migratedIp}!`);
                         if (device.ip) this.devices.delete(device.ip);
                         device.ip = migratedIp;
                         device.mac = migratedMac;
                         device.is_online = true;
                         this.devices.set(migratedIp, device);
-                        await this.db.updateDeviceIp(device.mac, migratedIp, this.currentNetworkId).catch(console.warn);
+                        await this.db.updateDeviceIp(device.mac, migratedIp, this.currentNetworkId).catch(err => this.log.warn({ mac: device.mac, err }, 'Failed to update device IP on auto-migration'));
                         this.emit('deviceUpdated', device);
                         this.emit('devicesUpdated', Array.from(this.devices.values()));
                         return device;
@@ -998,7 +1000,7 @@ export class DeviceManager extends EventEmitter {
                 const lastSeenMs = device.last_seen ? new Date(device.last_seen).getTime() : 0;
                 const sinceSeenMs = lastSeenMs > 0 ? Date.now() - lastSeenMs : Infinity;
                 if (sinceSeenMs < TRUST_FRESH_ONLINE_MS) {
-                    console.log(`✅ [Pre-Flight Trust-Fresh] ${device.mac} terakhir online ${Math.round(sinceSeenMs / 1000)}s lalu (< ${TRUST_FRESH_ONLINE_MS / 1000}s) — melewati vonis offline, lanjutkan aksi.`);
+                    this.log.info({ mac: device.mac, sinceSeenMs }, `[Pre-Flight Trust-Fresh] ${device.mac} terakhir online ${Math.round(sinceSeenMs / 1000)}s lalu (< ${TRUST_FRESH_ONLINE_MS / 1000}s) — melewati vonis offline, lanjutkan aksi.`);
                     return device;
                 }
 
@@ -1006,7 +1008,7 @@ export class DeviceManager extends EventEmitter {
                 const normMac = device.mac.toLowerCase();
                 device.is_online = false;
                 this.devices.set(device.ip, device);
-                await this.db.setDeviceOnlineStatus(device.mac, false, this.currentNetworkId).catch(console.warn);
+                await this.db.setDeviceOnlineStatus(device.mac, false, this.currentNetworkId).catch(err => this.log.warn({ mac: device.mac, err }, 'Failed to set device offline on pre-flight'));
                 this.emit('deviceUpdated', device);
                 this.emit('deviceDisconnected', device);
                 this.emit('devicesUpdated', Array.from(this.devices.values()));
@@ -1017,7 +1019,7 @@ export class DeviceManager extends EventEmitter {
 
                 const penaltyTimer = setTimeout(() => {
                     this.offlineCooldownTimers.delete(normMac);
-                    console.log(`⏱️ [Cooldown 30s Expired] Masa karantina offline untuk ${device.hostname || device.ip} (${normMac}) selesai.`);
+                    this.log.info({ mac: normMac }, `[Cooldown 30s Expired] Masa karantina offline untuk ${device.hostname || device.ip} (${normMac}) selesai.`);
                 }, 30000);
                 this.offlineCooldownTimers.set(normMac, penaltyTimer);
 
@@ -1034,7 +1036,7 @@ export class DeviceManager extends EventEmitter {
             ) {
                 throw err;
             }
-            console.warn('Notice in pre-flight liveness check:', err.message);
+            this.log.warn({ err }, `Notice in pre-flight liveness check: ${err.message || err}`);
         }
         return device;
     }
@@ -1043,7 +1045,7 @@ export class DeviceManager extends EventEmitter {
         await this.db.init();
         // Sembuhkan profil yang namanya generik/'Unknown' dari hostname personal perangkatnya, agar
         // MAC hasil rotasi tak lagi mewarisi nama "Unknown" (idempoten, hanya naik generik→personal).
-        try { if (typeof this.db.backfillProfileNames === "function") await this.db.backfillProfileNames(); } catch (e: any) { console.warn('Notice profile name backfill:', e?.message); }
+        try { if (typeof this.db.backfillProfileNames === "function") await this.db.backfillProfileNames(); } catch (e: any) { this.log.warn({ err: e }, `Notice profile name backfill: ${e?.message}`); }
 
         if (this.currentNetworkId === 'net_default' && typeof this.db?.getAllNetworks === 'function') {
             try {
@@ -1055,7 +1057,7 @@ export class DeviceManager extends EventEmitter {
                             for (const a of addrs || []) {
                                 if (a.family === 'IPv4' && !a.internal && isIpInSameSubnet(net.gateway_ip, a.address)) {
                                     this.currentNetworkId = net.id;
-                                    console.log(`🌐 [DeviceManager] Initialized network scope from local adapter: ${this.currentNetworkId} (${net.gateway_ip})`);
+                                    this.log.info({ networkId: this.currentNetworkId, gatewayIp: net.gateway_ip }, `Initialized network scope from local adapter: ${this.currentNetworkId} (${net.gateway_ip})`);
                                     break;
                                 }
                             }
@@ -1082,13 +1084,13 @@ export class DeviceManager extends EventEmitter {
             // Offline devices (ip='') keyed by identity so they don't collapse onto '' (BUG-17).
             this.devices.set(deviceMemKey(device), device);
         }
-        console.log(`📦 Loaded ${storedDevices.length} persistent devices from SQLite`);
+        this.log.info({ count: storedDevices.length, networkId: this.currentNetworkId }, `Loaded ${storedDevices.length} persistent devices from SQLite`);
         this.emit('devicesUpdated', storedDevices);
 
         // Retention Sweep: arsipkan perangkat tamu yang lama hilang saat startup, lalu harian.
         await this._runRetentionSweep();
         const retentionTimer = setInterval(() => {
-            this._runRetentionSweep().catch(err => console.warn('Notice retention sweep:', err.message));
+            this._runRetentionSweep().catch(err => this.log.warn({ err }, `Notice retention sweep: ${err.message}`));
         }, RETENTION_SWEEP_INTERVAL_MS);
         retentionTimer.unref();
 
@@ -1096,7 +1098,7 @@ export class DeviceManager extends EventEmitter {
         // aktif. Di mode "Scan saja" watchdog diam total (tak ada scan latar).
         const watchdogTimer = setInterval(() => {
             if (this._shouldRunWatchdogScan()) {
-                this.scanNetwork().catch(err => console.warn('Notice background watchdog scan:', err.message));
+                this.scanNetwork().catch(err => this.log.warn({ err }, `Notice background watchdog scan: ${err.message}`));
             }
         }, 25000);
         watchdogTimer.unref();
@@ -1132,7 +1134,7 @@ export class DeviceManager extends EventEmitter {
         this.dhcpScanDebounceTimer = setTimeout(() => {
             this.dhcpScanDebounceTimer = null;
             if (!this.scanning) {
-                this.scanNetwork().catch(console.error);
+                this.scanNetwork().catch(err => this.log.error({ err }, 'Error during debounced scan'));
             }
         }, delayMs);
         this.dhcpScanDebounceTimer.unref();
@@ -1150,7 +1152,7 @@ export class DeviceManager extends EventEmitter {
         // di sini — bukan hanya UI — agar klien free ter-autentikasi tak bisa menyalakan scan latar
         // via emit WS langsung. Permisif bila LicenseManager tak ada (dev/test tanpa lisensi).
         if (next && this.license && this.license.getLicense().tier === 'free') {
-            console.warn('⚠️ [Auto Scan] Ditolak: tier free hanya "Scan saja". Upgrade untuk mengaktifkan Auto Scan.');
+            this.log.warn({ tier: this.license?.getLicense().tier }, 'Auto Scan rejected: tier free is limited to manual scan. Upgrade to enable Auto Scan.');
             if (this.autoScanEnabled) {
                 this.autoScanEnabled = false;
                 this.emit('autoScanChanged', { enabled: false });
@@ -1170,7 +1172,7 @@ export class DeviceManager extends EventEmitter {
 
         // Mengaktifkan Auto Scan langsung memicu satu scan seketika.
         if (next && changed && !this.scanning) {
-            this.scanNetwork().catch(err => console.warn('Notice immediate auto-scan:', err?.message));
+            this.scanNetwork().catch(err => this.log.warn({ err }, `Notice immediate auto-scan: ${err?.message}`));
         }
         return this.autoScanEnabled;
     }
@@ -1273,7 +1275,7 @@ export class DeviceManager extends EventEmitter {
                     requireFresh: false
                 });
             }
-            console.log('⏳ [DeviceManager] Scan is already in progress, returning shared in-flight scan promise.');
+            this.log.info('Scan is already in progress, returning shared in-flight scan promise.');
             return this.inFlightScan;
         }
         this.inFlightScan = this._scanNetworkImpl(options).finally(() => {
@@ -1374,7 +1376,7 @@ export class DeviceManager extends EventEmitter {
                     }
                 }
             } catch (err) {
-                console.warn('Notice ensuring self device:', err);
+                this.log.warn({ err }, 'Notice ensuring self device');
             }
 
             // INTEGRITAS CONTROLLER: Pastikan hanya ada 1 perangkat controller (is_self) aktif di jaringan ini
@@ -1401,7 +1403,7 @@ export class DeviceManager extends EventEmitter {
                 if (activeGwForFilter.mac) {
                     const detectedNetId = deriveNetworkId(activeGwForFilter.mac);
                     if (detectedNetId !== this.currentNetworkId) {
-                        console.log(`🌐 [DeviceManager] Network shift detected during scan: ${this.currentNetworkId} -> ${detectedNetId}`);
+                        this.log.info({ previousNetworkId: this.currentNetworkId, detectedNetworkId: detectedNetId }, `Network shift detected during scan: ${this.currentNetworkId} -> ${detectedNetId}`);
                         this.currentNetworkId = detectedNetId;
                         this.devices.clear();
                         if (typeof this.db?.getAllDevices === 'function') {
@@ -1411,7 +1413,7 @@ export class DeviceManager extends EventEmitter {
                                     this.devices.set(deviceMemKey(d), d);
                                 }
                             } catch (e: any) {
-                                console.warn('Notice loading devices on network shift:', e?.message);
+                                this.log.warn({ err: e, networkId: this.currentNetworkId }, `Notice loading devices on network shift: ${e?.message}`);
                             }
                         }
                     }
@@ -1446,16 +1448,16 @@ export class DeviceManager extends EventEmitter {
             const zombieSessionsToStop: string[] = syncRes.zombieSessionsToStop || [];
 
             // Sehatkan nama profil dari hostname personal yang baru dipelajari scan ini (idempoten).
-            try { if (typeof this.db.backfillProfileNames === "function") await this.db.backfillProfileNames(); } catch (e: any) { console.warn('Notice profile name backfill (scan):', e?.message); }
+            try { if (typeof this.db.backfillProfileNames === "function") await this.db.backfillProfileNames(); } catch (e: any) { this.log.warn({ err: e }, `Notice profile name backfill (scan): ${e?.message}`); }
 
             // Bersihkan sesi zombie lama dari MAC yang baru saja diarsipkan
             if (zombieSessionsToStop && zombieSessionsToStop.length > 0) {
                 for (const sid of zombieSessionsToStop) {
                     try {
-                        console.log(`🧹 [CLEANUP] Stopping zombie spoof session ${sid} from archived MAC`);
+                        this.log.info({ sessionId: sid }, `Stopping zombie spoof session ${sid} from archived MAC`);
                         await this.python.stopSpoof(sid);
                     } catch (e) {
-                        console.warn(`Notice stopping archived session ${sid}:`, e);
+                        this.log.warn({ err: e, sessionId: sid }, `Notice stopping archived session ${sid}`);
                     }
                 }
             }
@@ -1467,7 +1469,7 @@ export class DeviceManager extends EventEmitter {
                 if (!dev.is_self && !dev.is_gateway && !dev.is_online) {
                     const prev = prevByMac.get(dev.mac.toLowerCase());
                     if (prev && prev.is_online) {
-                        console.log(`🔌 [DeviceManager] Device disconnected: ${dev.ip || dev.last_ip || '-'} (${dev.mac})`);
+                        this.log.info({ ip: dev.ip || dev.last_ip || '-', mac: dev.mac }, `Device disconnected: ${dev.ip || dev.last_ip || '-'} (${dev.mac})`);
                         // Bersihkan sesi Gaming Mode agar tak bocor & agar reconnect ter-throttle lagi.
                         await this._stopGamingSession(dev.mac.toLowerCase());
                         if (prev.ip) {
@@ -1617,7 +1619,7 @@ export class DeviceManager extends EventEmitter {
 
                     // Late-Check: Jika user baru saja unblock saat scan berjalan, batalkan auto-reblock
                     if (!currentDev.is_blocked) {
-                        console.log(`⏩ [AUTO-REBLOCK] Skipping ${target.ip} because it was unblocked during scan`);
+                        this.log.info({ ip: target.ip, mac: target.mac }, `[AUTO-REBLOCK] Skipping ${target.ip} because it was unblocked during scan`);
                         continue;
                     }
 
@@ -1625,7 +1627,7 @@ export class DeviceManager extends EventEmitter {
                     await this._clearStaleSpoofSession(currentDev);
 
                     try {
-                        console.log(`⚡ [AUTO-REBLOCK] Target detected returning: ${currentDev.hostname || currentDev.ip} (MAC: ${currentDev.mac}, IP: ${currentDev.ip})`);
+                        this.log.info({ hostname: currentDev.hostname, ip: currentDev.ip, mac: currentDev.mac }, `[AUTO-REBLOCK] Target detected returning: ${currentDev.hostname || currentDev.ip} (MAC: ${currentDev.mac}, IP: ${currentDev.ip})`);
                         const sessionId = await this.python.startSpoof(
                             currentDev.ip,
                             currentDev.mac,
@@ -1646,7 +1648,7 @@ export class DeviceManager extends EventEmitter {
                         this.emit('deviceUpdated', currentDev);
                         this.emit('autoReblocked', currentDev);
                     } catch (err) {
-                        console.error(`❌ [AUTO-REBLOCK] Failed to auto-block ${target.ip}:`, err);
+                        this.log.error({ err, ip: target.ip, mac: target.mac }, `[AUTO-REBLOCK] Failed to auto-block ${target.ip}`);
                     }
                 }
             }
@@ -1669,7 +1671,7 @@ export class DeviceManager extends EventEmitter {
 
                     try {
                         const limit = currentDev.speed_limit ?? 50;
-                        console.log(`⚡ [AUTO-THROTTLE] Reapplying speed limit ${limit}% for ${currentDev.hostname || currentDev.ip} (${currentDev.mac})`);
+                        this.log.info({ limit, hostname: currentDev.hostname, ip: currentDev.ip, mac: currentDev.mac }, `[AUTO-THROTTLE] Reapplying speed limit ${limit}% for ${currentDev.hostname || currentDev.ip} (${currentDev.mac})`);
                         const sessionId = await this.python.startSpoof(
                             currentDev.ip,
                             currentDev.mac,
@@ -1689,7 +1691,7 @@ export class DeviceManager extends EventEmitter {
                         this.devices.set(currentDev.ip, currentDev);
                         this.emit('deviceUpdated', currentDev);
                     } catch (err) {
-                        console.error(`❌ [AUTO-THROTTLE] Failed to auto-throttle ${target.ip}:`, err);
+                        this.log.error({ err, ip: target.ip, mac: target.mac }, `[AUTO-THROTTLE] Failed to auto-throttle ${target.ip}`);
                     }
                 }
             }
@@ -2429,7 +2431,7 @@ export class DeviceManager extends EventEmitter {
         this.inFlightDhcpOptimizationGeneration = generation;
         this.inFlightDhcpOptimization = (async () => {
             const startedAt = Date.now();
-            console.log('⚡ [DeviceManager] Triggering measured Discovery Refresh & DHCP Observation...');
+            this.log.info('Triggering measured Discovery Refresh & DHCP Observation...');
             const observation = await this.python.optimizeDhcpProfiling();
             const devices = await this.scanNetwork({
                 skipMulticastWakeup: true,
@@ -2716,7 +2718,7 @@ export class DeviceManager extends EventEmitter {
                 if (err.message && err.message.includes('Network changed')) {
                     throw err;
                 }
-                console.warn(`Notice updating device profile assessment for ${assessment.mac}:`, err?.message);
+                this.log.warn({ err, mac: assessment.mac }, `Notice updating device profile assessment for ${assessment.mac}: ${err?.message}`);
                 return false;
             }
 
@@ -2787,7 +2789,7 @@ export class DeviceManager extends EventEmitter {
         this.profileEnrichmentTimer = setTimeout(() => {
             this.profileEnrichmentTimer = null;
             this.drainProfileEnrichment().catch(error => {
-                console.warn('Notice automatic profile enrichment:', error);
+                this.log.warn({ err: error }, 'Notice automatic profile enrichment');
             });
         }, Math.max(0, delayMs));
         this.profileEnrichmentTimer.unref();
@@ -2971,7 +2973,7 @@ export class DeviceManager extends EventEmitter {
                     !d.is_gateway && !d.is_self && d.is_online
                 );
 
-                console.log(`🎮 [GAMING MODE AKTIF] Mengisolasi otomatis ${onlineTargets.length} perangkat LAN (Mode: ${mode}, Limit: ${targetLimit}%)...`);
+                this.log.info({ count: onlineTargets.length, mode, targetLimit }, `[GAMING MODE AKTIF] Mengisolasi otomatis ${onlineTargets.length} perangkat LAN (Mode: ${mode}, Limit: ${targetLimit}%)...`);
 
                 for (const target of onlineTargets) {
                     await this._applyGamingToDevice(target, gateway);
@@ -2983,7 +2985,7 @@ export class DeviceManager extends EventEmitter {
             } else {
                 const pending = this.pendingGamingDisable || this._createPendingGamingDisable(mode, targetPingMs);
                 this.pendingGamingDisable = pending;
-                console.log(`🎮 [GAMING MODE NONAKTIF] Memulihkan ${pending.restorePlans.length} perangkat yang dikelola Gaming Mode...`);
+                this.log.info({ count: pending.restorePlans.length }, `[GAMING MODE NONAKTIF] Memulihkan ${pending.restorePlans.length} perangkat yang dikelola Gaming Mode...`);
 
                 for (const plan of pending.restorePlans) {
                     if (!plan.stopped && plan.sessionId) {
@@ -3175,7 +3177,7 @@ export class DeviceManager extends EventEmitter {
             this.devices.set(target.ip, target);
             this.emit('deviceUpdated', target);
         } catch (err: any) {
-            console.warn(`Notice mengisolasi perangkat ${target.ip} untuk Gaming Mode:`, err.message);
+            this.log.warn({ err, ip: target.ip, mac: target.mac }, `Notice mengisolasi perangkat ${target.ip} untuk Gaming Mode: ${err.message}`);
         }
     }
 
@@ -3205,7 +3207,7 @@ export class DeviceManager extends EventEmitter {
             try {
                 await this.python.stopSpoof(gm.sessionId);
             } catch (error) {
-                console.warn(`Notice stopping Gaming Mode session ${gm.sessionId}:`, error);
+                this.log.warn({ err: error, sessionId: gm.sessionId, mac: macKey }, `Notice stopping Gaming Mode session ${gm.sessionId}`);
             }
         }
         this.gamingManaged.delete(macKey);

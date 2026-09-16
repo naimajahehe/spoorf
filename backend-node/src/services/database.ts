@@ -3,6 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import { Device, Network, CachedLicense, ProfileAssessment, ProfileEvidence, ProfileStatus } from '../types';
 import { env } from '../config/env';
+import { createChildLogger } from '../utils/logger';
 
 /**
  * Turunkan network_id dari MAC gateway router — unik per router LAN & bebas kolisi.
@@ -385,6 +386,7 @@ function quoteSqlIdentifier(identifier: string): string {
 }
 
 export class DatabaseService {
+    private readonly log = createChildLogger('Database');
     private db: Database.Database;
     private initialized: boolean = false;
     private dbPath: string;
@@ -422,11 +424,9 @@ export class DatabaseService {
             this.db.pragma('busy_timeout = 5000');
         } catch (err: any) {
             this.usingMemoryFallback = true;
-            console.error(
-                `\n❌❌❌ [DatabaseService] GAGAL membuka file DB ${this.dbPath} (${err.message}).\n` +
-                `   → Beralih ke SQLite IN-MEMORY. PERINGATAN: seluruh data perangkat & lisensi\n` +
-                `     TIDAK akan tersimpan permanen dan hilang saat aplikasi ditutup.\n` +
-                `   → Periksa izin tulis folder data/ atau kunci file DB.\n`
+            this.log.error(
+                { dbPath: this.dbPath, err },
+                `GAGAL membuka file DB ${this.dbPath} (${err?.message || err}). Beralih ke SQLite IN-MEMORY. PERINGATAN: data perangkat & lisensi TIDAK akan tersimpan permanen.`
             );
             this.db = new Database(':memory:');
         }
@@ -500,7 +500,7 @@ export class DatabaseService {
             }>;
             const hasNetworkId = existingDeviceCols.some(c => c.name === 'network_id');
             if (existingDeviceCols.length > 0 && !hasNetworkId) {
-                console.log('🔄 [DatabaseService] Migrating legacy devices schema to Network-Scoped Isolation (network_id)...');
+                this.log.info('Migrating legacy devices schema to Network-Scoped Isolation (network_id)...');
                 const colsDef = existingDeviceCols
                     .filter(c => c.name !== 'network_id')
                     .map(c => {
@@ -648,10 +648,10 @@ export class DatabaseService {
             // Normalisasi data OS: bersihkan legacy string seperti 'Android / Linux' atau 'Android OS' menjadi 'Android'
             this.db.exec("UPDATE devices SET os = 'Android' WHERE os IN ('Android / Linux', 'Android OS');");
 
-            console.log(`✅ SQLite connected & schema initialized (${this.dbPath})`);
+            this.log.info({ dbPath: this.dbPath }, `SQLite connected & schema initialized (${this.dbPath})`);
             this.initialized = true;
         } catch (error) {
-            console.error('❌ Failed to initialize SQLite database:', error);
+            this.log.error({ err: error, dbPath: this.dbPath }, 'Failed to initialize SQLite database');
             throw error;
         }
     }
@@ -957,16 +957,16 @@ export class DatabaseService {
                         AND d2.is_blocked = 0
                   )
             `).run();
-        } catch (err) {
-            console.warn('Notice repair stale blocked profile rows:', err);
+        } catch (err: any) {
+            this.log.warn({ err }, `Notice repair stale blocked profile rows: ${err?.message || err}`);
         }
 
         // PEMBERSIHAN OTOMATIS (GARBAGE COLLECTOR):
         // Bersihkan MAC acak usang yang terarsipkan atau offline > 2 hari saat startup
         try {
             this.pruneStaleRandomizedMacs(2);
-        } catch (err) {
-            console.warn('Notice prune stale randomized MACs on init:', err);
+        } catch (err: any) {
+            this.log.warn({ err }, `Notice prune stale randomized MACs on init: ${err?.message || err}`);
         }
     }
 
@@ -1000,7 +1000,7 @@ export class DatabaseService {
         `);
         const result = stmt.run();
         if (result.changes > 0) {
-            console.log(`🧹 [Retention] Mengarsipkan ${result.changes} perangkat tamu yang offline > ${thresholdDays} hari.`);
+            this.log.info({ changes: result.changes, thresholdDays }, `[Retention] Mengarsipkan ${result.changes} perangkat tamu yang offline > ${thresholdDays} hari.`);
         }
         return result.changes;
     }
@@ -1061,7 +1061,7 @@ export class DatabaseService {
 
         const totalDeletedDevices = devResult.changes + archResult.changes;
         if (totalDeletedDevices > 0 || profResult.changes > 0) {
-            console.log(`🧹 [Garbage Collector] Berhasil membersihkan ${totalDeletedDevices} MAC acak usang dan ${profResult.changes} profil duplikat.`);
+            this.log.info({ totalDeletedDevices, deletedProfiles: profResult.changes }, `[Garbage Collector] Berhasil membersihkan ${totalDeletedDevices} MAC acak usang dan ${profResult.changes} profil duplikat.`);
         }
         return { deletedDevices: totalDeletedDevices, deletedProfiles: profResult.changes };
     }
@@ -1228,7 +1228,7 @@ export class DatabaseService {
                 healed++;
             }
         }
-        if (healed > 0) console.log(`🏷️ [Profile Backfill] ${healed} profil dipulihkan namanya dari hostname personal perangkat.`);
+        if (healed > 0) this.log.info({ healed }, `[Profile Backfill] ${healed} profil dipulihkan namanya dari hostname personal perangkat.`);
         return healed;
     }
 
@@ -1344,8 +1344,8 @@ export class DatabaseService {
                 params.push(networkId);
             }
             this.db.prepare(query).run(...params);
-        } catch (e) {
-            console.warn(`Notice updating online status for ${mac}:`, e);
+        } catch (e: any) {
+            this.log.warn({ mac, err: e }, `Notice updating online status for ${mac}: ${e?.message || e}`);
         }
     }
 
@@ -1911,7 +1911,13 @@ export class DatabaseService {
                         const matchTypeLabel = isHighConfidence
                             ? `HIGH CONFIDENCE (${bestScore}%)`
                             : `CONTINUITY FUSING (${bestScore}%)`;
-                        console.log(`🎯 [${matchTypeLabel}] Device ${scanned.ip} (${scanned.mac}) matched profile "${bestProfile.alias}" (${bestReasons.join(', ')})`);
+                        this.log.info({
+                            matchType: matchTypeLabel,
+                            ip: scanned.ip,
+                            mac: scanned.mac,
+                            profileAlias: bestProfile.alias,
+                            reasons: bestReasons
+                        }, `[${matchTypeLabel}] Device ${scanned.ip} (${scanned.mac}) matched profile "${bestProfile.alias}" (${bestReasons.join(', ')})`);
                         // Auto-reblock HANYA bila perangkat dengan profil ini pernah diblokir DI JARINGAN INI!
                         const wasBlockedInThisNetwork = existingDevices.some(
                             d => d.network_id === networkId && d.profile_id === bestProfile.id && d.is_blocked
@@ -1948,7 +1954,13 @@ export class DatabaseService {
                         }
                         archiveDevicesStmt.run(networkId, profileId, macKey);
                     } else if (bestProfile && bestScore >= 50) {
-                        console.log(`⚠️ [CANDIDATE PROFILE REVIEW (${bestScore}%)] Device ${scanned.ip} (${scanned.mac}) looks similar to profile "${bestProfile.alias}" (${bestReasons.join(', ')}), marked as candidate without blocking.`);
+                        this.log.info({
+                            score: bestScore,
+                            ip: scanned.ip,
+                            mac: scanned.mac,
+                            profileAlias: bestProfile.alias,
+                            reasons: bestReasons
+                        }, `[CANDIDATE PROFILE REVIEW (${bestScore}%)] Device ${scanned.ip} (${scanned.mac}) looks similar to profile "${bestProfile.alias}", marked as candidate without blocking.`);
                         candidateProfileId = bestProfile.id;
                         matchedBy = 'candidate_review';
                         isBlocked = false;
@@ -2265,7 +2277,7 @@ export class DatabaseService {
     async close(): Promise<void> {
         try {
             this.db.close();
-            console.log('✅ SQLite database connection closed');
+            this.log.info('SQLite database connection closed');
         } catch (err) {
             // Already closed
         }

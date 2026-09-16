@@ -6,6 +6,7 @@ import * as fs from 'fs';
 import WebSocket from 'ws';
 import { Device, ProfileRefreshResponse } from '../types';
 import { env } from '../config/env';
+import { createChildLogger } from '../utils/logger';
 
 export function normalizeProfileIpv6Addresses(addresses: readonly unknown[]): string[] {
     const normalized = new Set<string>();
@@ -89,6 +90,7 @@ export interface ScanOptions {
 }
 
 export class PythonBridge extends EventEmitter {
+    private readonly log = createChildLogger('PythonBridge');
     private process: ChildProcess | null = null;
     private baseUrl: string;
     private wsUrl: string;
@@ -225,7 +227,7 @@ export class PythonBridge extends EventEmitter {
         this.consecutiveHealthFailures = 0;
         if (this.ready) return;
         this.ready = true;
-        console.log(`✅ Python FastAPI microservice kembali terjangkau di ${this.baseUrl}`);
+        this.log.info({ baseUrl: this.baseUrl }, `Python FastAPI microservice kembali terjangkau di ${this.baseUrl}`);
         if (!this.ws) {
             this.connectWebSocket();
         }
@@ -238,7 +240,7 @@ export class PythonBridge extends EventEmitter {
     private markUnreachable(): void {
         if (!this.ready) return;
         this.ready = false;
-        console.warn(`⚠️ Python FastAPI microservice (:8001) tidak lagi terjangkau — beralih ke mode offline.`);
+        this.log.warn({ baseUrl: this.baseUrl }, 'Python FastAPI microservice (:8001) tidak lagi terjangkau — beralih ke mode offline.');
     }
 
     /**
@@ -289,7 +291,7 @@ export class PythonBridge extends EventEmitter {
     }
 
     async start(): Promise<void> {
-        console.log(`🔍 Checking Python FastAPI microservice at ${this.baseUrl}...`);
+        this.log.debug({ baseUrl: this.baseUrl }, `Checking Python FastAPI microservice at ${this.baseUrl}...`);
         // Monitor kesehatan periodik: menjaga WS tetap hidup melintasi restart/blip engine (re-arm
         // WS mati walau HTTP masih sehat), agar event DHCP & re-block real-time tak berhenti.
         this.startHealthMonitor();
@@ -299,7 +301,7 @@ export class PythonBridge extends EventEmitter {
         while (attempts < maxAttempts) {
             const ok = await this.checkHealth();
             if (ok) {
-                console.log(`✅ Python FastAPI microservice is ready on ${this.baseUrl} (in ${attempts * 0.5}s)`);
+                this.log.info({ baseUrl: this.baseUrl, duration_s: attempts * 0.5 }, `Python FastAPI microservice is ready on ${this.baseUrl} (in ${attempts * 0.5}s)`);
                 // checkHealth() sudah melewati fetchWithTimeout -> markReachable(),
                 // jadi `ready` dan WebSocket sudah terpasang. Jangan sambung dua kali.
                 this.markReachable();
@@ -312,7 +314,7 @@ export class PythonBridge extends EventEmitter {
                 const servicePath = this.getServicePath();
                 if (fs.existsSync(servicePath)) {
                     try {
-                        console.log(`🚀 Spawning Python FastAPI: ${pythonPath} -m src.main`);
+                        this.log.info({ pythonPath }, `Spawning Python FastAPI: ${pythonPath} -m src.main`);
                         this.process = spawn(pythonPath, ['-m', 'src.main'], {
                             cwd: servicePath,
                             env: { ...process.env, PYTHONUNBUFFERED: '1', PYTHONIOENCODING: 'utf-8' },
@@ -322,16 +324,16 @@ export class PythonBridge extends EventEmitter {
                         this.isInternalSpawn = true;
 
                         this.process.on('error', (err) => {
-                            console.warn(`⚠️ [PythonBridge] Process spawn error (handled): ${err.message}`);
+                            this.log.warn({ err }, `Process spawn error (handled): ${err.message}`);
                         });
 
                         this.process.on('exit', (code, signal) => {
-                            console.log(`Python process exited with code ${code} (signal: ${signal})`);
+                            this.log.info({ code, signal }, `Python process exited with code ${code} (signal: ${signal})`);
                             this.ready = false;
                             this.emit('exit', code);
                         });
                     } catch (err: any) {
-                        console.warn(`⚠️ [PythonBridge] Could not spawn Python: ${err.message}`);
+                        this.log.warn({ err }, `Could not spawn Python: ${err.message}`);
                     }
                 }
             }
@@ -343,7 +345,7 @@ export class PythonBridge extends EventEmitter {
         // Menyerah di sini bukan vonis permanen: probe tanpa guard (checkHealth,
         // getDiagnostics) tetap memanggil fetchWithTimeout, yang akan memanggil
         // markReachable() begitu Python akhirnya menjawab.
-        console.warn(`⚠️ Python FastAPI microservice not responding on ${this.baseUrl} after ${maxAttempts * 0.5}s. Continuing in offline mode (akan pulih otomatis bila engine menyusul aktif).`);
+        this.log.warn({ baseUrl: this.baseUrl, attempts: maxAttempts }, `Python FastAPI microservice not responding on ${this.baseUrl} after ${maxAttempts * 0.5}s. Continuing in offline mode.`);
     }
 
     private latestTelemetry: any = null;
@@ -351,7 +353,7 @@ export class PythonBridge extends EventEmitter {
 
     private handlePythonEvent(event: any): void {
         if (event.event === 'network_changed' || event.error === 'NETWORK_CHANGED') {
-            console.log('📡 Python Broadcast: Network Changed', event.data);
+            this.log.info({ event: 'network_changed', data: event.data }, 'Python Broadcast: Network Changed');
             this.emit('networkChanged', event.data);
         } else if (event.event === 'telemetry') {
             this.latestTelemetry = event.data;
@@ -369,10 +371,10 @@ export class PythonBridge extends EventEmitter {
             }
             this.emit('telemetry', event.data);
         } else if (event.event === 'dhcp_device_discovered') {
-            console.log('📱 [DHCP Sniffer 3B] Perangkat Baru Tertangkap:', event.data);
+            this.log.info({ event: 'dhcp_device_discovered', data: event.data }, '[DHCP Sniffer 3B] Perangkat Baru Tertangkap');
             this.emit('dhcpDevice', event.data);
         } else if (event.event === 'rogue_dhcp_detected') {
-            console.warn('🚨 [DHCP Sniffer 3B] ROGUE DHCP SERVER TERDETEKSI:', event.data);
+            this.log.warn({ event: 'rogue_dhcp_detected', data: event.data }, '[DHCP Sniffer 3B] ROGUE DHCP SERVER TERDETEKSI');
             this.emit('rogueDhcp', event.data);
         } else if (event.event === 'gateway_dns_query') {
             this.emit('gatewayDnsQuery', event.data);
@@ -452,7 +454,7 @@ export class PythonBridge extends EventEmitter {
             this.ws = new WebSocket(this.wsUrl, token ? { headers: { 'x-sentinel-token': token } } : undefined);
 
             this.ws.on('error', (err) => {
-                console.warn(`⚠️ [PythonBridge] WebSocket error (handled): ${err.message}`);
+                this.log.warn({ err }, `WebSocket error (handled): ${err.message}`);
             });
 
             this.ws.on('open', () => {
@@ -460,7 +462,7 @@ export class PythonBridge extends EventEmitter {
                     clearTimeout(this.reconnectTimer);
                     this.reconnectTimer = null;
                 }
-                console.log(`🔌 Connected to Python event stream via WebSocket (${this.wsUrl})`);
+                this.log.info({ wsUrl: this.wsUrl }, `Connected to Python event stream via WebSocket (${this.wsUrl})`);
                 // Keandalan deteksi restart (FASE-1): bila ini RE-connect (pernah terhubung lalu putus),
                 // Python bisa saja baru restart & kehilangan semua sesi spoof. Pancarkan 'pythonReachable'
                 // agar DeviceManager merekonsiliasi blok — walau transisi markReachable terlewat karena
@@ -477,7 +479,7 @@ export class PythonBridge extends EventEmitter {
                     const event = JSON.parse(raw.toString());
                     this.handlePythonEvent(event);
                 } catch (e) {
-                    console.debug('Failed to parse Python WS event:', e);
+                    this.log.debug({ err: e }, 'Failed to parse Python WS event');
                 }
             });
 
@@ -500,12 +502,12 @@ export class PythonBridge extends EventEmitter {
             });
         } catch (e) {
             this.ws = null;
-            console.warn('Error initiating Python WebSocket connection:', e);
+            this.log.warn({ err: e }, 'Error initiating Python WebSocket connection');
         }
     }
 
     async scan(options: ScanOptions = {}): Promise<Device[]> {
-        console.log('📡 [HTTP Call -> Python] POST /api/scan (Non-Blocking)...');
+        this.log.debug({ endpoint: '/api/scan' }, '[HTTP Call -> Python] POST /api/scan (Non-Blocking)...');
         const skipMulticastWakeup = options.skipMulticastWakeup === true;
         const res = await this.fetchWithTimeout(`${this.baseUrl}/api/scan`, {
             method: 'POST',
@@ -529,7 +531,7 @@ export class PythonBridge extends EventEmitter {
         gatewayIpv6?: string,
         blackhole: boolean = false
     ): Promise<string> {
-        console.log(`📡 [HTTP Call -> Python] POST /api/spoof/start for ${victimIp} (limit: ${speedLimit}%, IPv6: ${victimIpv6 || 'none'}, blackhole: ${blackhole})...`);
+        this.log.info({ endpoint: '/api/spoof/start', victimIp, victimMac, speedLimit, victimIpv6, blackhole }, `[HTTP Call -> Python] POST /api/spoof/start for ${victimIp} (limit: ${speedLimit}%, IPv6: ${victimIpv6 || 'none'}, blackhole: ${blackhole})`);
         const res = await this.fetchWithTimeout(`${this.baseUrl}/api/spoof/start`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -550,7 +552,7 @@ export class PythonBridge extends EventEmitter {
     }
 
     async setSpoofLimit(sessionId: string, speedLimit: number): Promise<void> {
-        console.log(`📡 [HTTP Call -> Python] POST /api/spoof/limit for session ${sessionId} (${speedLimit}%)...`);
+        this.log.info({ endpoint: '/api/spoof/limit', sessionId, speedLimit }, `[HTTP Call -> Python] POST /api/spoof/limit for session ${sessionId} (${speedLimit}%)`);
         const res = await this.fetchWithTimeout(`${this.baseUrl}/api/spoof/limit`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -561,7 +563,7 @@ export class PythonBridge extends EventEmitter {
     }
 
     async stopSpoof(sessionId: string): Promise<void> {
-        console.log(`📡 [HTTP Call -> Python] POST /api/spoof/stop for session ${sessionId}...`);
+        this.log.info({ endpoint: '/api/spoof/stop', sessionId }, `[HTTP Call -> Python] POST /api/spoof/stop for session ${sessionId}`);
         const res = await this.fetchWithTimeout(`${this.baseUrl}/api/spoof/stop`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -572,13 +574,13 @@ export class PythonBridge extends EventEmitter {
     }
 
     async stopAll(): Promise<void> {
-        console.log('📡 [HTTP Call -> Python] POST /api/spoof/stop_all...');
+        this.log.info({ endpoint: '/api/spoof/stop_all' }, '[HTTP Call -> Python] POST /api/spoof/stop_all');
         const res = await this.fetchWithTimeout(`${this.baseUrl}/api/spoof/stop_all`, { method: 'POST' });
         await this.readMutationResponse(res, 'Stop all spoof sessions');
     }
 
     async startRedirect(victimIp: string, victimMac: string, gatewayIp: string, gatewayMac: string, redirectUrl: string, instagramUsername: string = ''): Promise<any> {
-        console.log(`📡 [HTTP Call -> Python] POST /api/redirect/start for ${victimIp} -> ${redirectUrl}...`);
+        this.log.info({ endpoint: '/api/redirect/start', victimIp, redirectUrl }, `[HTTP Call -> Python] POST /api/redirect/start for ${victimIp} -> ${redirectUrl}`);
         const res = await this.fetchWithTimeout(`${this.baseUrl}/api/redirect/start`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -597,7 +599,7 @@ export class PythonBridge extends EventEmitter {
     }
 
     async stopRedirect(victimIp: string): Promise<void> {
-        console.log(`📡 [HTTP Call -> Python] POST /api/redirect/stop for ${victimIp}...`);
+        this.log.info({ endpoint: '/api/redirect/stop', victimIp }, `[HTTP Call -> Python] POST /api/redirect/stop for ${victimIp}`);
         const res = await this.fetchWithTimeout(`${this.baseUrl}/api/redirect/stop`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -619,7 +621,7 @@ export class PythonBridge extends EventEmitter {
     }
 
     async startTransparentGateway(victimIp: string, victimMac: string, gatewayIp: string, gatewayMac: string): Promise<any> {
-        console.log(`📡 [HTTP Call -> Python] POST /api/gateway/start for ${victimIp}...`);
+        this.log.info({ endpoint: '/api/gateway/start', victimIp }, `[HTTP Call -> Python] POST /api/gateway/start for ${victimIp}`);
         const res = await this.fetchWithTimeout(`${this.baseUrl}/api/gateway/start`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -636,7 +638,7 @@ export class PythonBridge extends EventEmitter {
     }
 
     async stopTransparentGateway(victimIp: string): Promise<void> {
-        console.log(`📡 [HTTP Call -> Python] POST /api/gateway/stop for ${victimIp}...`);
+        this.log.info({ endpoint: '/api/gateway/stop', victimIp }, `[HTTP Call -> Python] POST /api/gateway/stop for ${victimIp}`);
         const res = await this.fetchWithTimeout(`${this.baseUrl}/api/gateway/stop`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -731,7 +733,7 @@ export class PythonBridge extends EventEmitter {
     }
 
     async deepScanPorts(ip: string, ports?: number[]): Promise<any> {
-        console.log(`📡 [HTTP Call -> Python] POST /api/scan/ports for ${ip}...`);
+        this.log.info({ endpoint: '/api/scan/ports', ip }, `[HTTP Call -> Python] POST /api/scan/ports for ${ip}`);
         const res = await this.fetchWithTimeout(`${this.baseUrl}/api/scan/ports`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -743,7 +745,7 @@ export class PythonBridge extends EventEmitter {
     }
 
     async optimizeDhcpProfiling(): Promise<{ success: boolean; message?: string; data?: any }> {
-        console.log('📡 [HTTP Call -> Python] POST /api/dhcp/wakeup (Teknik 3B Optimization)...');
+        this.log.info({ endpoint: '/api/dhcp/wakeup' }, '[HTTP Call -> Python] POST /api/dhcp/wakeup (Teknik 3B Optimization)');
         const res = await this.fetchWithTimeout(`${this.baseUrl}/api/dhcp/wakeup`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' }
@@ -757,7 +759,7 @@ export class PythonBridge extends EventEmitter {
         targets: Array<{ ip: string; mac: string; ipv6_addresses: string[] }>,
         observationSeconds = 5
     ): Promise<ProfileRefreshResponse> {
-        console.log(`📡 [HTTP Call -> Python] POST /api/network/profile-refresh untuk ${targets.length} target...`);
+        this.log.info({ endpoint: '/api/network/profile-refresh', targetCount: targets.length }, `[HTTP Call -> Python] POST /api/network/profile-refresh untuk ${targets.length} target`);
         const safeTargets = targets.map(target => ({
             ...target,
             ipv6_addresses: normalizeProfileIpv6Addresses(target.ipv6_addresses || [])
@@ -1144,7 +1146,7 @@ export class PythonBridge extends EventEmitter {
             this.ws = null;
         }
         if (this.isInternalSpawn && this.process) {
-            console.log('🛑 Terminating Python child process...');
+            this.log.info('Terminating Python child process...');
             this.process.kill('SIGTERM');
             this.process = null;
         }

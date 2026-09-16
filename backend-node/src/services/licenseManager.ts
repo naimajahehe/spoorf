@@ -4,6 +4,7 @@ import { DatabaseService } from './database';
 import { LicenseTier, UserLicense, AuthUser, CachedLicense, AuthStatusResponse } from '../types';
 import { env } from '../config/env';
 import { ForbiddenError } from '../errors';
+import { createChildLogger } from '../utils/logger';
 
 /**
  * KEAMANAN (Anti-SSRF): apakah `candidate` cloudUrl aman menerima kredensial + Session ID.
@@ -76,6 +77,7 @@ export class FeatureLockedError extends ForbiddenError {
 }
 
 export class LicenseManager extends EventEmitter {
+    private readonly log = createChildLogger('LicenseManager');
     private db: DatabaseService;
     private currentLicense: UserLicense;
     private currentUser: AuthUser | null = null;
@@ -134,16 +136,16 @@ export class LicenseManager extends EventEmitter {
                     if (cached.hwid || (cached as any).session_id) {
                         this.sessionId = (cached as any).session_id || cached.hwid;
                     }
-                    console.log(`🔑 [LicenseManager] Restored cached ${cached.tier.toUpperCase()} license for ${this.currentUser.email}`);
+                    this.log.info({ tier: cached.tier, email: this.currentUser?.email }, `Restored cached ${cached.tier.toUpperCase()} license for ${this.currentUser?.email}`);
                 } else {
-                    console.warn('⚠️ [LicenseManager] Cached license grace period expired. Reverting to Free tier.');
+                    this.log.warn('Cached license grace period expired. Reverting to Free tier.');
                     this.currentLicense = { ...DEFAULT_FREE_LICENSE };
                     this.currentUser = null;
                     this.currentToken = null;
                 }
             }
-        } catch (err) {
-            console.warn('Notice loading license cache:', err);
+        } catch (err: any) {
+            this.log.warn({ err }, `Notice loading license cache: ${err?.message || err}`);
             this.currentLicense = { ...DEFAULT_FREE_LICENSE };
         }
         this.isInitialized = true;
@@ -189,7 +191,7 @@ export class LicenseManager extends EventEmitter {
             if (isTrustedCloudUrl(credentials.cloudUrl, this.cloudEndpoint)) {
                 targetUrl = credentials.cloudUrl;
             } else {
-                console.warn(`⚠️ [Security] Menolak cloudUrl tidak terpercaya: ${credentials.cloudUrl}`);
+                this.log.warn({ rejectedUrl: credentials.cloudUrl }, `[Security] Menolak cloudUrl tidak terpercaya: ${credentials.cloudUrl}`);
             }
         }
 
