@@ -1,12 +1,16 @@
 import { Request, Response } from 'express';
-import { DeviceManager } from '../services/deviceManager';
+import { IDeviceManager } from '../interfaces';
 
 export class SystemController {
-    constructor(private readonly deviceManager: DeviceManager) {}
+    constructor(private readonly deviceManager: IDeviceManager) {}
 
     getHealth = (_req: Request, res: Response): void => {
-        const memoryFallback = this.deviceManager.isUsingMemoryFallback();
-        const pythonReady = this.deviceManager.isPythonReady();
+        const memoryFallback = typeof this.deviceManager.isUsingMemoryFallback === 'function'
+            ? this.deviceManager.isUsingMemoryFallback()
+            : false;
+        const pythonReady = typeof this.deviceManager.isPythonReady === 'function'
+            ? this.deviceManager.isPythonReady()
+            : true;
         res.json({
             status: pythonReady ? 'ok' : 'degraded',
             services: {
@@ -24,7 +28,9 @@ export class SystemController {
     };
 
     getDiagnostics = async (_req: Request, res: Response): Promise<void> => {
-        const diag = await this.deviceManager.getSystemDiagnostics();
+        const diag = typeof this.deviceManager.getSystemDiagnostics === 'function'
+            ? await this.deviceManager.getSystemDiagnostics()
+            : {};
         res.json(diag);
     };
 

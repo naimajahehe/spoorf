@@ -1,9 +1,9 @@
 import { Request, Response } from 'express';
-import { DeviceManager } from '../services/deviceManager';
+import { IDeviceManager } from '../interfaces';
 import { InvariantViolationError } from '../errors';
 
 export class DeviceController {
-    constructor(private readonly deviceManager: DeviceManager) {}
+    constructor(private readonly deviceManager: IDeviceManager) {}
 
     scanNetwork = async (_req: Request, res: Response): Promise<void> => {
         const devices = await this.deviceManager.scanNetwork();
@@ -15,7 +15,10 @@ export class DeviceController {
     };
 
     getDevices = (_req: Request, res: Response): void => {
-        const devices = this.deviceManager.scopeForDisplay(this.deviceManager.getDevices());
+        const raw = this.deviceManager.getDevices();
+        const devices = typeof this.deviceManager.scopeForDisplay === 'function'
+            ? this.deviceManager.scopeForDisplay(raw)
+            : raw;
         res.json({
             success: true,
             devices,

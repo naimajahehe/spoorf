@@ -1,11 +1,11 @@
 import { Router } from 'express';
-import { LicenseManager } from '../services/licenseManager';
+import { ILicenseManager } from '../interfaces';
 import { AuthController } from '../controllers/authController';
 import { safeHandler } from '../middlewares/errorHandler';
 import { validateAndHandle } from '../middlewares/validation';
 import { LoginBodySchema, ActivateBodySchema } from '../schemas/authSchemas';
 
-export function registerAuthRoutes(router: Router, licenseManager?: LicenseManager): void {
+export function registerAuthRoutes(router: Router, licenseManager?: ILicenseManager): void {
     const controller = new AuthController(licenseManager);
 
     router.get('/api/auth/status', safeHandler(controller.getStatus));
@@ -24,7 +24,7 @@ export function registerAuthRoutes(router: Router, licenseManager?: LicenseManag
     router.post('/api/auth/logout', safeHandler(controller.logout));
 }
 
-export function createAuthRouter(licenseManager?: LicenseManager): Router {
+export function createAuthRouter(licenseManager?: ILicenseManager): Router {
     const router = Router();
     registerAuthRoutes(router, licenseManager);
     return router;

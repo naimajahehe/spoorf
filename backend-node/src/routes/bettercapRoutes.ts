@@ -1,6 +1,5 @@
 import { Router } from 'express';
-import { DeviceManager } from '../services/deviceManager';
-import { LicenseManager } from '../services/licenseManager';
+import { IDeviceManager, IPythonBridge, ILicenseManager } from '../interfaces';
 import { BettercapController } from '../controllers/bettercapController';
 import { safeHandler } from '../middlewares/errorHandler';
 import { validateAndHandle } from '../middlewares/validation';
@@ -16,10 +15,10 @@ import {
 
 export function registerBettercapRoutes(
     router: Router,
-    deviceManager: DeviceManager,
-    licenseManager?: LicenseManager
+    service: IDeviceManager | IPythonBridge,
+    licenseManager?: ILicenseManager
 ): void {
-    const controller = new BettercapController(deviceManager, licenseManager);
+    const controller = new BettercapController(service, licenseManager);
 
     router.get('/api/bettercap/status', safeHandler(controller.getStatus));
     router.get('/api/bettercap/dns/rules', safeHandler(controller.getDnsRules));
@@ -65,10 +64,10 @@ export function registerBettercapRoutes(
 }
 
 export function createBettercapRouter(
-    deviceManager: DeviceManager,
-    licenseManager?: LicenseManager
+    service: IDeviceManager | IPythonBridge,
+    licenseManager?: ILicenseManager
 ): Router {
     const router = Router();
-    registerBettercapRoutes(router, deviceManager, licenseManager);
+    registerBettercapRoutes(router, service, licenseManager);
     return router;
 }

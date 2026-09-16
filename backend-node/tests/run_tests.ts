@@ -11,6 +11,7 @@ import { runValidationTests } from './unit_validation.test';
 import { runEnvTests } from './unit_env.test';
 import { runErrorTests } from './unit_errors.test';
 import { runLoggerTests } from './unit_logger.test';
+import { runContainerTests } from './unit_container.test';
 
 async function main() {
     console.log('=====================================================');
@@ -124,6 +125,14 @@ async function main() {
         passed += 6;
     } catch (err: any) {
         console.error('❌ Structured Logging & Tracing Test Failed:', err);
+        failed++;
+    }
+
+    try {
+        await runContainerTests();
+        passed += 3;
+    } catch (err: any) {
+        console.error('❌ ServiceContainer Test Failed:', err);
         failed++;
     }
 

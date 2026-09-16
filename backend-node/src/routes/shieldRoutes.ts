@@ -1,12 +1,12 @@
 import { Router } from 'express';
-import { DeviceManager } from '../services/deviceManager';
+import { IDeviceManager, IPythonBridge } from '../interfaces';
 import { ShieldController } from '../controllers/shieldController';
 import { safeHandler } from '../middlewares/errorHandler';
 import { validateAndHandle } from '../middlewares/validation';
 import { ShieldToggleBodySchema, ShieldModeBodySchema } from '../schemas/shieldSchemas';
 
-export function registerShieldRoutes(router: Router, deviceManager: DeviceManager): void {
-    const controller = new ShieldController(deviceManager);
+export function registerShieldRoutes(router: Router, service: IDeviceManager | IPythonBridge): void {
+    const controller = new ShieldController(service);
 
     router.get('/api/shield/status', safeHandler(controller.getStatus));
 
@@ -24,8 +24,8 @@ export function registerShieldRoutes(router: Router, deviceManager: DeviceManage
     router.delete('/api/shield/threats', safeHandler(controller.clearThreats));
 }
 
-export function createShieldRouter(deviceManager: DeviceManager): Router {
+export function createShieldRouter(service: IDeviceManager | IPythonBridge): Router {
     const router = Router();
-    registerShieldRoutes(router, deviceManager);
+    registerShieldRoutes(router, service);
     return router;
 }

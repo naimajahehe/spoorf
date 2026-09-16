@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { DeviceManager } from '../services/deviceManager';
+import { IDeviceManager } from '../interfaces';
 import { GatewayController } from '../controllers/gatewayController';
 import { safeHandler } from '../middlewares/errorHandler';
 import { validateAndHandle } from '../middlewares/validation';
@@ -10,7 +10,7 @@ import {
     GatewayLogsQuerySchema
 } from '../schemas/gatewaySchemas';
 
-export function registerGatewayRoutes(router: Router, deviceManager: DeviceManager): void {
+export function registerGatewayRoutes(router: Router, deviceManager: IDeviceManager): void {
     const controller = new GatewayController(deviceManager);
 
     router.get('/api/gateway/status', safeHandler(controller.getStatus));
@@ -42,7 +42,7 @@ export function registerGatewayRoutes(router: Router, deviceManager: DeviceManag
     router.delete('/api/gateway/logs', safeHandler(controller.clearDnsLogs));
 }
 
-export function createGatewayRouter(deviceManager: DeviceManager): Router {
+export function createGatewayRouter(deviceManager: IDeviceManager): Router {
     const router = Router();
     registerGatewayRoutes(router, deviceManager);
     return router;

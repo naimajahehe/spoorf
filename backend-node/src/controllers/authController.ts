@@ -1,9 +1,9 @@
 import { Request, Response } from 'express';
-import { LicenseManager } from '../services/licenseManager';
+import { ILicenseManager } from '../interfaces';
 import { AppError, BadRequestError } from '../errors';
 
 export class AuthController {
-    constructor(private readonly licenseManager?: LicenseManager) {}
+    constructor(private readonly licenseManager?: ILicenseManager) {}
 
     getStatus = (_req: Request, res: Response): void => {
         if (!this.licenseManager) {

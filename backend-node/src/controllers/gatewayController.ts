@@ -1,8 +1,8 @@
 import { Request, Response } from 'express';
-import { DeviceManager } from '../services/deviceManager';
+import { IDeviceManager } from '../interfaces';
 
 export class GatewayController {
-    constructor(private readonly deviceManager: DeviceManager) {}
+    constructor(private readonly deviceManager: IDeviceManager) {}
 
     getStatus = async (_req: Request, res: Response): Promise<void> => {
         const status = await this.deviceManager.getTransparentGatewayStatus();

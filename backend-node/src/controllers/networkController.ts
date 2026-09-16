@@ -1,8 +1,8 @@
 import { Request, Response } from 'express';
-import { DeviceManager } from '../services/deviceManager';
+import { IDeviceManager } from '../interfaces';
 
 export class NetworkController {
-    constructor(private readonly deviceManager: DeviceManager) {}
+    constructor(private readonly deviceManager: IDeviceManager) {}
 
     getTelemetry = async (_req: Request, res: Response): Promise<void> => {
         const telemetry = await this.deviceManager.getTelemetry();

@@ -3,10 +3,7 @@ import cors from 'cors';
 import helmet from 'helmet';
 import { createServer } from 'http';
 import { env, validateEnv } from './config/env';
-import { PythonBridge } from './services/pythonBridge';
-import { DatabaseService } from './services/database';
-import { LicenseManager } from './services/licenseManager';
-import { DeviceManager } from './services/deviceManager';
+import { createContainer } from './container';
 import { createRouter } from './api/routes';
 import { WebSocketManager } from './websocket';
 import { corsOriginCallback, hostGuard, apiTokenGuard } from './security';
@@ -44,15 +41,13 @@ app.use(hostGuard);
 app.use(apiTokenGuard);
 app.use(express.json());
 
-// Services
-const pythonBridge = new PythonBridge();
-const databaseService = new DatabaseService();
-const licenseManager = new LicenseManager(databaseService);
-const deviceManager = new DeviceManager(pythonBridge, databaseService, licenseManager);
-const wsManager = new WebSocketManager(server, deviceManager, licenseManager);
+// Composition Root (Service Container)
+const container = createContainer();
+const { pythonBridge, databaseService, licenseManager, deviceManager } = container;
+const wsManager = new WebSocketManager(server, deviceManager as any, licenseManager as any);
 
 // Routes
-app.use('/', createRouter(deviceManager, licenseManager));
+app.use('/', createRouter(container));
 
 // Centralized Error Handler (Express 4-parameter error middleware)
 app.use(centralizedErrorHandler);
@@ -60,10 +55,8 @@ app.use(centralizedErrorHandler);
 // Start
 async function start() {
     try {
-        logger.info({ module: 'Boot' }, 'Initializing SQLite database...');
-        await databaseService.init();
-        await licenseManager.init();
-        await deviceManager.init();
+        logger.info({ module: 'Boot' }, 'Initializing service container...');
+        await container.init();
 
         const PORT = env.PORT;
         const HOST = env.HOST;

@@ -1,9 +1,9 @@
 import { Router } from 'express';
-import { DeviceManager } from '../services/deviceManager';
+import { IDeviceManager } from '../interfaces';
 import { SystemController } from '../controllers/systemController';
 import { safeHandler } from '../middlewares/errorHandler';
 
-export function registerSystemRoutes(router: Router, deviceManager: DeviceManager): void {
+export function registerSystemRoutes(router: Router, deviceManager: IDeviceManager): void {
     const controller = new SystemController(deviceManager);
 
     router.get(['/health', '/api/health'], safeHandler(controller.getHealth));
@@ -12,7 +12,7 @@ export function registerSystemRoutes(router: Router, deviceManager: DeviceManage
     router.get('/api/gateway', safeHandler(controller.getGateway));
 }
 
-export function createSystemRouter(deviceManager: DeviceManager): Router {
+export function createSystemRouter(deviceManager: IDeviceManager): Router {
     const router = Router();
     registerSystemRoutes(router, deviceManager);
     return router;

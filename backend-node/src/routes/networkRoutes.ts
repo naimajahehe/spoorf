@@ -1,9 +1,9 @@
 import { Router } from 'express';
-import { DeviceManager } from '../services/deviceManager';
+import { IDeviceManager } from '../interfaces';
 import { NetworkController } from '../controllers/networkController';
 import { safeHandler } from '../middlewares/errorHandler';
 
-export function registerNetworkRoutes(router: Router, deviceManager: DeviceManager): void {
+export function registerNetworkRoutes(router: Router, deviceManager: IDeviceManager): void {
     const controller = new NetworkController(deviceManager);
 
     router.get('/api/telemetry', safeHandler(controller.getTelemetry));
@@ -15,7 +15,7 @@ export function registerNetworkRoutes(router: Router, deviceManager: DeviceManag
     router.get('/api/network/ap-isolation', safeHandler(controller.getApIsolationStatus));
 }
 
-export function createNetworkRouter(deviceManager: DeviceManager): Router {
+export function createNetworkRouter(deviceManager: IDeviceManager): Router {
     const router = Router();
     registerNetworkRoutes(router, deviceManager);
     return router;

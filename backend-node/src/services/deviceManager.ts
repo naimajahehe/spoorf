@@ -7,6 +7,7 @@ import { LicenseManager, FeatureLimitError, FeatureLockedError } from './license
 import { Device, CutStatus, ProfileAssessment, ProfileRefreshResult } from '../types';
 import type { ScanOptions } from './pythonBridge';
 import { createChildLogger } from '../utils/logger';
+import { IDeviceManager } from '../interfaces';
 
 // Retensi: perangkat tamu yang offline lebih lama dari ini diarsipkan (bukan dihapus)
 // agar daftar mencerminkan jaringan nyata, bukan riwayat semua tamu. Lihat
@@ -282,7 +283,7 @@ interface PendingGamingDisable {
     result?: any;
 }
 
-export class DeviceManager extends EventEmitter {
+export class DeviceManager extends EventEmitter implements IDeviceManager {
     private readonly log = createChildLogger('DeviceManager');
     private devices: Map<string, Device> = new Map();
     private currentNetworkId: string = 'net_default';

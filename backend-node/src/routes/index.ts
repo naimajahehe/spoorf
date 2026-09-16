@@ -1,6 +1,5 @@
 import { Router } from 'express';
-import { DeviceManager } from '../services/deviceManager';
-import { LicenseManager } from '../services/licenseManager';
+import { IDeviceManager, ILicenseManager, IServiceContainer } from '../interfaces';
 import { registerSystemRoutes } from './systemRoutes';
 import { registerDeviceRoutes } from './deviceRoutes';
 import { registerNetworkRoutes } from './networkRoutes';
@@ -12,18 +11,29 @@ import { registerShieldRoutes } from './shieldRoutes';
 import { registerGamingRoutes } from './gamingRoutes';
 
 export function createRouter(
-    deviceManager: DeviceManager,
-    licenseManager?: LicenseManager
+    containerOrDeviceManager: IServiceContainer | IDeviceManager,
+    licenseManager?: ILicenseManager
 ): Router {
     const router = Router();
+
+    let deviceManager: IDeviceManager;
+    let licManager: ILicenseManager | undefined = licenseManager;
+
+    if (containerOrDeviceManager && 'deviceManager' in containerOrDeviceManager && 'databaseService' in containerOrDeviceManager) {
+        const container = containerOrDeviceManager as IServiceContainer;
+        deviceManager = container.deviceManager;
+        licManager = licManager || container.licenseManager;
+    } else {
+        deviceManager = containerOrDeviceManager as IDeviceManager;
+    }
 
     registerSystemRoutes(router, deviceManager);
     registerDeviceRoutes(router, deviceManager);
     registerNetworkRoutes(router, deviceManager);
     registerGatewayRoutes(router, deviceManager);
     registerInterceptorRoutes(router, deviceManager);
-    registerBettercapRoutes(router, deviceManager, licenseManager);
-    registerAuthRoutes(router, licenseManager);
+    registerBettercapRoutes(router, deviceManager, licManager);
+    registerAuthRoutes(router, licManager);
     registerShieldRoutes(router, deviceManager);
     registerGamingRoutes(router, deviceManager);
 

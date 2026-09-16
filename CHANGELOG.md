@@ -2,6 +2,28 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.44] - 2026-09-17
+
+### Tahap 4: Dependency Injection (DI) & Modular Service Decoupling (`backend-node`)
+- **Interface Segregation & Contracts Layer (`src/interfaces/`)**:
+  - Mendefinisikan kontrak interface TypeScript murni untuk seluruh subsistem: `IPythonBridge`, `IDatabaseService`, `ILicenseManager`, `ITrafficService`, `IGamingService`, `IDeviceManager`, dan `IServiceContainer`.
+  - Memastikan seluruh lapisan controller dan middleware bergantung pada kontrak abstraksi, bukan kelas konkret (*Dependency Inversion Principle*).
+- **Composition Root & Service Container (`src/container.ts`)**:
+  - Mengimplementasikan `ServiceContainer` yang mengelola siklus hidup komponen (`databaseService`, `pythonBridge`, `licenseManager`, `trafficService`, `gamingService`, `deviceManager`).
+  - Fungsi factory `createContainer(overrides)` mendukung injeksi mock 100% untuk pengujian unit terisolasi tanpa disk/network I/O.
+  - Inisialisasi bertahap terpusat (`init()`) dan pembersihan graceful (`shutdown()`).
+- **Controller & Route Inversion of Control**:
+  - Melakukan decoupling pada 9 controller domain (`deviceController`, `gamingController`, `bettercapController`, `shieldController`, `interceptorController`, `gatewayController`, `networkController`, `systemController`, `authController`) agar menerima interface terkait.
+  - Memperbarui `createRouter` di `src/routes/index.ts` agar mendukung injeksi container langsung (`createRouter(container)`) dengan tetap menjaga kompatibilitas ke belakang 100% untuk pemanggilan warisan (`createRouter(deviceManager, licenseManager)`).
+- **Application Startup Streamlining (`src/app.ts`)**:
+  - Mengganti inisialisasi manual service dengan `createContainer()`, `container.init()`, dan `registerGracefulShutdown`.
+- **Automated Testing & Full Ecosystem Verification**:
+  - Menambahkan test suite baru `tests/unit_container.test.ts` (3 suite pengujian: default instantiation, dependency injection mock overrides, dan router wiring).
+  - Hasil Node.js tests meningkat dari **69 menjadi 72 tests PASSED (100% Green)**.
+  - Python tests: **379 / 379 PASSED (100% Green)**.
+  - Frontend SPA build: `tsc && vite build` bersih 100%.
+  - Total pengujian otomatis seluruh sistem: **451 tests 100% Green**.
+
 ## [v2.41.43] - 2026-09-17
 
 ### Cloud-Native Observability, Strict Log Contract & OpenTelemetry Tracing (`backend-node`)

@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { DeviceManager } from '../services/deviceManager';
+import { IDeviceManager } from '../interfaces';
 import { DeviceController } from '../controllers/deviceController';
 import { safeHandler } from '../middlewares/errorHandler';
 import { validateAndHandle } from '../middlewares/validation';
@@ -17,7 +17,7 @@ import {
     ScanDevicePortsBodySchema
 } from '../schemas/deviceSchemas';
 
-export function registerDeviceRoutes(router: Router, deviceManager: DeviceManager): void {
+export function registerDeviceRoutes(router: Router, deviceManager: IDeviceManager): void {
     const controller = new DeviceController(deviceManager);
 
     router.get('/api/scan', safeHandler(controller.scanNetwork));
@@ -65,7 +65,7 @@ export function registerDeviceRoutes(router: Router, deviceManager: DeviceManage
     );
 }
 
-export function createDeviceRouter(deviceManager: DeviceManager): Router {
+export function createDeviceRouter(deviceManager: IDeviceManager): Router {
     const router = Router();
     registerDeviceRoutes(router, deviceManager);
     return router;
