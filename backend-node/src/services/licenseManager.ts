@@ -2,6 +2,7 @@ import { EventEmitter } from 'events';
 import crypto from 'crypto';
 import { DatabaseService } from './database';
 import { LicenseTier, UserLicense, AuthUser, CachedLicense, AuthStatusResponse } from '../types';
+import { env } from '../config/env';
 
 /**
  * KEAMANAN (Anti-SSRF): apakah `candidate` cloudUrl aman menerima kredensial + Session ID.
@@ -88,7 +89,7 @@ export class LicenseManager extends EventEmitter {
         super();
         this.db = db;
         this.currentLicense = { ...DEFAULT_FREE_LICENSE };
-        this.cloudEndpoint = cloudEndpoint || process.env.SPOORF_CLOUD_URL || 'https://api.spoorf.app/v1';
+        this.cloudEndpoint = cloudEndpoint || env.SPOORF_CLOUD_URL;
         this.sessionId = crypto.randomUUID();
     }
 
@@ -231,7 +232,7 @@ export class LicenseManager extends EventEmitter {
             // KEAMANAN (P0): fallback ini memberi tier berbayar berdasarkan substring email,
             // sehingga sepele dieksploitasi. Dinonaktifkan secara default; hanya aktif bila
             // operator secara eksplisit menyetel SPOORF_ALLOW_DEMO_LICENSE=true (dev/uji).
-            if (process.env.SPOORF_ALLOW_DEMO_LICENSE !== 'true') {
+            if (!env.SPOORF_ALLOW_DEMO_LICENSE) {
                 throw new Error(
                     'Autentikasi cloud gagal dan lisensi demo dinonaktifkan. ' +
                     'Setel SPOORF_ALLOW_DEMO_LICENSE=true untuk mode uji lokal.'
@@ -301,7 +302,7 @@ export class LicenseManager extends EventEmitter {
         // KEAMANAN (P0): hanya prefix/token eksplisit yang menaikkan tier.
         // Aturan lama "panjang >= 10 char = Pro" memberi Pro ke hampir semua string
         // dan hanya diizinkan pada mode demo (SPOORF_ALLOW_DEMO_LICENSE=true).
-        const demoMode = process.env.SPOORF_ALLOW_DEMO_LICENSE === 'true';
+        const demoMode = Boolean(env.SPOORF_ALLOW_DEMO_LICENSE);
         let newTier: LicenseTier;
         if (cleanKey.startsWith('FREE') || cleanKey.includes('FREE')) {
             newTier = 'free';

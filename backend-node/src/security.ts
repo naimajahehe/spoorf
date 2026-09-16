@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
+import { env } from './config/env';
 
 /**
  * Keamanan sisi-server (P0): allowlist Origin & Host untuk mencegah
@@ -11,11 +12,9 @@ import crypto from 'crypto';
  *    127.0.0.1 sehingga browser menganggapnya same-origin dan tak kirim preflight).
  */
 
-const PORT = process.env.PORT || '5000';
-
 /** Origin ekstra yang diizinkan dari env (comma-separated). */
 function extraOrigins(): string[] {
-    const raw = process.env.ALLOWED_ORIGINS || process.env.CORS_ORIGIN || '';
+    const raw = env.ALLOWED_ORIGINS || env.CORS_ORIGIN || '';
     return raw
         .split(',')
         .map((s) => s.trim())
@@ -24,7 +23,7 @@ function extraOrigins(): string[] {
 
 /** Host ekstra yang diizinkan dari env (comma-separated), mis. "localhost:5173". */
 function extraHosts(): string[] {
-    const raw = process.env.ALLOWED_HOSTS || '';
+    const raw = env.ALLOWED_HOSTS || '';
     return raw
         .split(',')
         .map((s) => s.trim().toLowerCase())
@@ -72,9 +71,9 @@ export function isAllowedHost(host: string | undefined): boolean {
     const h = host.toLowerCase();
 
     const allowed = new Set<string>([
-        `localhost:${PORT}`,
-        `127.0.0.1:${PORT}`,
-        `[::1]:${PORT}`,
+        `localhost:${env.PORT}`,
+        `127.0.0.1:${env.PORT}`,
+        `[::1]:${env.PORT}`,
         // Beberapa klien menghilangkan port default; toleransi loopback tanpa port.
         'localhost',
         '127.0.0.1',
@@ -96,7 +95,7 @@ export function isAllowedHost(host: string | undefined): boolean {
  * (kompatibel mundur). Endpoint kesehatan tetap terbuka untuk readiness probe.
  */
 export function apiTokenGuard(req: Request, res: Response, next: NextFunction): void {
-    const token = process.env.SENTINEL_API_TOKEN;
+    const token = env.SENTINEL_API_TOKEN;
     if (!token) {
         next();
         return;
@@ -129,7 +128,7 @@ export function apiTokenGuard(req: Request, res: Response, next: NextFunction): 
  * (SENTINEL_API_TOKEN tak diset). Dipakai oleh WebSocketManager.
  */
 export function isValidApiToken(token: unknown): boolean {
-    const expected = process.env.SENTINEL_API_TOKEN;
+    const expected = env.SENTINEL_API_TOKEN;
     if (!expected) return true;
     if (typeof token !== 'string') return false;
     const pBuf = Buffer.from(token);

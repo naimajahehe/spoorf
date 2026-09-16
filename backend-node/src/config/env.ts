@@ -42,4 +42,12 @@ export function validateEnv(customEnv: Record<string, any> = process.env): EnvCo
     return result.data;
 }
 
-export const env: EnvConfig = validateEnv();
+export const getEnv = (): EnvConfig => validateEnv(process.env);
+
+export const env: EnvConfig = new Proxy({} as EnvConfig, {
+    get(_target, prop: string | symbol) {
+        if (typeof prop !== 'string') return undefined;
+        const current = validateEnv(process.env);
+        return (current as any)[prop];
+    }
+});

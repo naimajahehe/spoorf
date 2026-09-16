@@ -5,6 +5,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import WebSocket from 'ws';
 import { Device, ProfileRefreshResponse } from '../types';
+import { env } from '../config/env';
 
 export function normalizeProfileIpv6Addresses(addresses: readonly unknown[]): string[] {
     const normalized = new Set<string>();
@@ -101,13 +102,13 @@ export class PythonBridge extends EventEmitter {
 
     constructor() {
         super();
-        this.baseUrl = process.env.PYTHON_SERVICE_URL || 'http://127.0.0.1:8001';
+        this.baseUrl = env.PYTHON_SERVICE_URL;
         this.wsUrl = this.baseUrl.replace(/^http/, 'ws') + '/ws/events';
     }
 
     private getPythonPath(): string {
-        if (process.env.PYTHON_PATH && fs.existsSync(process.env.PYTHON_PATH)) {
-            return process.env.PYTHON_PATH;
+        if (env.PYTHON_PATH && fs.existsSync(env.PYTHON_PATH)) {
+            return env.PYTHON_PATH;
         }
         const isWindows = process.platform === 'win32';
         const venvPython = isWindows
@@ -120,8 +121,8 @@ export class PythonBridge extends EventEmitter {
     }
 
     private getServicePath(): string {
-        if (process.env.PYTHON_SERVICE_PATH) {
-            return path.resolve(process.env.PYTHON_SERVICE_PATH);
+        if (env.PYTHON_SERVICE_PATH) {
+            return path.resolve(env.PYTHON_SERVICE_PATH);
         }
         return path.resolve(__dirname, '../../../python-service');
     }
@@ -131,7 +132,7 @@ export class PythonBridge extends EventEmitter {
      * diset, agar Python engine (:8001) menolak request dari proses lokal lain.
      */
     private authHeaders(base: HeadersInit = {}): HeadersInit {
-        const token = process.env.SENTINEL_API_TOKEN;
+        const token = env.SENTINEL_API_TOKEN;
         if (!token) return base;
         return { ...(base as Record<string, string>), 'x-sentinel-token': token };
     }
@@ -306,7 +307,7 @@ export class PythonBridge extends EventEmitter {
             }
 
             // In dev mode only (when explicitly not managed by electron supervisor), attempt spawn on attempt 1
-            if (attempts === 0 && process.env.AUTO_SPAWN_PYTHON === 'true') {
+            if (attempts === 0 && env.AUTO_SPAWN_PYTHON) {
                 const pythonPath = this.getPythonPath();
                 const servicePath = this.getServicePath();
                 if (fs.existsSync(servicePath)) {
@@ -447,7 +448,7 @@ export class PythonBridge extends EventEmitter {
         }
 
         try {
-            const token = process.env.SENTINEL_API_TOKEN;
+            const token = env.SENTINEL_API_TOKEN;
             this.ws = new WebSocket(this.wsUrl, token ? { headers: { 'x-sentinel-token': token } } : undefined);
 
             this.ws.on('error', (err) => {

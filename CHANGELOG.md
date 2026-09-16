@@ -10,6 +10,9 @@ Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem
   - Memvalidasi URL layanan mikro (`PYTHON_SERVICE_URL`) dan cloud endpoint (`SPOORF_CLOUD_URL`) dengan skema HTTP/HTTPS khusus (`HttpUrlSchema`).
   - Mengonversi tipe data numerik (`PORT`) dan flag boolean (`AUTO_SPAWN_PYTHON`, `SPOORF_ALLOW_DEMO_LICENSE`) secara otomatis dan aman.
   - Menerapkan fungsi `validateEnv()` saat cold boot aplikasi di `src/app.ts`, memastikan server berhenti secara tegas (*fail-fast*) dengan log diagnostik terperinci jika ditemukan variabel lingkungan yang korup atau tidak valid.
+- **Full Codebase Integration & Dynamic Proxy (`src/config/env.ts`)**:
+  - Mengeliminasi seluruh akses langsung `process.env.*` yang tersisa di `security.ts`, `licenseManager.ts`, `pythonBridge.ts`, dan `database.ts`.
+  - Menerapkan `Proxy` dinamis pada `env` singleton sehingga mutasi runtime (mis. pengujian unit token API, flag demo) langsung terefleksi secara aman dan type-safe tanpa masalah *stale cache*.
 - **HTTP Security Hardening dengan Helmet (`src/app.ts`)**:
   - Mengintegrasikan paket keamanan industri `helmet@^8.3.0`.
   - Mengonfigurasi `crossOriginResourcePolicy: { policy: 'cross-origin' }` untuk memastikan kompatibilitas penuh dengan SPA frontend React di port `5173`, WebSocket stream, dan endpoint download CA interceptor.

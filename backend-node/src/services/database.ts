@@ -2,6 +2,7 @@ import Database from 'better-sqlite3';
 import path from 'path';
 import fs from 'fs';
 import { Device, Network, CachedLicense, ProfileAssessment, ProfileEvidence, ProfileStatus } from '../types';
+import { env } from '../config/env';
 
 /**
  * Turunkan network_id dari MAC gateway router — unik per router LAN & bebas kolisi.
@@ -397,10 +398,10 @@ export class DatabaseService {
     constructor(customDbPath?: string) {
         if (customDbPath) {
             this.dbPath = customDbPath;
-        } else if (process.env.DB_FILE) {
-            this.dbPath = path.resolve(process.env.DB_FILE);
-        } else if (process.env.SENTINEL_DB_PATH) {
-            this.dbPath = path.resolve(process.env.SENTINEL_DB_PATH);
+        } else if (env.DB_FILE) {
+            this.dbPath = path.resolve(env.DB_FILE);
+        } else if (env.SENTINEL_DB_PATH) {
+            this.dbPath = path.resolve(env.SENTINEL_DB_PATH);
         } else {
             this.dbPath = path.join(process.cwd(), 'data', 'sentinel.db');
         }
