@@ -3,6 +3,7 @@ import crypto from 'crypto';
 import { DatabaseService } from './database';
 import { LicenseTier, UserLicense, AuthUser, CachedLicense, AuthStatusResponse } from '../types';
 import { env } from '../config/env';
+import { ForbiddenError } from '../errors';
 
 /**
  * KEAMANAN (Anti-SSRF): apakah `candidate` cloudUrl aman menerima kredensial + Session ID.
@@ -60,18 +61,16 @@ export const VIP_TIER_LICENSE: UserLicense = {
     grace_period_until: null
 };
 
-export class FeatureLimitError extends Error {
-    public code = 'FEATURE_LIMIT_EXCEEDED';
+export class FeatureLimitError extends ForbiddenError {
     constructor(message: string) {
-        super(message);
+        super(message, 'FEATURE_LIMIT_EXCEEDED');
         this.name = 'FeatureLimitError';
     }
 }
 
-export class FeatureLockedError extends Error {
-    public code = 'FEATURE_LOCKED_PRO';
+export class FeatureLockedError extends ForbiddenError {
     constructor(message: string) {
-        super(message);
+        super(message, 'FEATURE_LOCKED_PRO');
         this.name = 'FeatureLockedError';
     }
 }

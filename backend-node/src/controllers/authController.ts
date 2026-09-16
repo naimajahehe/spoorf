@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import { LicenseManager } from '../services/licenseManager';
+import { BadRequestError } from '../errors';
 
 export class AuthController {
     constructor(private readonly licenseManager?: LicenseManager) {}
@@ -39,32 +40,31 @@ export class AuthController {
     };
 
     login = async (req: Request, res: Response): Promise<void> => {
-        try {
-            const { email, password, token, cloudUrl } = req.body;
-            if (!this.licenseManager) {
-                res.json({ success: true, user: { email, plan: 'free' }, license: { tier: 'free' } });
-                return;
-            }
+        const { email, password, token, cloudUrl } = req.body;
+        if (!this.licenseManager) {
+            res.json({ success: true, user: { email, plan: 'free' }, license: { tier: 'free' } });
+            return;
+        }
 
+        try {
             const status = await this.licenseManager.login({ email, password, token, cloudUrl });
             res.json({ success: true, ...status });
         } catch (err: any) {
-            res.status(400).json({ success: false, error: err.message });
+            throw new BadRequestError(err?.message || 'Login failed');
         }
     };
 
     activate = async (req: Request, res: Response): Promise<void> => {
-        try {
-            const { key } = req.body;
-            if (!this.licenseManager) {
-                res.status(400).json({ success: false, error: 'License manager not available' });
-                return;
-            }
+        const { key } = req.body;
+        if (!this.licenseManager) {
+            throw new BadRequestError('License manager not available');
+        }
 
+        try {
             const status = await this.licenseManager.activateLicenseKey(key);
             res.json({ success: true, ...status });
         } catch (err: any) {
-            res.status(400).json({ success: false, error: err.message });
+            throw new BadRequestError(err?.message || 'Activation failed');
         }
     };
 

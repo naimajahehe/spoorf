@@ -9,6 +9,7 @@ import { runNetworkIsolationTests } from './unit_network_isolation.test';
 import { runReconciliationTests } from './unit_reconciliation.test';
 import { runValidationTests } from './unit_validation.test';
 import { runEnvTests } from './unit_env.test';
+import { runErrorTests } from './unit_errors.test';
 
 async function main() {
     console.log('=====================================================');
@@ -106,6 +107,14 @@ async function main() {
         passed += 3;
     } catch (err: any) {
         console.error('❌ Env Config Test Failed:', err);
+        failed++;
+    }
+
+    try {
+        await runErrorTests();
+        passed += 6;
+    } catch (err: any) {
+        console.error('❌ Error Hierarchy Test Failed:', err);
         failed++;
     }
 

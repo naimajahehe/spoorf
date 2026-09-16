@@ -1,4 +1,5 @@
 import { Response, Request, NextFunction, RequestHandler } from 'express';
+import { AppError } from '../errors/AppError';
 import {
     FeatureLimitError,
     FeatureLockedError
@@ -16,8 +17,16 @@ import {
  */
 const OPERATIONAL_ERROR_RE = /not found|required|already|invalid|cannot|gateway|tidak valid|tidak ditemukan|tidak merespons|diperlukan|dilindungi|kebal|di luar jangkauan|terkunci|format|batas|upgrade/i;
 
+export interface ErrorEnvelope {
+    success: false;
+    error: string;
+    code?: string;
+}
+
 export function respondError(res: Response, err: any, status = 500): void {
     const msg = typeof err?.message === 'string' ? err.message : '';
+    const isAppErr = err instanceof AppError;
+
     // Klasifikasi offline lewat tipe error yang stabil (BridgeUnavailableError.code),
     // bukan substring pesan yang bisa berubah saat terjemahan diubah.
     const isOffline = isBridgeUnavailable(err);
@@ -26,25 +35,48 @@ export function respondError(res: Response, err: any, status = 500): void {
         err.status >= 400 &&
         err.status < 500;
     const isFeatureRestricted = err instanceof FeatureLimitError || err instanceof FeatureLockedError;
-    if (isOffline || isDownstreamValidation || isFeatureRestricted) {
+
+    if (isAppErr || isOffline || isDownstreamValidation || isFeatureRestricted) {
         // eslint-disable-next-line no-console
-        console.warn(`⚠️ [API Warning] ${msg || 'Python Engine Offline / Aborted'}`);
+        console.warn(`⚠️ [API Warning] ${msg || 'Operational / Domain Warning'}`);
     } else {
         // eslint-disable-next-line no-console
         console.error('[API Error]', err);
     }
+
     const isOperational =
+        isAppErr ||
         err instanceof FeatureLimitError ||
         err instanceof FeatureLockedError ||
         isOffline ||
         isDownstreamValidation ||
         isBridgeOperationError(err) ||
         (msg !== '' && OPERATIONAL_ERROR_RE.test(msg));
-    const responseStatus = isOffline ? 503 : (isDownstreamValidation ? err.status : (isFeatureRestricted ? 403 : status));
-    res.status(responseStatus).json({
+
+    let responseStatus: number;
+    if (isAppErr) {
+        responseStatus = err.statusCode;
+    } else if (isOffline) {
+        responseStatus = 503;
+    } else if (isDownstreamValidation) {
+        responseStatus = err.status;
+    } else if (isFeatureRestricted) {
+        responseStatus = 403;
+    } else {
+        responseStatus = status;
+    }
+
+    const jsonPayload: ErrorEnvelope = {
         success: false,
         error: isOperational ? msg : 'Terjadi kesalahan internal pada server.'
-    });
+    };
+
+    const errorCode = (isAppErr && err.code) ? err.code : (err?.code && typeof err.code === 'string' ? err.code : undefined);
+    if (errorCode && isOperational) {
+        jsonPayload.code = errorCode;
+    }
+
+    res.status(responseStatus).json(jsonPayload);
 }
 
 /**

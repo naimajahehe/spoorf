@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import { DeviceManager } from '../services/deviceManager';
+import { InvariantViolationError } from '../errors';
 
 export class DeviceController {
     constructor(private readonly deviceManager: DeviceManager) {}
@@ -76,12 +77,10 @@ export class DeviceController {
         const { mac } = req.params;
         const target = this.deviceManager.getDeviceByMac(mac);
         if (target?.is_gateway) {
-            res.status(400).json({ success: false, error: 'Cannot delete gateway router (Invariant 1: Gateway Immunity)' });
-            return;
+            throw new InvariantViolationError('Cannot delete gateway router (Invariant 1: Gateway Immunity)');
         }
         if (target?.is_self) {
-            res.status(400).json({ success: false, error: 'Cannot delete controller host (Invariant 2: Controller Self-Protection)' });
-            return;
+            throw new InvariantViolationError('Cannot delete controller host (Invariant 2: Controller Self-Protection)');
         }
         await this.deviceManager.deleteDevice(mac);
         res.json({

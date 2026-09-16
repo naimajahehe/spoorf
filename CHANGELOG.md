@@ -2,6 +2,36 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.40] - 2026-09-17
+
+### Centralized Typed Domain Error Hierarchy & Standardized Error Handling (`backend-node`)
+- **Typed Domain Error Hierarchy (`src/errors/AppError.ts`)**:
+  - Mengimplementasikan kelas abstrak dasar `AppError` (turunan `Error`) dengan properti `statusCode`, `code`, `isOperational`, dan `details`.
+  - Mendefinisikan subkelas spesifik domain:
+    - `BadRequestError` (HTTP 400, `BAD_REQUEST`): Format payload atau parameter tidak valid.
+    - `UnauthorizedError` (HTTP 401, `UNAUTHORIZED`): Token autentikasi tidak disertakan atau salah.
+    - `ForbiddenError` (HTTP 403, `FORBIDDEN`): Akses fitur terlarang / license gating.
+    - `NotFoundError` (HTTP 404, `NOT_FOUND`): Entitas jaringan/database tidak ditemukan.
+    - `ConflictError` (HTTP 409, `CONFLICT`): Benturan status operasional perangkat.
+    - `InvariantViolationError` (HTTP 400, `INVARIANT_VIOLATION`): Penegakan non-negotiable Invariant 1 (Gateway Immunity) dan Invariant 2 (Controller Self-Protection).
+    - `UpstreamServiceError` (HTTP 502/503, `UPSTREAM_SERVICE_ERROR`): Kegagalan koneksi/operasi pada microservice Python engine.
+  - Re-export seluruh kelas domain error melalui `src/errors/index.ts`.
+- **Deterministic Error Handling Middleware (`src/middlewares/errorHandler.ts`)**:
+  - Memperbarui `respondError` untuk memeriksa `err instanceof AppError` secara deterministik tanpa lagi bergantung pada penebakan berbasis regex string matching.
+  - Amplop JSON respons tetap 100% kompatibel ke belakang: `{ success: false, error: string, code?: string }`.
+  - Menjaga perlindungan sanitasi HTTP 500: error sistem/database tak terduga disamarkan menjadi `Terjadi kesalahan internal pada server.` untuk mencegah kebocoran detail internal sistem.
+  - Mempertahankan fallback aman untuk error pustaka pihak ketiga via `OPERATIONAL_ERROR_RE`.
+- **Controller & Service Layer Modernization**:
+  - `deviceController.ts`: Mengganti manual `res.status(400).json(...)` pada Invariant 1 & Invariant 2 di `deleteDevice` dengan melempar `InvariantViolationError`.
+  - `authController.ts`: Mengeliminasi boilerplate `try/catch` manual dan melempar `BadRequestError` ke `safeHandler`.
+  - `licenseManager.ts`: Mengintegrasikan `FeatureLimitError` dan `FeatureLockedError` sebagai turunan `ForbiddenError` (HTTP 403).
+- **Automated Testing & Coverage**:
+  - Menambahkan test suite baru `tests/unit_errors.test.ts` (6 blok pengujian hierarki error, status code, kode error mesin, sanitasi 500, dan backward compatibility).
+  - Pengujian Node.js meningkat dari **57 menjadi 63 tests (100% PASSED)**.
+  - Pengujian Python: **379 / 379 PASSED (100% Green)**.
+  - Frontend React: `tsc && vite build` bersih tanpa kendala.
+  - Total pengujian otomatis seluruh sistem: **442 tests 100% Green**.
+
 ## [v2.41.39] - 2026-09-17
 
 ### Type-Safe Environment Configuration (Zod) & Security Headers (Helmet) (`backend-node`)
