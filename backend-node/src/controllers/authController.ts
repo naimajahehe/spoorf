@@ -1,6 +1,6 @@
 import { Request, Response } from 'express';
 import { LicenseManager } from '../services/licenseManager';
-import { BadRequestError } from '../errors';
+import { AppError, BadRequestError } from '../errors';
 
 export class AuthController {
     constructor(private readonly licenseManager?: LicenseManager) {}
@@ -50,6 +50,7 @@ export class AuthController {
             const status = await this.licenseManager.login({ email, password, token, cloudUrl });
             res.json({ success: true, ...status });
         } catch (err: any) {
+            if (err instanceof AppError) throw err;
             throw new BadRequestError(err?.message || 'Login failed');
         }
     };
@@ -64,6 +65,7 @@ export class AuthController {
             const status = await this.licenseManager.activateLicenseKey(key);
             res.json({ success: true, ...status });
         } catch (err: any) {
+            if (err instanceof AppError) throw err;
             throw new BadRequestError(err?.message || 'Activation failed');
         }
     };
