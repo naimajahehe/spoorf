@@ -2,7 +2,37 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
-## [v2.41.48] - 2026-09-17
+## [v2.41.49] - 2026-09-17
+
+### Tahap 7: Dekomposisi Monolit DatabaseService ke Repository Pattern (`backend-node`)
+- **Ekstraksi Utilitas & Heuristik Murni (`src/utils/databaseUtils.ts`)**:
+  - Memisahkan fungsi-fungsi murni dari monolit `database.ts`: `deriveNetworkId`, `OFFLINE_GRACE_SECONDS`, `GENERIC_FACTORY_PATTERNS`, `GENERIC_EXACT_BLACKLIST`, `deriveProfileId`, `isGenericFactoryHostname`, `betterProfileName`, `isUsableClientId`, `calculateProfileMatchScore`, `safeParseJson`, `normalizeMacAddress`, `isGenericProfileLabel`, `validateConfidence`, `serializeProfileEvidence`, `validateProfileAssessment`, `hasStoredValue`, `normalizeStoredSpeedLimit`, `timestampRank`, `compareNewestDeviceRows`, `quoteSqlIdentifier`.
+- **Modularisasi Skema, Migrasi & Pemeliharaan (`src/database/`)**:
+  - `src/database/schema.ts`: DDL SQL konstanta untuk tabel `networks`, `device_profiles`, `devices`, `license_cache`, indeks gabungan, dan kolom aditif.
+  - `src/database/migrations.ts`: `runMigrations` untuk migrasi skema legacy ke primary key komposit `(network_id, mac)` dan penambahan kolom aditif dinamis.
+  - `src/database/maintenance.ts`: `reconcileCanonicalDeviceMacs` untuk normalisasi alamat MAC, merging baris duplikat per network, pembersihan entri terblokir basi, sanitasi host operator offline, dan normalisasi OS.
+- **Kontrak Antarmuka Domain Repositori (`src/interfaces/`)**:
+  - Membuat `IDeviceRepository.ts`, `IProfileRepository.ts`, `INetworkRepository.ts`, `ILicenseRepository.ts`, dan `IRetentionRepository.ts`.
+  - Mengekspor seluruh kontrak baru secara terpusat di `src/interfaces/index.ts`.
+- **Implementasi Repositori Domain Konkret (`src/repositories/`)**:
+  - `DeviceRepository`: Mengelola query CRUD tabel `devices`, pemetaan `rowToDevice`, disosiasi IP basi saat tabrakan alokasi IP, pembatasan kecepatan, alias, dan penghapusan perangkat.
+  - `ProfileRepository`: Mengelola tabel `device_profiles`, evaluasi `hasBlockedIdentityMatch` anti-rotasi MAC, pemulihan nama profil `backfillProfileNames`, dan pembaruan asesmen DHCP/profil.
+  - `NetworkRepository`: Mengelola persistensi metadata jaringan `networks` (`ensureNetwork`, `getNetwork`, `getAllNetworks`).
+  - `LicenseRepository`: Mengelola cache lisensi lokal pada tabel `license_cache` (sync & async).
+  - `RetentionRepository`: Mengelola pengarsipan perangkat tamu offline basi (`archiveStaleDevices`) dan garbage collector pembersihan MAC acak usang (`pruneStaleRandomizedMacs`).
+  - `src/repositories/index.ts`: Ekspor terpusat seluruh repositori domain.
+- **Refaktorisasi Fasad DatabaseService (`src/services/database.ts`)**:
+  - Memangkas lebih dari 1.620 baris kode dari monolit (dari 2.292 baris menjadi 671 baris).
+  - Mengorkestrasi transaksi atomik native SQLite `this.db.transaction()` pada `syncScanResults` dengan auto-rollback bila terjadi kegagalan.
+  - Mempertahankan delegasi method, instance properti `(db as any).db`, dan re-ekspor seluruh fungsi utilitas untuk interoperabilitas 100% tanpa breaking change.
+- **Pengujian Otomatis & Verifikasi Menyeluruh**:
+  - Menambahkan test suite terisolasi `tests/unit_repositories.test.ts` (5 pengujian unit).
+  - Mengintegrasikan suite baru ke dalam `tests/run_tests.ts`.
+  - Hasil pengujian Node.js meningkat dari **90 menjadi 95 tests PASSED (100% Green)**.
+  - Hasil pengujian Python: **379 / 379 tests PASSED (100% Green)**.
+  - Total verifikasi test otomatis seluruh ekosistem: **474 tests PASSED (100% Green)**.
+  - Build frontend SPA (`tsc && vite build`): 100% bersih tanpa error (8.18s).
+
 
 ### Superpowers Code Review Hardening: Pemulihan Arming Penalti Offline DHCP & Konkurensi Auto-Reblock
 - **Pemulihan Mekanisme Arming Karantina Offline 30s (`armOfflineCooldown`)**:

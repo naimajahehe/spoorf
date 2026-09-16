@@ -15,6 +15,7 @@ import { runContainerTests } from './unit_container.test';
 import { runTrafficServiceTests } from './unit_trafficService.test';
 import { runDiscoveryServiceTests } from './unit_discoveryService.test';
 import { runReconciliationServiceTests } from './unit_reconciliationService.test';
+import { runRepositoriesTests } from './unit_repositories.test';
 
 async function main() {
     console.log('=====================================================');
@@ -160,6 +161,14 @@ async function main() {
         passed += 5;
     } catch (err: any) {
         console.error('❌ ReconciliationService Test Failed:', err);
+        failed++;
+    }
+
+    try {
+        await runRepositoriesTests();
+        passed += 5;
+    } catch (err: any) {
+        console.error('❌ Repositories Test Failed:', err);
         failed++;
     }
 

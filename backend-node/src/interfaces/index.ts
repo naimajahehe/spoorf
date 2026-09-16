@@ -7,3 +7,9 @@ export * from './IDiscoveryService';
 export * from './IReconciliationService';
 export * from './IDeviceManager';
 export * from './IServiceContainer';
+export * from './IDeviceRepository';
+export * from './IProfileRepository';
+export * from './INetworkRepository';
+export * from './ILicenseRepository';
+export * from './IRetentionRepository';
+
