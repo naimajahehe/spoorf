@@ -2,6 +2,36 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.37] - 2026-09-16
+
+### Enterprise Clean Layered Architecture & Separation of Concerns (`backend-node`)
+- **Monolithic Route Decomposition (`src/api/routes.ts`)**:
+  - Merefaktor berkas monolitik `routes.ts` (805 baris) menjadi arsitektur berlapis berstandar enterprise: **Routes $\rightarrow$ Controllers $\rightarrow$ Services $\rightarrow$ Middlewares**.
+- **Centralized Middlewares (`src/middlewares/errorHandler.ts`)**:
+  - Mengisolasi `respondError`, `safeHandler`, dan `parsePositiveInt` ke dalam modul terpusat yang reusable dan type-safe.
+  - Menghilangkan duplikasi boilerplate `try/catch` di puluhan endpoint HTTP melalui wrapper `safeHandler`.
+- **Domain Controllers (`src/controllers/`)**:
+  - `SystemController`: `/health`, `/api/health`, `/api/system/diagnostics`, `/api/status`, `/api/gateway`.
+  - `DeviceController`: `/api/scan`, `/api/devices`, `/api/devices/:ip/block`, `unblock`, `limit`, `scan-ports`, `redirect`, `stop-redirect`, `/api/devices/:mac` (DELETE), `/api/devices/:mac/alias`, `/api/devices/reset`.
+  - `NetworkController`: `/api/telemetry`, `/api/wifi`, `/api/network/optimize-dhcp`, `/api/network/profile-refresh`, `/api/network/quick-reauth`, `/api/dhcp/stats`, `/api/network/ap-isolation`.
+  - `GatewayController`: `/api/gateway/status`, `/api/gateway/start`, `/api/gateway/stop`, `/api/gateway/sinkhole`, `/api/gateway/logs`.
+  - `InterceptorController`: `/api/interceptor/ca`, `/api/interceptor/ca/download`, `/api/interceptor/flows`, `/api/interceptor/cert/leaf`.
+  - `BettercapController`: `/api/bettercap/status`, `/api/bettercap/dns/rules`, `/api/bettercap/dns/spoof-all`, `/api/bettercap/dns/hosts`, `/api/bettercap/dns/ttl`, `/api/bettercap/credentials`, `/api/bettercap/syn-scan`.
+  - `AuthController`: `/api/auth/status`, `/api/auth/me`, `/api/auth/login`, `/api/auth/activate`, `/api/auth/logout`.
+  - `ShieldController`: `/api/shield/status`, `/api/shield/toggle`, `/api/shield/mode`, `/api/shield/threats`.
+  - `GamingController`: `/api/gaming/status`, `/api/gaming/toggle`.
+- **Domain Routers (`src/routes/`)**:
+  - Setiap domain memiliki modul routing terisolasi (`systemRoutes.ts`, `deviceRoutes.ts`, dll.) yang dapat diregistrasikan ke router sentral (`src/routes/index.ts`) atau dipasang sebagai sub-router independen.
+- **100% Backward Compatibility & Safety Invariants**:
+  - `src/api/routes.ts` mempertahankan ekspor `createRouter` dan `respondError` sehingga pemanggil eksternal (`app.ts` dan test runner `api_routes.test.ts`) tidak mengalami breaking changes.
+  - Mempertahankan seluruh aturan invariant mutlak: Gateway Immunity (`is_gateway: true`), Controller Self-Protection (`is_self: true`), exact-match Origin/Host checks, serta RFC 1918 scope strictness.
+- **Verifikasi & Status Pengujian**:
+  - TypeScript compilation: **0 Error (`tsc` clean)**.
+  - Node.js Backend Tests: **48 / 48 PASSED (100% OK)**.
+  - Python Microservice Tests: **379 / 379 PASSED (100% OK)**.
+  - Frontend Test Suite: **Passed (100% OK)**.
+  - Total: **427 Automated Tests 100% Green (0 Regresi)**.
+
 ## [v2.41.36] - 2026-09-16
 
 ### Device Identification & Profiling Pipeline Synchronization

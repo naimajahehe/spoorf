@@ -1,0 +1,139 @@
+import { Request, Response } from 'express';
+import { DeviceManager } from '../services/deviceManager';
+
+export class DeviceController {
+    constructor(private readonly deviceManager: DeviceManager) {}
+
+    scanNetwork = async (_req: Request, res: Response): Promise<void> => {
+        const devices = await this.deviceManager.scanNetwork();
+        res.json({
+            success: true,
+            devices,
+            count: devices.length
+        });
+    };
+
+    getDevices = (_req: Request, res: Response): void => {
+        const devices = this.deviceManager.scopeForDisplay(this.deviceManager.getDevices());
+        res.json({
+            success: true,
+            devices,
+            count: devices.length
+        });
+    };
+
+    clearAllDevices = async (_req: Request, res: Response): Promise<void> => {
+        await this.deviceManager.clearAllDevices();
+        res.json({
+            success: true,
+            message: 'Semua data perangkat dan profil berhasil dibersihkan'
+        });
+    };
+
+    blockDevice = async (req: Request, res: Response): Promise<void> => {
+        const { ip } = req.params;
+        const { gatewayIp } = req.body;
+        const device = await this.deviceManager.blockDevice(ip, gatewayIp);
+        res.json({
+            success: true,
+            device,
+            message: `Device ${ip} blocked`
+        });
+    };
+
+    unblockDevice = async (req: Request, res: Response): Promise<void> => {
+        const { ip } = req.params;
+        const device = await this.deviceManager.unblockDevice(ip);
+        res.json({
+            success: true,
+            device,
+            message: `Device ${ip} unblocked`
+        });
+    };
+
+    redirectDevice = async (req: Request, res: Response): Promise<void> => {
+        const { ip } = req.params;
+        const { redirectUrl, instagramUsername, gatewayIp } = req.body;
+        if (!redirectUrl || typeof redirectUrl !== 'string') {
+            res.status(400).json({ success: false, error: 'Valid redirectUrl string is required' });
+            return;
+        }
+
+        const device = await this.deviceManager.redirectDevice(ip, redirectUrl, instagramUsername, gatewayIp);
+        res.json({
+            success: true,
+            device,
+            message: `Device ${ip} redirected to ${redirectUrl}`
+        });
+    };
+
+    stopRedirectDevice = async (req: Request, res: Response): Promise<void> => {
+        const { ip } = req.params;
+        const device = await this.deviceManager.stopRedirectDevice(ip);
+        res.json({
+            success: true,
+            device,
+            message: `Redirect for ${ip} stopped`
+        });
+    };
+
+    deleteDevice = async (req: Request, res: Response): Promise<void> => {
+        const { mac } = req.params;
+        const target = this.deviceManager.getDeviceByMac(mac);
+        if (target?.is_gateway) {
+            res.status(400).json({ success: false, error: 'Cannot delete gateway router (Invariant 1: Gateway Immunity)' });
+            return;
+        }
+        if (target?.is_self) {
+            res.status(400).json({ success: false, error: 'Cannot delete controller host (Invariant 2: Controller Self-Protection)' });
+            return;
+        }
+        await this.deviceManager.deleteDevice(mac);
+        res.json({
+            success: true,
+            message: `Device with MAC ${mac} deleted from database`
+        });
+    };
+
+    setDeviceAlias = async (req: Request, res: Response): Promise<void> => {
+        const { mac } = req.params;
+        const { alias } = req.body;
+        if (alias === undefined || typeof alias !== 'string') {
+            res.status(400).json({ success: false, error: 'Valid alias string is required' });
+            return;
+        }
+        const cleanAlias = alias.trim();
+        const updated = await this.deviceManager.setDeviceAlias(mac, cleanAlias);
+        res.json({
+            success: true,
+            device: updated,
+            message: cleanAlias ? `Alias for ${mac} updated to "${cleanAlias}"` : `Alias for ${mac} cleared`
+        });
+    };
+
+    setSpeedLimit = async (req: Request, res: Response): Promise<void> => {
+        const { ip } = req.params;
+        const { limit } = req.body;
+        if (limit === undefined || typeof limit !== 'number' || !Number.isFinite(limit) || Number.isNaN(limit) || limit < 0 || limit > 100) {
+            res.status(400).json({ success: false, error: 'Numeric speed limit (0-100) is required' });
+            return;
+        }
+        const updated = await this.deviceManager.setSpeedLimit(ip, limit);
+        res.json({
+            success: true,
+            device: updated,
+            message: `Speed limit for ${ip} set to ${limit}%`
+        });
+    };
+
+    scanDevicePorts = async (req: Request, res: Response): Promise<void> => {
+        const { ip } = req.params;
+        const { ports } = req.body;
+        const updated = await this.deviceManager.deepScanDevicePorts(ip, Array.isArray(ports) ? ports : undefined);
+        res.json({
+            success: true,
+            device: updated,
+            message: `Ports deep scanned for ${ip}`
+        });
+    };
+}
