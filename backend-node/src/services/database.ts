@@ -455,6 +455,7 @@ export class DatabaseService implements IDatabaseService {
                 ip = ''
             WHERE network_id = ? AND ip = ? AND LOWER(mac) != LOWER(?)
               AND (is_gateway IS NULL OR is_gateway = 0)
+              AND (is_self IS NULL OR is_self = 0)
         `);
 
         // Eksekusi atomik menggunakan db.transaction native better-sqlite3

@@ -296,6 +296,33 @@ export async function runRepositoriesTests(): Promise<void> {
         assert.strictEqual(router?.ip, '192.168.1.1', 'Gateway IP must NEVER be wiped by rogue occupant collision (Invariant 1)');
         assert.strictEqual(router?.is_online, true);
 
+        // Controller Host Immunity on IP collision: Rogue device claiming controller host IP does NOT wipe controller IP (Invariant 2)
+        db.prepare(`
+            INSERT INTO devices (network_id, mac, ip, hostname, is_self, is_online)
+            VALUES ('net_default', 'aa:bb:cc:dd:ee:ff', '192.168.1.100', 'Operator-PC', 1, 1)
+        `).run();
+
+        const rogueDevAgainstHost: Device = {
+            ip: '192.168.1.100', // Rogue device claiming operator PC's IP
+            mac: '00:99:88:77:66:55',
+            hostname: 'Rogue-Device',
+            vendor: 'Unknown',
+            device_type: 'Unknown',
+            os: 'Unknown',
+            rtt_ms: 0,
+            open_ports: [],
+            services: [],
+            is_blocked: false,
+            is_online: true,
+            is_gateway: false,
+            speed_limit: 100
+        };
+
+        await devRepo.save(rogueDevAgainstHost, 'net_default');
+        const operatorHost = await devRepo.getByMac('aa:bb:cc:dd:ee:ff', 'net_default');
+        assert.strictEqual(operatorHost?.ip, '192.168.1.100', 'Controller Host IP must NEVER be wiped by rogue occupant collision (Invariant 2)');
+        assert.strictEqual(operatorHost?.is_online, true);
+
         // Delete
         await devRepo.delete('00:11:22:33:44:99', 'net_default');
         const deleted = await devRepo.getByMac('00:11:22:33:44:99', 'net_default');

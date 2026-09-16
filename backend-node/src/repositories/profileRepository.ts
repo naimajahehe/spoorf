@@ -177,6 +177,7 @@ export class ProfileRepository implements IProfileRepository {
                         ip = ''
                     WHERE network_id = ? AND ip = ? AND LOWER(mac) != LOWER(?)
                       AND (is_gateway IS NULL OR is_gateway = 0)
+                      AND (is_self IS NULL OR is_self = 0)
                 `).run(networkId, cleanIp, normMac);
                 this.db.prepare(`
                     UPDATE devices SET

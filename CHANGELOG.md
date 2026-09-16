@@ -2,6 +2,16 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.51] - 2026-09-17
+
+### Hardening Invariant 2 (Controller Self-Protection) pada Disosiasi IP Basi (`backend-node`)
+- **Proteksi Host Operator (`is_self: 1`) terhadap Tabrakan Alokasi IP**:
+  - Memperluas klausul `disassociateStaleIpStmt` di `DatabaseService`, `DeviceRepository.save`, `DeviceRepository.updateIp`, dan `ProfileRepository.updateDeviceDhcpProfile` dengan `AND (is_self IS NULL OR is_self = 0)`.
+  - Mencegah okupan jahat atau perangkat acak yang mengklaim IP operator PC (`This PC`) menghapus record alamat IP komputer operator dari database SQLite.
+- **Pengujian & Verifikasi Otomatis**:
+  - Menambahkan automated assertion di `tests/unit_repositories.test.ts` yang menguji bahwa klaim IP operator oleh rogue device tidak menghapus IP host controller maupun status onlinenya.
+  - 100% lulus pada 96 unit test Node.js dan 379 unit test Python (Total: 475 automated tests green).
+
 ## [v2.41.50] - 2026-09-17
 
 ### Superpowers Code Review Hardening: Penguatan Invariant Gateway Immunity & Controller Self-Cut pada Repositori

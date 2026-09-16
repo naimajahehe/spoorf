@@ -169,8 +169,8 @@ export class DeviceRepository implements IDeviceRepository {
         const netId = networkId || device.network_id || 'net_default';
         const normMac = device.mac.toLowerCase();
         const saveTransaction = this.db.transaction(() => {
-            // Disosiasikan IP ini dari perangkat lain jika ada yang memegang IP sama di jaringan ini (kecuali gateway)
-            this.db.prepare(`UPDATE devices SET is_online = 0, last_ip = CASE WHEN ip != '' AND ip IS NOT NULL THEN ip ELSE last_ip END, ip = '' WHERE network_id = ? AND ip = ? AND LOWER(mac) != LOWER(?) AND (is_gateway IS NULL OR is_gateway = 0)`).run(netId, device.ip, normMac);
+            // Disosiasikan IP ini dari perangkat lain jika ada yang memegang IP sama di jaringan ini (kecuali gateway & host operator)
+            this.db.prepare(`UPDATE devices SET is_online = 0, last_ip = CASE WHEN ip != '' AND ip IS NOT NULL THEN ip ELSE last_ip END, ip = '' WHERE network_id = ? AND ip = ? AND LOWER(mac) != LOWER(?) AND (is_gateway IS NULL OR is_gateway = 0) AND (is_self IS NULL OR is_self = 0)`).run(netId, device.ip, normMac);
             const query = `
                 UPDATE devices SET
                     ip = ?,
@@ -211,7 +211,7 @@ export class DeviceRepository implements IDeviceRepository {
     async updateIp(mac: string, ip: string, networkId: string = 'net_default'): Promise<void> {
         const normMac = mac.toLowerCase();
         const updateTransaction = this.db.transaction(() => {
-            this.db.prepare(`UPDATE devices SET is_online = 0, last_ip = CASE WHEN ip != '' AND ip IS NOT NULL THEN ip ELSE last_ip END, ip = '' WHERE network_id = ? AND ip = ? AND LOWER(mac) != LOWER(?) AND (is_gateway IS NULL OR is_gateway = 0)`).run(networkId, ip, normMac);
+            this.db.prepare(`UPDATE devices SET is_online = 0, last_ip = CASE WHEN ip != '' AND ip IS NOT NULL THEN ip ELSE last_ip END, ip = '' WHERE network_id = ? AND ip = ? AND LOWER(mac) != LOWER(?) AND (is_gateway IS NULL OR is_gateway = 0) AND (is_self IS NULL OR is_self = 0)`).run(networkId, ip, normMac);
             this.db.prepare(`UPDATE devices SET ip = ?, last_ip = ?, is_online = 1, last_seen = datetime('now', 'localtime') WHERE LOWER(mac) = LOWER(?) AND network_id = ?`).run(ip, ip, normMac, networkId);
         });
         updateTransaction();
