@@ -937,8 +937,9 @@ export class DeviceManager extends EventEmitter {
                     if (oldKey !== device.ip) {
                         this.devices.delete(oldKey);
                     }
+                    const targetIp = device.ip;
                     Object.assign(device, existingLiveDevice);
-                    device.ip = device.ip;
+                    device.ip = targetIp;
                     device.is_online = true;
                     this.devices.set(device.ip, device);
 
