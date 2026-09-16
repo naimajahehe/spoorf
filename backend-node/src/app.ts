@@ -1,7 +1,8 @@
 import express from 'express';
 import cors from 'cors';
+import helmet from 'helmet';
 import { createServer } from 'http';
-import dotenv from 'dotenv';
+import { env, validateEnv } from './config/env';
 import { PythonBridge } from './services/pythonBridge';
 import { DatabaseService } from './services/database';
 import { LicenseManager } from './services/licenseManager';
@@ -11,20 +12,28 @@ import { WebSocketManager } from './websocket';
 import { corsOriginCallback, hostGuard, apiTokenGuard } from './security';
 import { registerGracefulShutdown } from './shutdown';
 
-dotenv.config();
+// Fail-fast environment validation on boot
+validateEnv();
 
 const app = express();
 const server = createServer(app);
 
 // Middleware
+// Security Headers: Helmet hardening with cross-origin resource policy enabled for SPA/Vite
+app.use(helmet({
+    crossOriginResourcePolicy: { policy: 'cross-origin' }
+}));
+
 // CORS: allowlist ketat (localhost / 127.0.0.1 / file:// + ALLOWED_ORIGINS).
 // Origin tak dikenal ditolak — mencegah drive-by fetch dari situs jahat di browser.
 app.use(cors({
     origin: corsOriginCallback,
     credentials: true
 }));
+
 // Proteksi DNS-rebinding: tolak request yang header Host-nya bukan loopback backend.
 app.use(hostGuard);
+
 // Auth token bearer lokal (opsional) — aktif bila SENTINEL_API_TOKEN diset (Electron).
 app.use(apiTokenGuard);
 app.use(express.json());
@@ -47,11 +56,11 @@ async function start() {
         await licenseManager.init();
         await deviceManager.init();
 
-        const PORT = parseInt(process.env.PORT || '5000', 10);
-        const HOST = process.env.HOST || '127.0.0.1';
+        const PORT = env.PORT;
+        const HOST = env.HOST;
         
         server.on('error', (err: any) => {
-            console.error('❌ [Backend] Server error on port 5000:', err?.message || err);
+            console.error(`❌ [Backend] Server error on port ${PORT}:`, err?.message || err);
         });
 
         server.listen(PORT, HOST, () => {

@@ -2,6 +2,25 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.39] - 2026-09-17
+
+### Type-Safe Environment Configuration (Zod) & Security Headers (Helmet) (`backend-node`)
+- **Type-Safe Environment Schema & Fail-Fast Bootstrapping (`src/config/env.ts`)**:
+  - Mengimplementasikan `EnvSchema` berbasis Zod dengan penegakan tipe data yang ketat dan nilai default yang aman.
+  - Memvalidasi URL layanan mikro (`PYTHON_SERVICE_URL`) dan cloud endpoint (`SPOORF_CLOUD_URL`) dengan skema HTTP/HTTPS khusus (`HttpUrlSchema`).
+  - Mengonversi tipe data numerik (`PORT`) dan flag boolean (`AUTO_SPAWN_PYTHON`, `SPOORF_ALLOW_DEMO_LICENSE`) secara otomatis dan aman.
+  - Menerapkan fungsi `validateEnv()` saat cold boot aplikasi di `src/app.ts`, memastikan server berhenti secara tegas (*fail-fast*) dengan log diagnostik terperinci jika ditemukan variabel lingkungan yang korup atau tidak valid.
+- **HTTP Security Hardening dengan Helmet (`src/app.ts`)**:
+  - Mengintegrasikan paket keamanan industri `helmet@^8.3.0`.
+  - Mengonfigurasi `crossOriginResourcePolicy: { policy: 'cross-origin' }` untuk memastikan kompatibilitas penuh dengan SPA frontend React di port `5173`, WebSocket stream, dan endpoint download CA interceptor.
+  - Melindungi aplikasi dari serangan berbasis HTTP header standar (`X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, proteksi XSS header).
+- **Automated Testing & Coverage**:
+  - Menambahkan unit test suite `tests/unit_env.test.ts` untuk memverifikasi default fallback, koersi tipe data string ke number/boolean, validasi URL, dan fail-fast behavior.
+  - Pengujian Node.js meningkat dari **54 menjadi 57 tests (100% PASSED)**.
+  - Pengujian Python: **379 / 379 PASSED (100% Green)**.
+  - Frontend React: `tsc && vite build` bersih tanpa kendala.
+  - Total pengujian otomatis seluruh sistem: **436 tests 100% Green**.
+
 ## [v2.41.38] - 2026-09-16
 
 ### Declarative Schema Validation & Slim Controllers with Zod (`backend-node`)
