@@ -1,7 +1,9 @@
-import type { AuthStatusResponse } from '../types';
+import type { AuthStatusResponse, UserLicense, AuthUser } from '../types';
 
 export interface ILicenseManager {
     init(): Promise<void>;
+    getLicense(): UserLicense;
+    getUser(): AuthUser | null;
     login(credentials: { email?: string; password?: string; token?: string; cloudUrl?: string }): Promise<AuthStatusResponse>;
     activateLicenseKey(key: string): Promise<AuthStatusResponse>;
     logout(): Promise<void>;

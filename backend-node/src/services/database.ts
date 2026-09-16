@@ -2,6 +2,7 @@ import Database from 'better-sqlite3';
 import path from 'path';
 import fs from 'fs';
 import { Device, Network, CachedLicense, ProfileAssessment, ProfileEvidence, ProfileStatus } from '../types';
+import { IDatabaseService } from '../interfaces';
 import { env } from '../config/env';
 import { createChildLogger } from '../utils/logger';
 
@@ -385,7 +386,7 @@ function quoteSqlIdentifier(identifier: string): string {
     return `"${identifier.replace(/"/g, '""')}"`;
 }
 
-export class DatabaseService {
+export class DatabaseService implements IDatabaseService {
     private readonly log = createChildLogger('Database');
     private db: Database.Database;
     private initialized: boolean = false;

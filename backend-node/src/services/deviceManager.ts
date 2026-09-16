@@ -7,7 +7,7 @@ import { LicenseManager, FeatureLimitError, FeatureLockedError } from './license
 import { Device, CutStatus, ProfileAssessment, ProfileRefreshResult } from '../types';
 import type { ScanOptions } from './pythonBridge';
 import { createChildLogger } from '../utils/logger';
-import { IDeviceManager } from '../interfaces';
+import { IDeviceManager, IPythonBridge, IDatabaseService, ILicenseManager } from '../interfaces';
 
 // Retensi: perangkat tamu yang offline lebih lama dari ini diarsipkan (bukan dihapus)
 // agar daftar mencerminkan jaringan nyata, bukan riwayat semua tamu. Lihat
@@ -334,9 +334,9 @@ export class DeviceManager extends EventEmitter implements IDeviceManager {
     }
 
     constructor(
-        public python: PythonBridge,
-        private db: DatabaseService,
-        private license?: LicenseManager
+        public python: IPythonBridge,
+        private db: IDatabaseService,
+        private license?: ILicenseManager
     ) {
         super();
         // Listen for network changes from Python

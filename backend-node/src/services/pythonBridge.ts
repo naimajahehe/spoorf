@@ -5,6 +5,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import WebSocket from 'ws';
 import { Device, ProfileRefreshResponse } from '../types';
+import type { IPythonBridge } from '../interfaces';
 import { env } from '../config/env';
 import { createChildLogger } from '../utils/logger';
 
@@ -89,7 +90,7 @@ export interface ScanOptions {
     skipMulticastWakeup?: boolean;
 }
 
-export class PythonBridge extends EventEmitter {
+export class PythonBridge extends EventEmitter implements IPythonBridge {
     private readonly log = createChildLogger('PythonBridge');
     private process: ChildProcess | null = null;
     private baseUrl: string;

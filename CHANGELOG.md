@@ -7,6 +7,7 @@ Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem
 ### Tahap 4: Dependency Injection (DI) & Modular Service Decoupling (`backend-node`)
 - **Interface Segregation & Contracts Layer (`src/interfaces/`)**:
   - Mendefinisikan kontrak interface TypeScript murni untuk seluruh subsistem: `IPythonBridge`, `IDatabaseService`, `ILicenseManager`, `ITrafficService`, `IGamingService`, `IDeviceManager`, dan `IServiceContainer`.
+  - Mengimplementasikan deklarasi eksplisit `implements` pada seluruh kelas service konkret (`DatabaseService`, `PythonBridge`, `LicenseManager`, dan `DeviceManager`) untuk penegakan kontrak ketat waktu-kompilasi (*strict compile-time type checking*) dan mengeliminasi type assertion (`as any`).
   - Memastikan seluruh lapisan controller dan middleware bergantung pada kontrak abstraksi, bukan kelas konkret (*Dependency Inversion Principle*).
 - **Composition Root & Service Container (`src/container.ts`)**:
   - Mengimplementasikan `ServiceContainer` yang mengelola siklus hidup komponen (`databaseService`, `pythonBridge`, `licenseManager`, `trafficService`, `gamingService`, `deviceManager`).

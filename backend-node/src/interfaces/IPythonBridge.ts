@@ -1,4 +1,4 @@
-import { Device } from '../types';
+import { Device, ProfileRefreshResponse } from '../types';
 import type { ScanOptions } from '../services/pythonBridge';
 
 export interface IPythonBridge {
@@ -10,7 +10,8 @@ export interface IPythonBridge {
 
     // Discovery & Scanning
     scan(options?: ScanOptions): Promise<Device[]>;
-    pulseLiveness(targets: Array<{ ip: string; mac: string; ipv6_link_local?: string; ipv6_slaac?: string }>): Promise<any>;
+    pulseLiveness(targets: Array<{ ip: string; mac: string; ipv6_link_local?: string; ipv6_global?: string; ipv6_slaac?: string }>, gatewayIp?: string): Promise<Record<string, any>>;
+    profileRefresh(targets: Array<{ ip: string; mac: string; ipv6_addresses: string[] }>, observationSeconds?: number): Promise<ProfileRefreshResponse>;
     deepScanPorts(ip: string, ports?: number[]): Promise<any>;
     getApIsolationStatus(): Promise<any>;
     getDhcpStats(): Promise<any>;

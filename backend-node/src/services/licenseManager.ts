@@ -1,6 +1,7 @@
 import { EventEmitter } from 'events';
 import crypto from 'crypto';
 import { DatabaseService } from './database';
+import { IDatabaseService, ILicenseManager } from '../interfaces';
 import { LicenseTier, UserLicense, AuthUser, CachedLicense, AuthStatusResponse } from '../types';
 import { env } from '../config/env';
 import { ForbiddenError } from '../errors';
@@ -76,9 +77,9 @@ export class FeatureLockedError extends ForbiddenError {
     }
 }
 
-export class LicenseManager extends EventEmitter {
+export class LicenseManager extends EventEmitter implements ILicenseManager {
     private readonly log = createChildLogger('LicenseManager');
-    private db: DatabaseService;
+    private db: IDatabaseService;
     private currentLicense: UserLicense;
     private currentUser: AuthUser | null = null;
     private currentToken: string | null = null;
@@ -86,7 +87,7 @@ export class LicenseManager extends EventEmitter {
     private cloudEndpoint: string;
     private isInitialized = false;
 
-    constructor(db: DatabaseService, cloudEndpoint?: string) {
+    constructor(db: IDatabaseService, cloudEndpoint?: string) {
         super();
         this.db = db;
         this.currentLicense = { ...DEFAULT_FREE_LICENSE };
