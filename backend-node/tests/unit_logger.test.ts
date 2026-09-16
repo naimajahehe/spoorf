@@ -1,10 +1,12 @@
 import assert from 'assert';
-import { logger, createChildLogger } from '../src/utils/logger';
-import { requestLogger } from '../src/middlewares/requestLogger';
+import pino from 'pino';
+import { trace, SpanContext, TraceFlags } from '@opentelemetry/api';
+import { logger, createChildLogger, loggerOptions } from '../src/utils/logger';
+import { requestLogger, isHealthCheck } from '../src/middlewares/requestLogger';
 import { EventEmitter } from 'events';
 
 export async function runLoggerTests() {
-    console.log('\n--- [Node] Testing Structured Logging & Request Tracing (Pino) ---');
+    console.log('\n--- [Node] Testing Structured Logging & Request Tracing (Pino + OTel) ---');
 
     // 1. Pino Logger Singleton and Child Logger
     {
@@ -148,5 +150,143 @@ export async function runLoggerTests() {
             logger.error({ err: testError }, 'Testing error serialization');
         }, 'Logger should serialize error object cleanly');
         console.log('  ✓ Standard error serializer verified');
+    }
+
+    // 7. Strict Log Contract Schema & In-Memory JSON Parsing
+    {
+        const logLines: string[] = [];
+        const memoryStream = {
+            write: (chunk: string) => {
+                logLines.push(chunk.trim());
+                return true;
+            }
+        };
+
+        const testLogger = pino(
+            {
+                ...loggerOptions,
+                level: 'info'
+            },
+            memoryStream as any
+        );
+
+        testLogger.info(
+            {
+                event: { action: 'device_blocked', category: 'business' },
+                context: { mac: '11:22:33:44:55:66', targetIp: '192.168.1.100' }
+            },
+            'Target device successfully isolated from network'
+        );
+
+        assert.strictEqual(logLines.length, 1, 'Should capture exactly 1 log line');
+        const parsed = JSON.parse(logLines[0]);
+
+        // Validate Strict Log Contract keys
+        assert.ok(parsed.timestamp, 'timestamp must exist');
+        assert.match(parsed.timestamp, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/, 'timestamp must be ISO 8601 UTC');
+        assert.strictEqual(parsed.level, 'INFO', 'level must be uppercase string');
+        assert.ok(parsed.service, 'service object must exist');
+        assert.strictEqual(typeof parsed.service.name, 'string', 'service.name must be string');
+        assert.strictEqual(typeof parsed.service.version, 'string', 'service.version must be string');
+        assert.strictEqual(typeof parsed.service.environment, 'string', 'service.environment must be string');
+        assert.ok(parsed.event, 'event object must exist');
+        assert.strictEqual(parsed.event.action, 'device_blocked');
+        assert.strictEqual(parsed.event.category, 'business');
+        assert.strictEqual(parsed.message, 'Target device successfully isolated from network');
+        assert.deepStrictEqual(parsed.context, { mac: '11:22:33:44:55:66', targetIp: '192.168.1.100' });
+
+        console.log('  ✓ Strict Log Contract JSON schema & ECS keys verified');
+    }
+
+    // 8. Health Check Bypass Filtering
+    {
+        assert.strictEqual(isHealthCheck('/health'), true, '/health should be recognized as health check');
+        assert.strictEqual(isHealthCheck('/api/health'), true, '/api/health should be recognized as health check');
+        assert.strictEqual(isHealthCheck('/healthz'), true, '/healthz should be recognized as health check');
+        assert.strictEqual(isHealthCheck('/livez'), true, '/livez should be recognized as health check');
+        assert.strictEqual(isHealthCheck('/readyz'), true, '/readyz should be recognized as health check');
+        assert.strictEqual(isHealthCheck('/healthz?probe=liveness'), true, 'Query params should be ignored');
+        assert.strictEqual(isHealthCheck('/api/devices'), false, 'Business routes must not be bypassed');
+        assert.strictEqual(isHealthCheck('/api/scan'), false, 'Scan routes must not be bypassed');
+        console.log('  ✓ Health check bypass filtering for Kubernetes probes verified');
+    }
+
+    // 9. Error Strict Serialization with is_operational field
+    {
+        const logLines: string[] = [];
+        const memoryStream = {
+            write: (chunk: string) => {
+                logLines.push(chunk.trim());
+                return true;
+            }
+        };
+
+        const testLogger = pino(
+            {
+                ...loggerOptions,
+                level: 'error'
+            },
+            memoryStream as any
+        );
+
+        const customError = new Error('Upstream timeout');
+        (customError as any).isOperational = true;
+
+        testLogger.error({
+            event: { action: 'upstream_timeout', category: 'system' },
+            error: customError
+        }, 'Upstream engine query timed out');
+
+        assert.strictEqual(logLines.length, 1);
+        const parsed = JSON.parse(logLines[0]);
+        assert.strictEqual(parsed.level, 'ERROR');
+        assert.ok(parsed.error, 'error object must be populated on ERROR level');
+        assert.strictEqual(parsed.error.name, 'Error');
+        assert.strictEqual(parsed.error.message, 'Upstream timeout');
+        assert.strictEqual(parsed.error.is_operational, true);
+        assert.ok(typeof parsed.error.stack === 'string');
+        console.log('  ✓ Strict error block serialization (name, message, stack, is_operational) verified');
+    }
+
+    // 10. Automatic Sensitive Data & PII Redaction
+    {
+        const logLines: string[] = [];
+        const memoryStream = {
+            write: (chunk: string) => {
+                logLines.push(chunk.trim());
+                return true;
+            }
+        };
+
+        const testLogger = pino(
+            {
+                ...loggerOptions,
+                level: 'info'
+            },
+            memoryStream as any
+        );
+
+        testLogger.info({
+            password: 'secret_admin_pass',
+            token: 'jwt.token.secret',
+            secret: 'my_api_secret',
+            cvv: '123',
+            apiKey: 'key_xyz',
+            context: {
+                password: 'plain_password',
+                token: 'nested_token'
+            }
+        }, 'Inbound request credentials');
+
+        assert.strictEqual(logLines.length, 1);
+        const parsed = JSON.parse(logLines[0]);
+        assert.strictEqual(parsed.password, '[REDACTED]');
+        assert.strictEqual(parsed.token, '[REDACTED]');
+        assert.strictEqual(parsed.secret, '[REDACTED]');
+        assert.strictEqual(parsed.cvv, '[REDACTED]');
+        assert.strictEqual(parsed.apiKey, '[REDACTED]');
+        assert.strictEqual(parsed.context.password, '[REDACTED]');
+        assert.strictEqual(parsed.context.token, '[REDACTED]');
+        console.log('  ✓ Zero leak secret & PII auto-redaction verified');
     }
 }

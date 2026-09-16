@@ -2,6 +2,30 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.43] - 2026-09-17
+
+### Cloud-Native Observability, Strict Log Contract & OpenTelemetry Tracing (`backend-node`)
+- **Strict Log Contract Schema Compliance (ECS & OpenTelemetry)**:
+  - Mengimplementasikan skema baku log JSON production-grade dengan field wajib: `timestamp` (ISO 8601 UTC), `level` (Uppercase string: INFO, WARN, ERROR, DEBUG), `service: { name, version, environment }`, `event: { action, category }`, `message`, `trace: { trace_id, span_id }`, `http: { method, route, status_code, duration_ms }`, `context`, dan `error: { name, message, stack, is_operational }`.
+  - Definisi tipe TypeScript eksplisit dan type-safe di `src/types/logger.ts`.
+- **OpenTelemetry API Integration (`@opentelemetry/api`)**:
+  - Mengintegrasikan mixin OTel pada Pino singleton untuk mengekstrak dan menyuntikkan `trace_id` dan `span_id` secara otomatis dari active span konteks eksekusi.
+- **Pure JSON Streaming to Stdout (12-Factor App)**:
+  - Seluruh output log di-stream langsung secara asynchronous dan non-blocking ke `process.stdout`/`process.stderr` tanpa menulis ke file log fisik internal container.
+- **Request Tracing via `pino-http`**:
+  - Memodernisasi `src/middlewares/requestLogger.ts` menggunakan engine `pino-http`.
+  - Mengimplementasikan `autoLogging.ignore` untuk menyaring otomatis endpoint probe liveness/readiness Kubernetes (`/healthz`, `/livez`, `/readyz`, `/health`, `/api/health`).
+- **Eliminasi Anti-Pattern "Log or Throw, Never Both"**:
+  - Menghapus log duplikasi pada `src/services/database.ts:init()` dan mengubah recovery in-memory fallback menjadi semantic `WARN` (`db_fallback_memory`).
+  - Menambahkan Express 4-parameter error handler middleware `centralizedErrorHandler` di `src/middlewares/errorHandler.ts` sebagai batas tunggal pencatatan error level `ERROR` (5xx unhandled exceptions).
+- **Domain Error Hierarchy Enhancement**:
+  - Menambahkan properti `context?: Record<string, unknown>` pada kelas dasar `AppError` dan menambahkan kelas turunan `InternalServerError` (HTTP 500).
+- **Automated Verification**:
+  - 10 suite pengujian terotomatisasi di `tests/unit_logger.test.ts` (100% Passed).
+  - Node.js tests: **69 / 69 PASSED (100% Green)**.
+  - Python tests: **379 / 379 PASSED (100% Green)**.
+  - Frontend React SPA: `tsc && vite build` bersih tanpa kesalahan.
+
 ## [v2.41.42] - 2026-09-17
 
 ### Complete Service Layer Structured Logging Migration (`backend-node`)

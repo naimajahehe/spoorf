@@ -1,4 +1,4 @@
-import { Response, Request, NextFunction, RequestHandler } from 'express';
+import { Response, Request, NextFunction, RequestHandler, ErrorRequestHandler } from 'express';
 import { AppError } from '../errors/AppError';
 import { logger } from '../utils/logger';
 import {
@@ -24,12 +24,16 @@ export interface ErrorEnvelope {
     code?: string;
 }
 
+/**
+ * Standardized Error Responder
+ * - Formats output to comply with Strict Log Contract
+ * - Enforces "Log or Throw, Never Both": this is the single point of truth for logging API errors
+ * - Sanitizes 500 errors to prevent leaking internal stack traces or database structures
+ */
 export function respondError(res: Response, err: any, status = 500, req?: Request): void {
     const msg = typeof err?.message === 'string' ? err.message : '';
     const isAppErr = err instanceof AppError;
 
-    // Klasifikasi offline lewat tipe error yang stabil (BridgeUnavailableError.code),
-    // bukan substring pesan yang bisa berubah saat terjemahan diubah.
     const isOffline = isBridgeUnavailable(err);
     const isDownstreamValidation =
         isBridgeHttpError(err) &&
@@ -60,17 +64,49 @@ export function respondError(res: Response, err: any, status = 500, req?: Reques
     }
 
     const requestId = req?.id || (typeof res.getHeader === 'function' ? (res.getHeader('x-request-id') as string) : undefined);
-    const logContext = {
-        requestId,
-        statusCode: responseStatus,
-        isOperational,
-        errCode: err?.code
-    };
+    const route = req?.originalUrl || req?.url || (req?.route?.path as string) || undefined;
 
-    if (isAppErr || isOffline || isDownstreamValidation || isFeatureRestricted) {
-        logger.warn({ ...logContext, err }, `[API Warning] ${msg || 'Operational / Domain Warning'}`);
+    if (responseStatus >= 500 || !isOperational) {
+        // ERROR: Hanya untuk kegagalan operasi/request tak terduga (5xx). Wajib mempopulasikan field error.
+        logger.error({
+            event: {
+                action: 'unhandled_server_error',
+                category: 'system'
+            },
+            http: req ? {
+                method: req.method,
+                route,
+                status_code: responseStatus
+            } : undefined,
+            context: {
+                ...(err?.context || {}),
+                ...(requestId ? { requestId } : {})
+            },
+            error: {
+                name: err?.name || 'Error',
+                message: msg || 'Unhandled server error',
+                stack: err?.stack || '',
+                is_operational: false
+            }
+        }, `[API Error] ${msg || 'Unhandled server error'}`);
     } else {
-        logger.error({ ...logContext, err }, `[API Error] ${msg || 'Unhandled server error'}`);
+        // WARN: Anomali atau error operasional/validasi (4xx)
+        logger.warn({
+            event: {
+                action: 'operational_warning',
+                category: 'system'
+            },
+            http: req ? {
+                method: req.method,
+                route,
+                status_code: responseStatus
+            } : undefined,
+            context: {
+                ...(err?.context || {}),
+                ...(requestId ? { requestId } : {}),
+                errCode: err?.code
+            }
+        }, `[API Warning] ${msg || 'Operational / Domain Warning'}`);
     }
 
     const jsonPayload: ErrorEnvelope = {
@@ -87,13 +123,21 @@ export function respondError(res: Response, err: any, status = 500, req?: Reques
 }
 
 /**
+ * Centralized Express 4-parameter error handler middleware (err, req, res, next)
+ * Adheres to Cloud-Native production-grade single boundary logging.
+ */
+export const centralizedErrorHandler: ErrorRequestHandler = (err: any, req: Request, res: Response, _next: NextFunction): void => {
+    respondError(res, err, 500, req);
+};
+
+/**
  * Higher-order controller wrapper that executes the handler and catches
  * operational / unexpected errors cleanly via respondError.
  */
-export const safeHandler = (fn: (req: Request, res: Response) => Promise<any> | any): RequestHandler => {
-    return async (req: Request, res: Response, _next: NextFunction) => {
+export const safeHandler = (fn: (req: Request, res: Response, next?: NextFunction) => Promise<any> | any): RequestHandler => {
+    return async (req: Request, res: Response, next: NextFunction) => {
         try {
-            await fn(req, res);
+            await fn(req, res, next);
         } catch (err: any) {
             respondError(res, err, 500, req);
         }
@@ -108,3 +152,5 @@ export function parsePositiveInt(value: unknown, fallback: number): number {
     const n = parseInt(String(value ?? ''), 10);
     return Number.isFinite(n) && n > 0 ? n : fallback;
 }
+
+export default centralizedErrorHandler;

@@ -319,3 +319,5 @@ export interface GamingTelemetry {
     is_optimal: boolean;
     timestamp: number;
 }
+
+export * from './logger';

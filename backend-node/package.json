@@ -12,12 +12,14 @@
     "spec:troubleshoot": "ts-node -e \"console.log(require('fs').readFileSync('../docs/TROUBLESHOOTING.md', 'utf8'))\""
   },
   "dependencies": {
+    "@opentelemetry/api": "^1.9.1",
     "better-sqlite3": "11.10.0",
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
     "express": "^4.18.2",
     "helmet": "^8.3.0",
     "pino": "^10.3.1",
+    "pino-http": "^11.0.0",
     "socket.io": "^4.7.2",
     "ws": "^8.21.3",
     "zod": "^3.25.76"

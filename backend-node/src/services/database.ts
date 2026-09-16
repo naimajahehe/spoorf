@@ -424,8 +424,12 @@ export class DatabaseService {
             this.db.pragma('busy_timeout = 5000');
         } catch (err: any) {
             this.usingMemoryFallback = true;
-            this.log.error(
-                { dbPath: this.dbPath, err },
+            this.log.warn(
+                {
+                    event: { action: 'db_fallback_memory', category: 'database' },
+                    context: { dbPath: this.dbPath },
+                    err
+                },
                 `GAGAL membuka file DB ${this.dbPath} (${err?.message || err}). Beralih ke SQLite IN-MEMORY. PERINGATAN: data perangkat & lisensi TIDAK akan tersimpan permanen.`
             );
             this.db = new Database(':memory:');
@@ -651,7 +655,6 @@ export class DatabaseService {
             this.log.info({ dbPath: this.dbPath }, `SQLite connected & schema initialized (${this.dbPath})`);
             this.initialized = true;
         } catch (error) {
-            this.log.error({ err: error, dbPath: this.dbPath }, 'Failed to initialize SQLite database');
             throw error;
         }
     }

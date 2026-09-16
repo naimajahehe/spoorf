@@ -7,13 +7,15 @@ export abstract class AppError extends Error {
     public readonly code: string;
     public readonly isOperational: boolean;
     public readonly details?: unknown;
+    public readonly context?: Record<string, unknown>;
 
     constructor(
         message: string,
         statusCode: number = 500,
         code: string = 'INTERNAL_ERROR',
         isOperational: boolean = true,
-        details?: unknown
+        details?: unknown,
+        context?: Record<string, unknown>
     ) {
         super(message);
         this.name = this.constructor.name;
@@ -21,6 +23,7 @@ export abstract class AppError extends Error {
         this.code = code;
         this.isOperational = isOperational;
         this.details = details;
+        this.context = context;
 
         if (Error.captureStackTrace) {
             Error.captureStackTrace(this, this.constructor);
@@ -95,7 +98,17 @@ export class InvariantViolationError extends AppError {
  * Thrown when an upstream microservice (e.g. Python FastAPI engine) fails or is unreachable.
  */
 export class UpstreamServiceError extends AppError {
-    constructor(message: string = 'Upstream service failure', statusCode: number = 502, code: string = 'UPSTREAM_SERVICE_ERROR', details?: unknown) {
-        super(message, statusCode, code, true, details);
+    constructor(message: string = 'Upstream service failure', statusCode: number = 502, code: string = 'UPSTREAM_SERVICE_ERROR', details?: unknown, context?: Record<string, unknown>) {
+        super(message, statusCode, code, true, details, context);
+    }
+}
+
+/**
+ * 500 Internal Server Error
+ * Thrown when an unexpected error occurs internally on the server.
+ */
+export class InternalServerError extends AppError {
+    constructor(message: string = 'Internal server error', context?: Record<string, unknown>, details?: unknown) {
+        super(message, 500, 'INTERNAL_SERVER_ERROR', false, details, context);
     }
 }

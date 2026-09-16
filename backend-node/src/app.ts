@@ -12,6 +12,7 @@ import { WebSocketManager } from './websocket';
 import { corsOriginCallback, hostGuard, apiTokenGuard } from './security';
 import { registerGracefulShutdown } from './shutdown';
 import { requestLogger } from './middlewares/requestLogger';
+import { centralizedErrorHandler } from './middlewares/errorHandler';
 import { logger } from './utils/logger';
 
 // Fail-fast environment validation on boot
@@ -52,6 +53,9 @@ const wsManager = new WebSocketManager(server, deviceManager, licenseManager);
 
 // Routes
 app.use('/', createRouter(deviceManager, licenseManager));
+
+// Centralized Error Handler (Express 4-parameter error middleware)
+app.use(centralizedErrorHandler);
 
 // Start
 async function start() {

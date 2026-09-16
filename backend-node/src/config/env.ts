@@ -12,6 +12,8 @@ export const EnvSchema = z.object({
     PORT: z.coerce.number().int().positive().default(5000),
     HOST: z.string().default('127.0.0.1'),
     NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
+    SERVICE_NAME: z.string().default('netcut-backend'),
+    APP_VERSION: z.string().default('1.0.0'),
     PYTHON_SERVICE_URL: HttpUrlSchema.default('http://127.0.0.1:8001'),
     PYTHON_PATH: z.string().optional(),
     PYTHON_SERVICE_PATH: z.string().optional(),
