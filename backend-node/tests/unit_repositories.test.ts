@@ -264,6 +264,38 @@ export async function runRepositoriesTests(): Promise<void> {
         assert.strictEqual(oldDev?.ip, '', 'Old device must lose IP upon reassignment to avoid IP collision');
         assert.strictEqual(oldDev?.is_online, false);
 
+        // Gateway Immunity on IP collision: Rogue device claiming gateway IP does NOT wipe gateway IP
+        db.prepare(`
+            INSERT INTO devices (network_id, mac, ip, hostname, is_gateway, is_online)
+            VALUES ('net_default', '00:00:5e:00:53:01', '192.168.1.1', 'Main-Router', 1, 1)
+        `).run();
+
+        db.prepare(`
+            INSERT INTO devices (network_id, mac, ip, hostname, is_online)
+            VALUES ('net_default', '00:99:88:77:66:55', '192.168.1.200', 'Rogue-Device', 1)
+        `).run();
+
+        const rogueDev: Device = {
+            ip: '192.168.1.1', // Rogue device claiming gateway IP
+            mac: '00:99:88:77:66:55',
+            hostname: 'Rogue-Device',
+            vendor: 'Unknown',
+            device_type: 'Unknown',
+            os: 'Unknown',
+            rtt_ms: 0,
+            open_ports: [],
+            services: [],
+            is_blocked: false,
+            is_online: true,
+            is_gateway: false,
+            speed_limit: 100
+        };
+
+        await devRepo.save(rogueDev, 'net_default');
+        const router = await devRepo.getByMac('00:00:5e:00:53:01', 'net_default');
+        assert.strictEqual(router?.ip, '192.168.1.1', 'Gateway IP must NEVER be wiped by rogue occupant collision (Invariant 1)');
+        assert.strictEqual(router?.is_online, true);
+
         // Delete
         await devRepo.delete('00:11:22:33:44:99', 'net_default');
         const deleted = await devRepo.getByMac('00:11:22:33:44:99', 'net_default');
@@ -271,5 +303,65 @@ export async function runRepositoriesTests(): Promise<void> {
 
         db.close();
         console.log('  ✓ DeviceRepository: CRUD, speed limit, alias, and IP collision disassociation verified');
+    }
+
+    // Test 6: Invariant 1 & 2 Protection in syncScanResults continuity archiving
+    {
+        const { DatabaseService } = await import('../src/services/database');
+        const dbService = new DatabaseService(':memory:');
+        await dbService.init();
+
+        // Setup profile
+        dbService.db.prepare(`
+            INSERT INTO device_profiles (id, alias, hostname)
+            VALUES ('prof_shared', 'Shared Profile', 'target-device')
+        `).run();
+
+        // Setup Gateway having profile_id (edge case / rogue collision)
+        dbService.db.prepare(`
+            INSERT INTO devices (network_id, mac, ip, profile_id, is_gateway, is_self, is_online, is_archived)
+            VALUES ('net_default', '00:00:5e:00:00:01', '192.168.1.1', 'prof_shared', 1, 0, 1, 0)
+        `).run();
+
+        // Setup Operator PC (is_self) having profile_id
+        dbService.db.prepare(`
+            INSERT INTO devices (network_id, mac, ip, profile_id, is_gateway, is_self, is_online, is_archived)
+            VALUES ('net_default', '00:00:5e:00:00:02', '192.168.1.5', 'prof_shared', 0, 1, 1, 0)
+        `).run();
+
+        // Scanned device with high confidence match to prof_shared
+        const scanned: Device = {
+            ip: '192.168.1.88',
+            mac: '26:bb:cc:dd:ee:88',
+            hostname: 'target-device',
+            vendor: 'Samsung',
+            device_type: 'Mobile',
+            os: 'Android',
+            rtt_ms: 12,
+            open_ports: [],
+            services: [],
+            dhcp_fingerprint: '1,3,6,15,28',
+            dhcp_vendor_class: 'android-dhcp',
+            is_randomized_mac: true,
+            is_blocked: false,
+            is_online: true,
+            is_gateway: false,
+            speed_limit: 100
+        };
+
+        await dbService.syncScanResults([scanned], 'net_default');
+
+        // Verify Gateway is NOT archived
+        const gw = await dbService.getDeviceByMac('00:00:5e:00:00:01', 'net_default');
+        assert.strictEqual(gw?.is_archived, false, 'Gateway must NEVER be archived during continuity fusing (Invariant 1)');
+        assert.strictEqual(gw?.ip, '192.168.1.1', 'Gateway IP must be preserved');
+
+        // Verify Self Host PC is NOT archived
+        const selfDev = await dbService.getDeviceByMac('00:00:5e:00:00:02', 'net_default');
+        assert.strictEqual(selfDev?.is_archived, false, 'Controller host must NEVER be archived during continuity fusing (Invariant 2)');
+        assert.strictEqual(selfDev?.ip, '192.168.1.5', 'Controller host IP must be preserved');
+
+        await dbService.close();
+        console.log('  ✓ Invariant 1 & 2: Gateway and Controller host are strictly immune to continuity archiving');
     }
 }

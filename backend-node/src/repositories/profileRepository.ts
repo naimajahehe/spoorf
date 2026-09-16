@@ -176,6 +176,7 @@ export class ProfileRepository implements IProfileRepository {
                         last_ip = CASE WHEN ip != '' AND ip IS NOT NULL THEN ip ELSE last_ip END,
                         ip = ''
                     WHERE network_id = ? AND ip = ? AND LOWER(mac) != LOWER(?)
+                      AND (is_gateway IS NULL OR is_gateway = 0)
                 `).run(networkId, cleanIp, normMac);
                 this.db.prepare(`
                     UPDATE devices SET

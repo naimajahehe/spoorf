@@ -336,22 +336,29 @@ export class DatabaseService implements IDatabaseService {
         }));
 
         // Prepared statements untuk performa ultra-cepat di dalam transaksi (SCOPED KE network_id)
+        // Architectural Note: Prepared statements di-reuse langsung di sini untuk performa throughput tinggi
+        // dalam iterasi loop scan reconciliation dengan jaminan transaksi atomik native SQLite.
         const resetGatewayStmt = this.db.prepare(`UPDATE devices SET is_gateway = 0 WHERE network_id = ? AND LOWER(mac) != LOWER(?)`);
         const updateProfileLinkedMacsStmt = this.db.prepare(`
             UPDATE device_profiles
             SET linked_macs = ?, updated_at = datetime('now', 'localtime')
             WHERE id = ?
         `);
+        // INVARIAN 1 & 2: Gateway dan Operator Controller (is_self) TIDAK BOLEH diarsipkan secara otomatis!
         const archiveDevicesStmt = this.db.prepare(`
             UPDATE devices
             SET is_archived = 1, is_online = 0, session_id = NULL,
                 last_ip = CASE WHEN ip != '' AND ip IS NOT NULL THEN ip ELSE last_ip END,
                 ip = ''
             WHERE network_id = ? AND profile_id = ? AND LOWER(mac) != LOWER(?)
+              AND (is_gateway IS NULL OR is_gateway = 0)
+              AND (is_self IS NULL OR is_self = 0)
         `);
         const selectArchivedSessionsStmt = this.db.prepare(`
             SELECT mac, session_id FROM devices
             WHERE network_id = ? AND profile_id = ? AND LOWER(mac) != LOWER(?) AND session_id IS NOT NULL
+              AND (is_gateway IS NULL OR is_gateway = 0)
+              AND (is_self IS NULL OR is_self = 0)
         `);
         const clearOtherSelfStmt = this.db.prepare(`
             UPDATE devices SET is_self = 0
@@ -447,6 +454,7 @@ export class DatabaseService implements IDatabaseService {
                 last_ip = CASE WHEN ip != '' AND ip IS NOT NULL THEN ip ELSE last_ip END,
                 ip = ''
             WHERE network_id = ? AND ip = ? AND LOWER(mac) != LOWER(?)
+              AND (is_gateway IS NULL OR is_gateway = 0)
         `);
 
         // Eksekusi atomik menggunakan db.transaction native better-sqlite3

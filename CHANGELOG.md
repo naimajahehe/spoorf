@@ -2,6 +2,20 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.50] - 2026-09-17
+
+### Superpowers Code Review Hardening: Penguatan Invariant Gateway Immunity & Controller Self-Cut pada Repositori
+- **Proteksi Invariant 1 & 2 pada Auto-Archiving Continuity (`syncScanResults`)**:
+  - Memperbaiki celah hasil review independen di mana statement `archiveDevicesStmt` dan `selectArchivedSessionsStmt` belum memiliki guard `is_gateway` dan `is_self`.
+  - Menambahkan guard eksplisit `AND (is_gateway IS NULL OR is_gateway = 0) AND (is_self IS NULL OR is_self = 0)` untuk memastikan router gateway dan komputer controller operator tidak pernah terarsipkan atau kehilangan mapping IP saat proses continuity fusing MAC acak berjalan.
+- **Proteksi Alamat IP Gateway dari Tabrakan Okupan (`disassociateStaleIpStmt`)**:
+  - Menambahkan klausul `AND (is_gateway IS NULL OR is_gateway = 0)` pada `disassociateStaleIpStmt` di `DatabaseService`, `DeviceRepository.save`, `DeviceRepository.updateIp`, dan `ProfileRepository.updateDeviceDhcpProfile`.
+  - Mencegah perangkat baru atau penyerang spoofing yang mengklaim IP gateway menghapus record IP router gateway yang sah di database SQLite.
+- **Pengujian Unit & Verifikasi**:
+  - Menambahkan pengujian kekebalan gateway dan controller host terhadap continuity archiving dan tabrakan IP di `tests/unit_repositories.test.ts`.
+  - Hasil pengujian Node.js meningkat dari **95 menjadi 96 tests PASSED (100% Green)**.
+  - Total test ekosistem: **475 tests PASSED (100% Green)** (96 Node + 379 Python).
+
 ## [v2.41.49] - 2026-09-17
 
 ### Tahap 7: Dekomposisi Monolit DatabaseService ke Repository Pattern (`backend-node`)
