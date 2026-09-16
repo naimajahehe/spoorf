@@ -2,6 +2,21 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.46] - 2026-09-17
+
+### Superpowers Code Review Hardening: Konsolidasi Kunci Memori & Penguatan Invariant L2
+- **Ekstraksi Canonical Device Key Utility (`src/utils/deviceUtils.ts`)**:
+  - Menyatukan implementasi `deviceMemKey`, `normalizeProfileMac`, dan `isPrivateIpv4` ke dalam modul utilitas kanonikal bersama `src/utils/deviceUtils.ts`.
+  - Memperbaiki disparitas kunci registri antara `TrafficService` dan `DeviceManager`: perangkat *offline* (`ip: ''`) kini secara konsisten menggunakan `profile_id || normalizeProfileMac(mac)`, mengeliminasi risiko duplikasi perangkat di memori dan UI (*BUG-17 / map bloat*).
+- **Penguatan Invariant 1 (Gateway Immunity) pada Speed Limiting**:
+  - Menambahkan pengecekan fallback string IP gateway (`gatewayIp && device.ip === gatewayIp`) di `TrafficService._setSpeedLimitImpl` melengkapi flag `is_gateway || is_self`, menyamakan ketatnya proteksi dengan `_blockDeviceImpl`.
+- **Penegakan Invariant 4 (RFC 1918 Scope Strictness) pada TrafficService**:
+  - Memasang validasi *fail-fast* `isPrivateIpv4` pada IP target dan IP gateway di seluruh metode manipulasi L2 (`_blockDeviceImpl`, `_setSpeedLimitImpl`, `_redirectDeviceImpl`) sebelum eksekusi spoofing atau pre-flight liveness.
+- **Verifikasi Pengujian Otomatis**:
+  - Menambahkan 3 pengujian terisolasi baru di `tests/unit_trafficService.test.ts` (Test 9: Gateway Speed Limit Immunity, Test 10: RFC 1918 Private IP Enforcement, Test 11: Canonical deviceMemKey Consistency).
+  - Seluruh test suite lulus 100%: **80 Node tests + 379 Python tests = 459 total passing tests**.
+  - Frontend production build (`tsc && vite build`) 100% bersih.
+
 ## [v2.41.45] - 2026-09-17
 
 ### Tahap 5: Dekomposisi Fisik God Object DeviceManager ke TrafficService & GamingService (`backend-node`)

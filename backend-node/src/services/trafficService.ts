@@ -4,6 +4,7 @@ import { Device } from '../types';
 import { IPythonBridge, IDatabaseService, ILicenseManager, ITrafficService } from '../interfaces';
 import { FeatureLimitError, FeatureLockedError } from './licenseManager';
 import { createChildLogger } from '../utils/logger';
+import { deviceMemKey, isPrivateIpv4 } from '../utils/deviceUtils';
 
 export interface IDeviceRegistry {
     getDevice(ip: string): Device | undefined;
@@ -16,10 +17,6 @@ export interface IDeviceRegistry {
     runExclusive<T>(fn: () => Promise<T>): Promise<T>;
     assertNoPendingGamingConflict?(devices: Iterable<Device>): void;
     getLicense?(): ILicenseManager | undefined;
-}
-
-export function deviceMemKey(device: Pick<Device, 'ip' | 'mac'>): string {
-    return device.ip || device.mac.toLowerCase();
 }
 
 export class TrafficService extends EventEmitter implements ITrafficService {
@@ -94,6 +91,10 @@ export class TrafficService extends EventEmitter implements ITrafficService {
             throw new Error(`Cannot block the gateway (${ip})`);
         }
 
+        if (!isPrivateIpv4(device.ip)) {
+            throw new Error(`Target IP must be an RFC 1918 private address (${device.ip})`);
+        }
+
         if (device.is_blocked && device.session_id) {
             throw new Error(`Device ${ip} already actively blocked`);
         }
@@ -111,6 +112,10 @@ export class TrafficService extends EventEmitter implements ITrafficService {
             this.registry?.findGateway();
         if (!gateway) {
             throw new Error(gatewayIp ? `Gateway ${gatewayIp} not found` : 'Gateway not found');
+        }
+
+        if (gateway.ip && !isPrivateIpv4(gateway.ip)) {
+            throw new Error(`Gateway IP must be an RFC 1918 private address (${gateway.ip})`);
         }
 
         // Pre-Flight Validation: Verifikasi apakah target benar-benar aktif di jaringan L2
@@ -264,11 +269,16 @@ export class TrafficService extends EventEmitter implements ITrafficService {
             this.registry.assertNoPendingGamingConflict([device]);
         }
 
-        if (device.is_gateway || device.is_self) {
-            throw new Error(`Perangkat infrastruktur (${device.is_gateway ? 'Gateway' : 'Perangkat Ini'}) dilindungi dan tidak dapat dibatasi kecepatannya.`);
+        if (device.is_gateway || device.is_self || (gatewayIp && device.ip === gatewayIp)) {
+            const isGw = device.is_gateway || (gatewayIp && device.ip === gatewayIp);
+            throw new Error(`Perangkat infrastruktur (${isGw ? 'Gateway' : 'Perangkat Ini'}) dilindungi dan tidak dapat dibatasi kecepatannya.`);
         }
 
         const cleanLimit = Math.max(0, Math.min(100, Math.round(limit)));
+
+        if (cleanLimit < 100 && !isPrivateIpv4(device.ip)) {
+            throw new Error(`Target IP must be an RFC 1918 private address (${device.ip})`);
+        }
 
         if (cleanLimit > 0 && cleanLimit < 100 && this.currentLicense) {
             const check = this.currentLicense.checkCanThrottle();
@@ -291,6 +301,9 @@ export class TrafficService extends EventEmitter implements ITrafficService {
         }
 
         if (cleanLimit < 100) {
+            if (gateway.ip && !isPrivateIpv4(gateway.ip)) {
+                throw new Error(`Gateway IP must be an RFC 1918 private address (${gateway.ip})`);
+            }
             device = await this.verifyPreFlightLiveness(device, gateway.ip);
         }
 
@@ -413,6 +426,10 @@ export class TrafficService extends EventEmitter implements ITrafficService {
             throw new Error(`Cannot redirect operator host (${ip})`);
         }
 
+        if (!isPrivateIpv4(device.ip)) {
+            throw new Error(`Target IP must be an RFC 1918 private address (${device.ip})`);
+        }
+
         if (device.is_blocked || (device.session_id && !device.is_redirected)) {
             if (device.session_id) await this.python.stopSpoof(device.session_id);
             device.is_blocked = false;
@@ -425,6 +442,10 @@ export class TrafficService extends EventEmitter implements ITrafficService {
         const gw = (gatewayIp && this.registry ? this.registry.getDevice(gatewayIp) : null) || this.registry?.findGateway();
         if (!gw) {
             throw new Error('Gateway not found');
+        }
+
+        if (gw.ip && !isPrivateIpv4(gw.ip)) {
+            throw new Error(`Gateway IP must be an RFC 1918 private address (${gw.ip})`);
         }
 
         const res = await this.python.startRedirect(

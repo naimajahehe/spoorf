@@ -22,7 +22,13 @@ const PROFILE_REFRESH_COOLDOWN_MS = 20_000;
 const PROFILE_ENRICHMENT_COOLDOWN_MS = 60_000;
 const PROFILE_ENRICHMENT_DEBOUNCE_MS = 1_500;
 const IDENTITY_REBLOCK_MIN_INTERVAL_MS = 8_000; // rate-limit re-block scan saat perangkat me-rotasi MAC agresif
-const PROFILE_MAC_PATTERN = /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/;
+import {
+    PROFILE_MAC_PATTERN,
+    normalizeProfileMac,
+    deviceMemKey,
+    isPrivateIpv4
+} from '../utils/deviceUtils';
+export { normalizeProfileMac, deviceMemKey, isPrivateIpv4 };
 
 interface DhcpOptimizationResult {
     success: true;
@@ -39,41 +45,6 @@ interface DeviceScanOptions extends ScanOptions {
     requireFresh?: boolean;
 }
 
-function normalizeProfileMac(mac: unknown): string | null {
-    if (typeof mac !== 'string') return null;
-    const normalized = mac.trim().replace(/-/g, ':').toLowerCase();
-    return PROFILE_MAC_PATTERN.test(normalized) ? normalized : null;
-}
-
-/**
- * Kunci memori stabil untuk `this.devices`. Perangkat ONLINE memakai IP (kunci alami untuk
- * lookup dari API/event). Perangkat OFFLINE ber-`ip=''` memakai IDENTITAS (profile_id →
- * MAC ternormalisasi) — kalau tidak, SEMUA perangkat offline saling menimpa di kunci ''
- * sehingga hanya satu yang tersisa di memori & UI (BUG-17). Identitas tak pernah berformat IP,
- * jadi tak akan bertabrakan dengan kunci perangkat online.
- */
-function deviceMemKey(d?: Device | null): string {
-    if (!d) return '';
-    if (d.ip && d.ip.trim() !== '') return d.ip;
-    return d.profile_id || normalizeProfileMac(d.mac) || (typeof d.mac === 'string' ? d.mac.toLowerCase() : '');
-}
-
-export function isPrivateIpv4(ip: unknown): ip is string {
-    if (typeof ip !== 'string') return false;
-    const text = ip.trim();
-    const parts = text.split('.');
-    if (parts.length !== 4 || parts.some(part => !/^\d{1,3}$/.test(part))) return false;
-    const octets = parts.map(Number);
-    if (
-        octets.some(part => part < 0 || part > 255)
-        || parts.some((part, index) => String(octets[index]) !== part)
-    ) {
-        return false;
-    }
-    return octets[0] === 10
-        || (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31)
-        || (octets[0] === 192 && octets[1] === 168);
-}
 
 function isGenericProfileLabel(
     value: unknown,

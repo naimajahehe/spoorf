@@ -285,4 +285,68 @@ export async function runTrafficServiceTests() {
         assert.strictEqual(stopRedirectCalls.length, 1);
         console.log('  ✓ Redirection: HTTP portal captive redirection and teardown verified');
     }
+
+    // Test 9: Invariant 1 - setSpeedLimit strictly rejects gateway (is_gateway or gatewayIp match)
+    {
+        const { service, devices } = makeTrafficServiceSetup();
+        const gw = makeDevice({ ip: '192.168.1.1', mac: '00:00:00:00:00:01', is_gateway: true });
+        const pseudoGw = makeDevice({ ip: '192.168.1.254', mac: '00:00:00:00:00:fe', is_gateway: false });
+        devices.set(gw.ip, gw);
+        devices.set(pseudoGw.ip, pseudoGw);
+
+        await assert.rejects(
+            () => service.setSpeedLimit('192.168.1.1', 50, '192.168.1.1'),
+            (err: any) => /Perangkat infrastruktur \(Gateway\)/.test(err.message)
+        );
+
+        await assert.rejects(
+            () => service.setSpeedLimit('192.168.1.254', 50, '192.168.1.254'),
+            (err: any) => /Perangkat infrastruktur \(Gateway\)/.test(err.message)
+        );
+        console.log('  ✓ Invariant 1: Router gateway immunity strictly rejects setSpeedLimit');
+    }
+
+    // Test 10: Invariant 4 - RFC 1918 private IP scope enforcement
+    {
+        const { service, devices, setLicense } = makeTrafficServiceSetup();
+        const gw = makeDevice({ ip: '192.168.1.1', mac: '00:00:00:00:00:01', is_gateway: true });
+        const publicDev = makeDevice({ ip: '8.8.8.8', mac: '00:00:00:00:08:08' });
+        devices.set(gw.ip, gw);
+        devices.set(publicDev.ip, publicDev);
+        setLicense({
+            checkCanThrottle: () => ({ allowed: true }),
+            checkCanBlock: () => ({ allowed: true })
+        });
+
+        await assert.rejects(
+            () => service.blockDevice('8.8.8.8', '192.168.1.1'),
+            (err: any) => /RFC 1918/.test(err.message)
+        );
+
+        await assert.rejects(
+            () => service.setSpeedLimit('8.8.8.8', 50, '192.168.1.1'),
+            (err: any) => /RFC 1918/.test(err.message)
+        );
+
+        await assert.rejects(
+            () => service.redirectDevice('8.8.8.8', 'https://warning.lan', '', '192.168.1.1'),
+            (err: any) => /RFC 1918/.test(err.message)
+        );
+        console.log('  ✓ Invariant 4: RFC 1918 private IP scope strictly enforced across all operations');
+    }
+
+    // Test 11: Canonical deviceMemKey consistency between TrafficService and DeviceManager
+    {
+        const { deviceMemKey } = await import('../src/utils/deviceUtils');
+        const onlineDev = makeDevice({ ip: '192.168.1.75', mac: 'AA:BB:CC:DD:EE:FF', profile_id: 'prof-123' });
+        const offlineDev = makeDevice({ ip: '', mac: 'AA-BB-CC-DD-EE-FF', profile_id: 'prof-123' });
+        const unprofiledOfflineDev = makeDevice({ ip: '', mac: 'AA-BB-CC-DD-EE-99', profile_id: undefined });
+
+        assert.strictEqual(deviceMemKey(onlineDev), '192.168.1.75');
+        assert.strictEqual(deviceMemKey(offlineDev), 'prof-123');
+        assert.strictEqual(deviceMemKey(unprofiledOfflineDev), 'aa:bb:cc:dd:ee:99');
+        console.log('  ✓ Architecture: Canonical deviceMemKey contract strictly isolates offline and profiled devices');
+    }
 }
+
+
