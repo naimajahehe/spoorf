@@ -56,6 +56,8 @@ function makeDiscoverySetup() {
     db.ensureNetwork = async () => {};
     db.setDeviceOnlineStatus = async () => {};
 
+    const armedCooldowns: Array<{ mac: string; hostnameOrIp?: string }> = [];
+
     const registry: IDiscoveryRegistryDelegate = {
         getDevice: (ip: string) => devices.get(ip),
         findDeviceByMac: (mac: string) => {
@@ -82,12 +84,15 @@ function makeDiscoverySetup() {
             return true;
         },
         runExclusive: async <T>(fn: () => Promise<T>) => fn(),
-        scheduleProfileEnrichment: () => {}
+        scheduleProfileEnrichment: () => {},
+        armOfflineCooldown: (mac: string, hostnameOrIp?: string) => {
+            armedCooldowns.push({ mac, hostnameOrIp });
+        }
     };
 
     const service = new DiscoveryService(python, db, registry);
 
-    return { service, python, db, devices, registry, emitted, getScanCount: () => scanCount };
+    return { service, python, db, devices, registry, emitted, armedCooldowns, getScanCount: () => scanCount };
 }
 
 export async function runDiscoveryServiceTests(): Promise<void> {
@@ -187,9 +192,9 @@ export async function runDiscoveryServiceTests(): Promise<void> {
         console.log('  ✓ Watchdog Gating: Background watchdog execution respects autoScan toggle & concurrency');
     }
 
-    // 5. Liveness Pulse Event Handling
+    // 5. Liveness Pulse Event Handling & Offline Penalty Arming
     {
-        const { service, registry, emitted } = makeDiscoverySetup();
+        const { service, registry, emitted, armedCooldowns } = makeDiscoverySetup();
         const dev = makeDevice({ ip: '192.168.1.75', mac: '70:80:90:aa:bb:cc', is_online: true });
         registry.setDevice(dev.ip, dev);
 
@@ -204,6 +209,7 @@ export async function runDiscoveryServiceTests(): Promise<void> {
         assert.strictEqual(dev.is_online, false);
         const disconnectedEvent = emitted.find(e => e.event === 'deviceDisconnected');
         assert.ok(disconnectedEvent, 'deviceDisconnected event emitted on fast liveness offline pulse');
+        assert.ok(armedCooldowns.some(c => c.mac.toLowerCase() === dev.mac.toLowerCase()), 'armOfflineCooldown called on offline pulse');
         console.log('  ✓ Liveness Event: Sub-second offline state transition and event notification verified');
     }
 }

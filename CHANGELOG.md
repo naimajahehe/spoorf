@@ -2,6 +2,23 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.48] - 2026-09-17
+
+### Superpowers Code Review Hardening: Pemulihan Arming Penalti Offline DHCP & Konkurensi Auto-Reblock
+- **Pemulihan Mekanisme Arming Karantina Offline 30s (`armOfflineCooldown`)**:
+  - Menemukan dan memperbaiki celah hasil audit independen di mana timer karantina 30s (`offlineCooldownTimers`) pada `ReconciliationService` tidak pernah di-arm setelah pemisahan service.
+  - Menambahkan kontrak `armOfflineCooldown`, `clearOfflineCooldown`, dan `hasOfflineCooldown` pada `IReconciliationService` dan `ReconciliationService`.
+  - Menghubungkan delegasi `armOfflineCooldown` pada `IDiscoveryRegistryDelegate` dan `DeviceManager`.
+  - Meng-arm timer karantina saat perangkat terputus pada `DiscoveryService.scanNetwork`, `DiscoveryService.handleLivenessEvent`, dan `ReconciliationService` DHCP RELEASE.
+  - Memperbarui pengujian unit `unit_reconciliationService.test.ts` dan `unit_discoveryService.test.ts` untuk memvalidasi arming dan pembatalan otomatis penalti secara langsung.
+- **Konkurensi Paralel Auto-Reblock & Auto-Throttle (`DiscoveryService`)**:
+  - Mengubah perulangan sekuensial pada eksekusi `autoReblockTargets` dan `autoThrottleTargets` menjadi eksekusi konkuren non-blocking via `Promise.allSettled`, mempercepat pemulihan status jaringan dan mencegah pipeline pemindaian tertahan saat RPC upstream merespons lambat.
+- **Verifikasi Kualitas Menyeluruh**:
+  - 90 tes Node.js PASSED (100% Green).
+  - 379 tes Python PASSED (100% Green).
+  - Total 469 tes ekosistem lulus pengujian tanpa regresi.
+  - Build frontend bersih 100% dalam 8.29s.
+
 ## [v2.41.47] - 2026-09-17
 
 ### Tahap 6: Dekomposisi Fisik Monolit DeviceManager ke DiscoveryService & ReconciliationService (`backend-node`)

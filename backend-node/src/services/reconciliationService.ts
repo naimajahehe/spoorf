@@ -88,6 +88,39 @@ export class ReconciliationService extends EventEmitter implements IReconciliati
             clearTimeout(this.profileEnrichmentTimer);
             this.profileEnrichmentTimer = null;
         }
+        for (const timer of this.offlineCooldownTimers.values()) {
+            clearTimeout(timer);
+        }
+        this.offlineCooldownTimers.clear();
+    }
+
+    armOfflineCooldown(mac: string, hostnameOrIp?: string): void {
+        const normMac = (mac || '').toLowerCase();
+        if (!normMac) return;
+        const prevTimer = this.offlineCooldownTimers.get(normMac);
+        if (prevTimer) clearTimeout(prevTimer);
+
+        const penaltyTimer = setTimeout(() => {
+            this.offlineCooldownTimers.delete(normMac);
+            this.log.info({ mac: normMac, name: hostnameOrIp }, `⏱️ [Cooldown 30s Expired] Masa karantina offline untuk ${hostnameOrIp || normMac} selesai.`);
+        }, 30000);
+        penaltyTimer.unref();
+        this.offlineCooldownTimers.set(normMac, penaltyTimer);
+    }
+
+    clearOfflineCooldown(mac: string): boolean {
+        const normMac = (mac || '').toLowerCase();
+        const timer = this.offlineCooldownTimers.get(normMac);
+        if (timer) {
+            clearTimeout(timer);
+            this.offlineCooldownTimers.delete(normMac);
+            return true;
+        }
+        return false;
+    }
+
+    hasOfflineCooldown(mac: string): boolean {
+        return this.offlineCooldownTimers.has((mac || '').toLowerCase());
     }
 
     async handleDhcpEvent(data: any): Promise<void> {
@@ -120,6 +153,7 @@ export class ReconciliationService extends EventEmitter implements IReconciliati
                     }
                     this.registry.setDevice(deviceMemKey(dev), dev);
                     this.db.setDeviceOnlineStatus(dev.mac, false, this.registry.getCurrentNetworkId()).catch(err => this.log.warn({ mac: dev.mac, err }, 'Failed to set device offline on DHCP release'));
+                    this.armOfflineCooldown(normMac, dev.hostname || dev.last_ip || dev.mac);
                     this.emit('deviceUpdated', dev);
                     this.emit('deviceDisconnected', dev);
                     if (this.registry) {
@@ -152,10 +186,7 @@ export class ReconciliationService extends EventEmitter implements IReconciliati
             const normMac = data.mac.toLowerCase();
 
             // ⚡ [DHCP Fast-Revival] Batalkan penalti karantina 30s seketika saat sinyal DHCP aktif diterima
-            const existingPenalty = this.offlineCooldownTimers.get(normMac);
-            if (existingPenalty) {
-                clearTimeout(existingPenalty);
-                this.offlineCooldownTimers.delete(normMac);
+            if (this.clearOfflineCooldown(normMac)) {
                 this.log.info({ mac: normMac, messageType: data.message_type }, `[DHCP Fast-Revival] Penalti 30s DIBATALKAN untuk ${normMac} karena sinyal DHCP ${data.message_type || 'aktif'} diterima!`);
             }
 

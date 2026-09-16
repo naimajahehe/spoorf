@@ -266,6 +266,9 @@ export class DeviceManager extends EventEmitter implements IDeviceManager {
             scheduleProfileEnrichment: (mac: string, delayMs?: number) => {
                 this.scheduleProfileEnrichment(mac, delayMs);
             },
+            armOfflineCooldown: (mac: string, hostnameOrIp?: string) => {
+                this.reconciliationService.armOfflineCooldown(mac, hostnameOrIp);
+            },
             isAutoScanEnabled: () => this.discoveryService.isAutoScanEnabled(),
             debouncedScan: (delayMs?: number) => this.debouncedScan(delayMs),
             scanNetwork: (options?: any) => this.scanNetwork(options)
@@ -428,6 +431,10 @@ export class DeviceManager extends EventEmitter implements IDeviceManager {
 
     private async _getLiveEngineSessionIds(): Promise<Set<string> | undefined> {
         return (this.discoveryService as any).getLiveEngineSessionIds();
+    }
+
+    armOfflineCooldown(mac: string, hostnameOrIp?: string): void {
+        this.reconciliationService.armOfflineCooldown(mac, hostnameOrIp);
     }
 
     async init(): Promise<void> {

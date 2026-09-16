@@ -24,6 +24,7 @@ export interface IDiscoveryRegistryDelegate {
     emit(event: string, ...args: any[]): boolean;
     runExclusive<T>(fn: () => Promise<T>): Promise<T>;
     scheduleProfileEnrichment?(mac: string, delayMs?: number): void;
+    armOfflineCooldown?(mac: string, hostnameOrIp?: string): void;
 }
 
 export class DiscoveryService extends EventEmitter implements IDiscoveryService {
@@ -306,6 +307,7 @@ export class DiscoveryService extends EventEmitter implements IDiscoveryService 
                             this.registry.deleteDevice(prev.ip);
                         }
                         this.registry.setDevice(deviceMemKey(dev), dev);
+                        this.registry.armOfflineCooldown?.(dev.mac, dev.hostname || dev.ip || dev.last_ip);
                         this.emit('deviceDisconnected', dev);
                         if (this.registry) {
                             this.registry.emit('deviceDisconnected', dev);
@@ -419,17 +421,17 @@ export class DiscoveryService extends EventEmitter implements IDiscoveryService 
 
             const gateway = this.registry.findGateway();
 
-            // 1. Eksekusi AUTO-REBLOCK dengan LATE-CHECK otoritatif
+            // 1. Eksekusi AUTO-REBLOCK dengan LATE-CHECK otoritatif (Concurrent via Promise.allSettled)
             if (gateway && autoReblockTargets.length > 0) {
-                for (const target of autoReblockTargets) {
-                    if (target.is_gateway || target.is_self || target.ip === gateway.ip) continue;
+                await Promise.allSettled(autoReblockTargets.map(async (target) => {
+                    if (target.is_gateway || target.is_self || target.ip === gateway.ip) return;
 
                     const currentDev = this.registry.getDevice(target.ip);
-                    if (!currentDev || currentDev.is_self || currentDev.is_gateway) continue;
+                    if (!currentDev || currentDev.is_self || currentDev.is_gateway) return;
 
                     if (!currentDev.is_blocked) {
                         this.log.info({ ip: target.ip, mac: target.mac }, `[AUTO-REBLOCK] Skipping ${target.ip} because it was unblocked during scan`);
-                        continue;
+                        return;
                     }
 
                     if (this.trafficService && 'clearStaleSpoofSession' in this.trafficService) {
@@ -471,19 +473,19 @@ export class DiscoveryService extends EventEmitter implements IDiscoveryService 
                     } catch (err) {
                         this.log.error({ err, ip: target.ip, mac: target.mac }, `[AUTO-REBLOCK] Failed to auto-block ${target.ip}`);
                     }
-                }
+                }));
             }
 
-            // 2. Eksekusi AUTO-THROTTLE dengan LATE-CHECK otoritatif
+            // 2. Eksekusi AUTO-THROTTLE dengan LATE-CHECK otoritatif (Concurrent via Promise.allSettled)
             if (gateway && autoThrottleTargets.length > 0) {
-                for (const target of autoThrottleTargets) {
-                    if (target.is_gateway || target.is_self || target.ip === gateway.ip) continue;
+                await Promise.allSettled(autoThrottleTargets.map(async (target) => {
+                    if (target.is_gateway || target.is_self || target.ip === gateway.ip) return;
 
                     const currentDev = this.registry.getDevice(target.ip);
-                    if (!currentDev || currentDev.is_self || currentDev.is_gateway) continue;
+                    if (!currentDev || currentDev.is_self || currentDev.is_gateway) return;
 
                     if (currentDev.speed_limit === undefined || currentDev.speed_limit >= 100 || currentDev.is_blocked) {
-                        continue;
+                        return;
                     }
 
                     if (this.trafficService && 'clearStaleSpoofSession' in this.trafficService) {
@@ -524,7 +526,7 @@ export class DiscoveryService extends EventEmitter implements IDiscoveryService 
                     } catch (err) {
                         this.log.error({ err, ip: target.ip, mac: target.mac }, `[AUTO-THROTTLE] Failed to auto-throttle ${target.ip}`);
                     }
-                }
+                }));
             }
 
             // 3. Gaming Mode: throttle perangkat baru selagi mode aktif
@@ -581,6 +583,7 @@ export class DiscoveryService extends EventEmitter implements IDiscoveryService 
 
             if (wasOnline && !isOnline) {
                 this.log.info({ ip: dev.ip, mac: dev.mac, vector: data.vector || 'timeout' }, `[LivenessPulse < 0.75s] Instant Offline Confirmed: ${dev.ip} (${dev.mac}) via vector '${data.vector || 'timeout'}'`);
+                this.registry.armOfflineCooldown?.(dev.mac, dev.alias || dev.hostname || dev.ip);
                 this.emit('deviceDisconnected', dev);
                 this.emit('devicesUpdated', this.registry.getAllDevices());
                 if (this.registry) {

@@ -121,19 +121,20 @@ export async function runReconciliationServiceTests(): Promise<void> {
     {
         const { service } = makeReconciliationSetup();
         const normMac = '00:11:22:33:44:99';
-        let timerCleared = false;
-        const fakeTimer: any = setTimeout(() => {}, 30000);
-        (service as any).offlineCooldownTimers.set(normMac, fakeTimer);
+        
+        // Test armOfflineCooldown actually sets penalty
+        service.armOfflineCooldown(normMac, 'Target-PC');
+        assert.strictEqual(service.hasOfflineCooldown(normMac), true, 'Cooldown timer armed via service method');
 
+        // Fast-revival cancels the armed cooldown
         await service.handleDhcpEvent({
             mac: normMac,
             ip: '192.168.1.99',
             message_type: 'REQUEST'
         });
 
-        assert.strictEqual((service as any).offlineCooldownTimers.has(normMac), false, 'Cooldown timer cleared on active DHCP');
-        clearTimeout(fakeTimer);
-        console.log('  ✓ Fast Revival: 30s offline penalty timer cancelled upon active DHCP renewal');
+        assert.strictEqual(service.hasOfflineCooldown(normMac), false, 'Cooldown timer cleared on active DHCP');
+        console.log('  ✓ Fast Revival: 30s offline penalty timer armed and cancelled upon active DHCP renewal');
     }
 
     // 4. Identity-Match Auto-Reblock: New MAC matching blocked identity triggers urgent re-block scan

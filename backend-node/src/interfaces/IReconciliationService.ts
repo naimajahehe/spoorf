@@ -20,4 +20,7 @@ export interface IReconciliationService extends EventEmitter {
     runProfileRefresh(targetMacs: Set<string> | null, scope: 'all' | 'subset'): Promise<ProfileRefreshResult>;
     quickReauthProfiling(): Promise<ProfileRefreshResult>;
     scheduleProfileEnrichment(mac: string, delayMs?: number): void;
+    armOfflineCooldown(mac: string, hostnameOrIp?: string): void;
+    clearOfflineCooldown(mac: string): boolean;
+    hasOfflineCooldown(mac: string): boolean;
 }
