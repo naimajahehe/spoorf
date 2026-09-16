@@ -13,6 +13,8 @@ import { runErrorTests } from './unit_errors.test';
 import { runLoggerTests } from './unit_logger.test';
 import { runContainerTests } from './unit_container.test';
 import { runTrafficServiceTests } from './unit_trafficService.test';
+import { runDiscoveryServiceTests } from './unit_discoveryService.test';
+import { runReconciliationServiceTests } from './unit_reconciliationService.test';
 
 async function main() {
     console.log('=====================================================');
@@ -142,6 +144,22 @@ async function main() {
         passed += 8;
     } catch (err: any) {
         console.error('❌ TrafficService Test Failed:', err);
+        failed++;
+    }
+
+    try {
+        await runDiscoveryServiceTests();
+        passed += 5;
+    } catch (err: any) {
+        console.error('❌ DiscoveryService Test Failed:', err);
+        failed++;
+    }
+
+    try {
+        await runReconciliationServiceTests();
+        passed += 5;
+    } catch (err: any) {
+        console.error('❌ ReconciliationService Test Failed:', err);
         failed++;
     }
 

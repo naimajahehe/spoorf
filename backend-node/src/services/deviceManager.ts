@@ -1,276 +1,86 @@
 import os from 'os';
 import * as path from 'path';
 import { EventEmitter } from 'events';
-import { normalizeProfileIpv6Addresses, PythonBridge } from './pythonBridge';
+import { PythonBridge } from './pythonBridge';
 import { DatabaseService, deriveNetworkId } from './database';
 import { LicenseManager, FeatureLimitError, FeatureLockedError } from './licenseManager';
 import { Device, CutStatus, ProfileAssessment, ProfileRefreshResult } from '../types';
 import type { ScanOptions } from './pythonBridge';
 import { createChildLogger } from '../utils/logger';
-import { IDeviceManager, IPythonBridge, IDatabaseService, ILicenseManager, ITrafficService, IGamingService } from '../interfaces';
+import {
+    IDeviceManager,
+    IPythonBridge,
+    IDatabaseService,
+    ILicenseManager,
+    ITrafficService,
+    IGamingService,
+    IDiscoveryService,
+    IReconciliationService,
+    DhcpOptimizationResult,
+    DeviceScanOptions
+} from '../interfaces';
 import { TrafficService, IDeviceRegistry } from './trafficService';
 import { GamingService, IGamingStateDelegate, PendingGamingDisable, GamingRestorePlan } from './gamingService';
+import { DiscoveryService, IDiscoveryRegistryDelegate } from './discoveryService';
+import { ReconciliationService, IReconciliationRegistryDelegate } from './reconciliationService';
 export { PendingGamingDisable, GamingRestorePlan };
 
 // Retensi: perangkat tamu yang offline lebih lama dari ini diarsipkan (bukan dihapus)
-// agar daftar mencerminkan jaringan nyata, bukan riwayat semua tamu. Lihat
-// DatabaseService.archiveStaleDevices() untuk pagar pengamannya (blokir/alias/sesi/profil).
+// agar daftar mencerminkan jaringan nyata, bukan riwayat semua tamu.
 export const STALE_DEVICE_RETENTION_DAYS = 14;
 const RETENTION_SWEEP_INTERVAL_MS = 24 * 60 * 60 * 1000; // sekali per hari
-const DHCP_OPTIMIZATION_COOLDOWN_MS = 20_000;
-const PROFILE_REFRESH_COOLDOWN_MS = 20_000;
-const PROFILE_ENRICHMENT_COOLDOWN_MS = 60_000;
-const PROFILE_ENRICHMENT_DEBOUNCE_MS = 1_500;
-const IDENTITY_REBLOCK_MIN_INTERVAL_MS = 8_000; // rate-limit re-block scan saat perangkat me-rotasi MAC agresif
+
 import {
     PROFILE_MAC_PATTERN,
     normalizeProfileMac,
     deviceMemKey,
-    isPrivateIpv4
+    isPrivateIpv4,
+    isGenericProfileLabel,
+    isIpInSameSubnet,
+    ipv4ToInt,
+    netmaskToPrefix,
+    isSameSubnetMasked,
+    NetIfaceLike,
+    resolveActivePrefix,
+    scopeDevicesToActiveSubnet,
+    selectGateway
 } from '../utils/deviceUtils';
-export { normalizeProfileMac, deviceMemKey, isPrivateIpv4 };
-
-interface DhcpOptimizationResult {
-    success: true;
-    delivery: any;
-    dhcpDelta: any;
-    dhcpStats: any;
-    devices: Device[];
-    cached: boolean;
-    cooldown_remaining_ms: number;
-    duration_ms: number;
-}
-
-interface DeviceScanOptions extends ScanOptions {
-    requireFresh?: boolean;
-}
-
-
-function isGenericProfileLabel(
-    value: unknown,
-    field: 'vendor' | 'device_type' | 'hostname' | 'os'
-): boolean {
-    if (typeof value !== 'string' || value.trim() === '') return true;
-    const normalized = value.trim().toLowerCase();
-    if (normalized === '-' || normalized === 'n/a' || normalized === 'none') return true;
-    if (normalized === 'unknown' || normalized.startsWith('unknown ')) return true;
-    if (normalized === 'generic' || normalized.startsWith('generic ')) return true;
-    if (field === 'vendor' && normalized.startsWith('private device')) return true;
-    if (field === 'hostname' && normalized === 'device') return true;
-    if (field === 'device_type' && (normalized === 'device' || normalized === 'client device')) return true;
-    return false;
-}
-
-export function isIpInSameSubnet(ip: string, gatewayIp: string): boolean {
-    if (!ip || !gatewayIp) return true;
-    try {
-        const ipParts = ip.split('.').map(Number);
-        const gwParts = gatewayIp.split('.').map(Number);
-        if (ipParts.length !== 4 || gwParts.length !== 4) return false;
-
-        // Same /24 (standar rumah & kantor)
-        if (ipParts[0] === gwParts[0] && ipParts[1] === gwParts[1] && ipParts[2] === gwParts[2]) {
-            return true;
-        }
-
-        // Public Wi-Fi Supernets:
-        // 10.x.x.x (Class A - Kafe besar / Kampus / Bandara / Hotel)
-        if (gwParts[0] === 10 && ipParts[0] === 10) {
-            return ipParts[1] === gwParts[1];
-        }
-
-        // 172.16.x.x - 172.31.x.x (Class B)
-        if (gwParts[0] === 172 && ipParts[0] === 172) {
-            return ipParts[1] === gwParts[1];
-        }
-
-        // 192.168.x.x (/22 or /20 or /16 supernet)
-        if (gwParts[0] === 192 && gwParts[1] === 168 && ipParts[0] === 192 && ipParts[1] === 168) {
-            return (ipParts[2] & 0xfc) === (gwParts[2] & 0xfc);
-        }
-
-        return false;
-    } catch {
-        return false;
-    }
-}
-
-/**
- * Ubah IPv4 dotted-quad menjadi integer 32-bit TAK-bertanda. Null jika tak valid.
- */
-export function ipv4ToInt(ip: string): number | null {
-    const parts = (ip || '').trim().split('.');
-    if (parts.length !== 4) return null;
-    let acc = 0;
-    for (const p of parts) {
-        if (!/^\d{1,3}$/.test(p)) return null;
-        const n = Number(p);
-        if (n > 255) return null;
-        acc = acc * 256 + n;
-    }
-    return acc >>> 0;
-}
-
-/**
- * Netmask dotted-quad ('255.255.255.0') → panjang prefix (24). Null bila mask tak
- * valid atau bit-1 tidak kontigu (mis. '255.0.255.0' — bukan mask sah).
- */
-export function netmaskToPrefix(netmask: string): number | null {
-    const n = ipv4ToInt(netmask);
-    if (n === null) return null;
-    let prefix = 0;
-    let seenZero = false;
-    for (let i = 31; i >= 0; i--) {
-        const bit = (n >>> i) & 1;
-        if (bit === 1) {
-            if (seenZero) return null; // ada bit-1 setelah bit-0 → mask tidak kontigu
-            prefix++;
-        } else {
-            seenZero = true;
-        }
-    }
-    return prefix;
-}
-
-/**
- * True bila `ip` satu jaringan dengan `gatewayIp` untuk panjang prefix tertentu,
- * memakai aritmetika mask NYATA: (ip & mask) === (gw & mask). Tanpa tebakan
- * berbasis kelas alamat (classful sudah usang sejak CIDR / RFC 1519).
- */
-export function isSameSubnetMasked(ip: string, gatewayIp: string, prefixLen: number): boolean {
-    const a = ipv4ToInt(ip);
-    const g = ipv4ToInt(gatewayIp);
-    if (a === null || g === null) return false;
-    if (prefixLen <= 0) return true;        // /0 → semua satu jaringan
-    if (prefixLen >= 32) return a === g;     // /32 → host tunggal
-    const mask = (0xFFFFFFFF << (32 - prefixLen)) >>> 0;
-    return ((a & mask) >>> 0) === ((g & mask) >>> 0);
-}
-
-/** Bentuk minimal entri adapter jaringan yang diperlukan resolver prefix. */
-export interface NetIfaceLike { address: string; netmask: string; family: string | number; internal: boolean; }
-
-/**
- * Cari panjang prefix adapter OS (IPv4, non-internal) yang jaringannya MEMUAT
- * `gatewayIp` aktif. Inilah sumber mask yang benar (bukan tebakan). Null bila tak
- * ada adapter cocok → pemanggil memilih fallback aman (tampilkan semua).
- */
-export function resolveActivePrefix(gatewayIp: string, ifaces: NetIfaceLike[]): number | null {
-    if (ipv4ToInt(gatewayIp) === null) return null;
-    for (const a of ifaces) {
-        const isV4 = a.family === 'IPv4' || a.family === 4;
-        if (!isV4 || a.internal) continue;
-        const prefix = netmaskToPrefix(a.netmask);
-        if (prefix === null) continue;
-        if (isSameSubnetMasked(a.address, gatewayIp, prefix)) return prefix;
-    }
-    return null;
-}
-
-/**
- * Saring daftar perangkat HANYA untuk tampilan: hanya perangkat di subnet gateway
- * aktif (ditentukan SUBNET MASK nyata, bukan tebakan). Perangkat offline ber-`ip`
- * kosong diklasifikasi lewat `last_ip`. Bila gateway/prefix belum diketahui,
- * kembalikan apa adanya (fallback aman — tak pernah menyembunyikan semua).
- *
- * Sengaja TIDAK mem-bypass is_gateway/is_self: gateway & host aktif sudah berada di
- * subnet aktif sehingga tetap lolos lewat mask; sebaliknya flag is_gateway/is_self
- * BASI dari jaringan lama justru harus dibuang dari tampilan.
- *
- * CATATAN: murni presentasi. JANGAN dipakai di jalur enforcement / hitung lisensi.
- */
-export function scopeDevicesToActiveSubnet(devices: Device[], gatewayIp?: string, prefixLen?: number): Device[] {
-    if (!gatewayIp || prefixLen === undefined || prefixLen === null) return devices;
-    return devices.filter(d => isSameSubnetMasked(d.ip || d.last_ip || '', gatewayIp, prefixLen));
-}
-
-/**
- * Pilih gateway dari daftar perangkat dengan aman:
- *   1. Perangkat yang di-flag is_gateway (otoritatif dari scanner).
- *   2. Fallback heuristik: perangkat non-self ber-IP .1 / .254.
- * TIDAK ada fallback ke perangkat sembarang — kembalikan undefined bila tidak ada,
- * agar operasi spoofing gagal aman ("Gateway not found") ketimbang meracuni perangkat acak.
- */
-export function selectGateway(devices: Device[]): Device | undefined {
-    const ifaces: NetIfaceLike[] = [];
-    try {
-        for (const addrs of Object.values(os.networkInterfaces())) {
-            for (const a of addrs || []) {
-                if (a.family === 'IPv4' && !a.internal) {
-                    ifaces.push({ address: a.address, netmask: a.netmask, family: a.family, internal: a.internal });
-                }
-            }
-        }
-    } catch {}
-
-    const isLocalSubnet = (ip: string): boolean => {
-        if (!ip) return false;
-        if (ifaces.length === 0) return true;
-        return ifaces.some(iface => {
-            const prefix = resolveActivePrefix(iface.address, ifaces);
-            return prefix !== null && isIpInSameSubnet(ip, iface.address);
-        });
-    };
-
-    // 1. Prioritaskan gateway ONLINE yang berada dalam subnet adapter lokal aktif
-    for (const d of devices) {
-        if (d.is_gateway && d.is_online && isLocalSubnet(d.ip)) return d;
-    }
-    // 2. Gateway online lainnya
-    for (const d of devices) {
-        if (d.is_gateway && d.is_online) return d;
-    }
-    // 3. Gateway offline yang cocok dengan subnet lokal
-    for (const d of devices) {
-        if (d.is_gateway && isLocalSubnet(d.ip)) return d;
-    }
-    for (const d of devices) {
-        if (d.is_gateway) return d;
-    }
-    for (const d of devices) {
-        if (!d.is_self && isLocalSubnet(d.ip) && (d.ip.endsWith('.1') || d.ip.endsWith('.254'))) return d;
-    }
-    for (const d of devices) {
-        if (!d.is_self && (d.ip.endsWith('.1') || d.ip.endsWith('.254'))) return d;
-    }
-    return undefined;
-}
-
+export {
+    normalizeProfileMac,
+    deviceMemKey,
+    isPrivateIpv4,
+    isGenericProfileLabel,
+    isIpInSameSubnet,
+    ipv4ToInt,
+    netmaskToPrefix,
+    isSameSubnetMasked,
+    NetIfaceLike,
+    resolveActivePrefix,
+    scopeDevicesToActiveSubnet,
+    selectGateway
+};
 
 export class DeviceManager extends EventEmitter implements IDeviceManager {
     private readonly log = createChildLogger('DeviceManager');
     private devices: Map<string, Device> = new Map();
     private currentNetworkId: string = 'net_default';
-    private scanning: boolean = false;
-    // Auto Scan sebagai fitur NYATA (bukan kosmetik): saat false ("Scan saja"), tak ada scan
-    // otomatis latar (watchdog) maupun scan susulan saat perangkat baru masuk. Hanya scan
-    // manual (tombol), scan saat buka aplikasi, dan scan reaktif saat ganti jaringan yang jalan.
-    private autoScanEnabled: boolean = false;
-    private inFlightScan: Promise<Device[]> | null = null;
-    private inFlightDhcpOptimization: Promise<DhcpOptimizationResult> | null = null;
-    private inFlightDhcpOptimizationGeneration: number | null = null;
-    private dhcpOptimizationGeneration: number = 0;
-    private lastDhcpOptimization: {
-        completedAt: number;
-        result: DhcpOptimizationResult;
-    } | null = null;
-    private inFlightProfileRefresh: Promise<ProfileRefreshResult> | null = null;
-    private inFlightProfileRefreshScope: 'all' | 'subset' | null = null;
-    private profileRefreshGeneration = 0;
-    private lastProfileRefresh: {
-        completedAt: number;
-        result: ProfileRefreshResult;
-    } | null = null;
-    private pendingProfileMacs = new Set<string>();
-    private profileEnrichmentTimer: NodeJS.Timeout | null = null;
-    private profileEnrichmentCooldowns = new Map<string, number>();
-    private dhcpScanDebounceTimer: NodeJS.Timeout | null = null;
-    private offlineCooldownTimers: Map<string, NodeJS.Timeout> = new Map();
-    private lastIdentityReblockAt: number = 0; // FASE-3: rate-limit re-block scan berbasis identitas
 
     public readonly trafficService: TrafficService;
     public readonly gamingService: GamingService;
+    public readonly discoveryService: DiscoveryService;
+    public readonly reconciliationService: ReconciliationService;
 
+    // Mutex serialisasi: operasi tulis perangkat (block/unblock/throttle/redirect)
+    // diserialisasi untuk mencegah race condition antar-aksi pengguna.
+    private opChain: Promise<void> = Promise.resolve();
+
+    private runExclusive<T>(fn: () => Promise<T>): Promise<T> {
+        const result = this.opChain.then(fn, fn);
+        this.opChain = result.then(() => {}, () => {});
+        return result;
+    }
+
+    // Gaming delegation getters & setters
     get gamingManaged(): Map<string, { priorLimit: number; hadSession: boolean; sessionId?: string }> {
         return this.gamingService.gamingManaged;
     }
@@ -306,14 +116,125 @@ export class DeviceManager extends EventEmitter implements IDeviceManager {
         this.gamingService.gamingTargetLimit = val;
     }
 
-    // Mutex serialisasi: operasi tulis perangkat (block/unblock/throttle/redirect)
-    // diserialisasi untuk mencegah race condition antar-aksi pengguna.
-    private opChain: Promise<void> = Promise.resolve();
+    // Discovery delegation getters & setters
+    get autoScanEnabled(): boolean {
+        return this.discoveryService.isAutoScanEnabled();
+    }
+    set autoScanEnabled(val: boolean) {
+        this.discoveryService.setAutoScanEnabled(val);
+    }
 
-    private runExclusive<T>(fn: () => Promise<T>): Promise<T> {
-        const result = this.opChain.then(fn, fn);
-        this.opChain = result.then(() => {}, () => {});
-        return result;
+    get scanning(): boolean {
+        return this.discoveryService.isScanning();
+    }
+    set scanning(val: boolean) {
+        (this.discoveryService as any).scanning = val;
+    }
+
+    get inFlightScan() {
+        return (this.discoveryService as any).inFlightScan;
+    }
+    set inFlightScan(val: any) {
+        (this.discoveryService as any).inFlightScan = val;
+    }
+
+    // Reconciliation delegation getters & setters
+    get inFlightDhcpOptimization() {
+        return (this.reconciliationService as any).inFlightDhcpOptimization;
+    }
+    set inFlightDhcpOptimization(val: any) {
+        (this.reconciliationService as any).inFlightDhcpOptimization = val;
+    }
+
+    get inFlightDhcpOptimizationGeneration() {
+        return (this.reconciliationService as any).inFlightDhcpOptimizationGeneration;
+    }
+    set inFlightDhcpOptimizationGeneration(val: any) {
+        (this.reconciliationService as any).inFlightDhcpOptimizationGeneration = val;
+    }
+
+    get dhcpOptimizationGeneration() {
+        return (this.reconciliationService as any).dhcpOptimizationGeneration;
+    }
+    set dhcpOptimizationGeneration(val: any) {
+        (this.reconciliationService as any).dhcpOptimizationGeneration = val;
+    }
+
+    get lastDhcpOptimization() {
+        return (this.reconciliationService as any).lastDhcpOptimization;
+    }
+    set lastDhcpOptimization(val: any) {
+        (this.reconciliationService as any).lastDhcpOptimization = val;
+    }
+
+    get inFlightProfileRefresh() {
+        return (this.reconciliationService as any).inFlightProfileRefresh;
+    }
+    set inFlightProfileRefresh(val: any) {
+        (this.reconciliationService as any).inFlightProfileRefresh = val;
+    }
+
+    get inFlightProfileRefreshScope() {
+        return (this.reconciliationService as any).inFlightProfileRefreshScope;
+    }
+    set inFlightProfileRefreshScope(val: any) {
+        (this.reconciliationService as any).inFlightProfileRefreshScope = val;
+    }
+
+    get profileRefreshGeneration() {
+        return (this.reconciliationService as any).profileRefreshGeneration;
+    }
+    set profileRefreshGeneration(val: any) {
+        (this.reconciliationService as any).profileRefreshGeneration = val;
+    }
+
+    get lastProfileRefresh() {
+        return (this.reconciliationService as any).lastProfileRefresh;
+    }
+    set lastProfileRefresh(val: any) {
+        (this.reconciliationService as any).lastProfileRefresh = val;
+    }
+
+    get pendingProfileMacs() {
+        return (this.reconciliationService as any).pendingProfileMacs;
+    }
+    set pendingProfileMacs(val: any) {
+        (this.reconciliationService as any).pendingProfileMacs = val;
+    }
+
+    get profileEnrichmentTimer() {
+        return (this.reconciliationService as any).profileEnrichmentTimer;
+    }
+    set profileEnrichmentTimer(val: any) {
+        (this.reconciliationService as any).profileEnrichmentTimer = val;
+    }
+
+    get profileEnrichmentCooldowns() {
+        return (this.reconciliationService as any).profileEnrichmentCooldowns;
+    }
+    set profileEnrichmentCooldowns(val: any) {
+        (this.reconciliationService as any).profileEnrichmentCooldowns = val;
+    }
+
+    get dhcpScanDebounceTimer() {
+        return (this.discoveryService as any).debouncedScanTimer ?? null;
+    }
+    set dhcpScanDebounceTimer(val: any) {
+        (this.discoveryService as any).debouncedScanTimer = val;
+    }
+
+    get offlineCooldownTimers() {
+        return (this.reconciliationService as any).offlineCooldownTimers;
+    }
+    set offlineCooldownTimers(val: any) {
+        (this.reconciliationService as any).offlineCooldownTimers = val;
+    }
+
+    get lastIdentityReblockAt() {
+        return (this.reconciliationService as any).lastIdentityReblockAt;
+    }
+    set lastIdentityReblockAt(val: any) {
+        (this.reconciliationService as any).lastIdentityReblockAt = val;
     }
 
     constructor(
@@ -321,51 +242,52 @@ export class DeviceManager extends EventEmitter implements IDeviceManager {
         private db: IDatabaseService,
         private license?: ILicenseManager,
         trafficService?: TrafficService,
-        gamingService?: GamingService
+        gamingService?: GamingService,
+        discoveryService?: DiscoveryService,
+        reconciliationService?: ReconciliationService
     ) {
         super();
-        const registry: IDeviceRegistry & IGamingStateDelegate = {
+        const registry: IDeviceRegistry & IGamingStateDelegate & IDiscoveryRegistryDelegate & IReconciliationRegistryDelegate = {
             getDevice: (ip: string) => this.devices.get(ip),
             findDeviceByMac: (mac: string) => this._findDeviceByMac(mac),
             getAllDevices: () => Array.from(this.devices.values()),
             findGateway: (gwIp?: string) => (gwIp ? this.devices.get(gwIp) : undefined) || this.findGateway(),
             setDevice: (key: string, dev: Device) => { this.devices.set(key, dev); },
+            deleteDevice: (key: string) => this.devices.delete(key),
+            clearDevices: () => { this.devices.clear(); },
             getCurrentNetworkId: () => this.currentNetworkId,
+            setCurrentNetworkId: (netId: string) => { this.currentNetworkId = netId; },
             emit: (event: string, ...args: any[]) => this.emit(event, ...args),
             runExclusive: <T>(fn: () => Promise<T>) => this.runExclusive(fn),
             assertNoPendingGamingConflict: (devs: Iterable<Device>) => {
                 this._assertNoPendingGamingRecoveryConflict(devs);
             },
-            getLicense: () => this.license
+            getLicense: () => this.license,
+            scheduleProfileEnrichment: (mac: string, delayMs?: number) => {
+                this.scheduleProfileEnrichment(mac, delayMs);
+            },
+            isAutoScanEnabled: () => this.discoveryService.isAutoScanEnabled(),
+            debouncedScan: (delayMs?: number) => this.debouncedScan(delayMs),
+            scanNetwork: (options?: any) => this.scanNetwork(options)
         };
 
         this.trafficService = trafficService || new TrafficService(this.python, this.db, this.license, registry);
         this.gamingService = gamingService || new GamingService(this.python, this.db, registry);
+        this.discoveryService = discoveryService || new DiscoveryService(this.python, this.db, registry, this.trafficService, this.gamingService);
+        this.reconciliationService = reconciliationService || new ReconciliationService(this.python, this.db, registry, this.trafficService, this.gamingService, this.discoveryService);
 
         // Listen for network changes from Python
         this.python.on('telemetry', (data) => {
             this.emit('telemetry', data);
         });
 
-        // SP-2: Python (re)connect = engine fresh tanpa sesi spoof. session_id apa pun yang masih
-        // kita pegang (dari DB atau sebelum Python crash/restart) kini BASI. Bersihkan agar
-        // auto-reblock (yang melewati perangkat ber-session_id, mengira sesinya hidup) benar-benar
-        // membangun ulang sesi. is_blocked tetap; sesi baru dibuat saat scan/reblock berikutnya.
+        // SP-2: Python (re)connect = engine fresh tanpa sesi spoof.
         this.python.on('pythonReachable', () => {
             this.reconcileBlocksWithPython().catch(err => this.log.warn({ err }, `Notice reconcile on reconnect: ${err?.message || err}`));
         });
 
         this.python.on('networkChanged', async (data) => {
-            this.dhcpOptimizationGeneration++;
-            this.lastDhcpOptimization = null;
-            this.profileRefreshGeneration++;
-            this.lastProfileRefresh = null;
-            this.profileEnrichmentCooldowns.clear();
-            this.pendingProfileMacs.clear();
-            if (this.profileEnrichmentTimer) {
-                clearTimeout(this.profileEnrichmentTimer);
-                this.profileEnrichmentTimer = null;
-            }
+            this.reconciliationService.onNetworkChanged();
 
             const newGwMac = data?.gateway_mac || data?.new_gateway_mac;
             if (newGwMac) {
@@ -456,9 +378,8 @@ export class DeviceManager extends EventEmitter implements IDeviceManager {
      * BENAR-BENAR aktif di Python. Sesi Python = in-memory, hilang saat engine restart → perangkat
      * terblokir dapat internet lagi. Bila ada perangkat is_blocked yang TAK ter-enforce di Python:
      * bersihkan session_id basi + picu scanNetwork agar auto-reblock membangun ulang sesi.
-     * IDEMPOTEN: bila sesi masih ada (mis. WS blip tanpa restart), tak melakukan apa pun.
      */
-    private async reconcileBlocksWithPython(): Promise<void> {
+    public async reconcileBlocksWithPython(): Promise<void> {
         const blocked = Array.from(this.devices.values()).filter(d => d.is_blocked && !d.is_gateway && !d.is_self);
         if (blocked.length === 0) return;
 
@@ -486,373 +407,12 @@ export class DeviceManager extends EventEmitter implements IDeviceManager {
         this.scanNetwork().catch(err => this.log.warn({ err }, `Notice reconcile re-block scan: ${err?.message || err}`));
     }
 
-    /**
-     * Lekatkan status pemutusan DUA-STACK (IPv4+IPv6) dari engine /api/status ke tiap device,
-     * agar UI bisa menampilkan indikator "Dual-Stack Kill Switch" (dan menyorot kebocoran IPv6).
-     * - Ada sesi engine → ipv4: 'cut' (blackhole) / 'throttle' (dibatasi); ipv6 dari sesi ('cut'|'leak'|'na').
-     * - Ditandai blok tapi TAK ada sesi → ipv4: 'off' (bocor), ipv6: 'leak' bila dual-stack.
-     * - Tak diblokir → cut_status dikosongkan (indikator tak tampil).
-     * Engine tak terjangkau → biarkan nilai lama (tak menimpa dengan data kosong).
-     */
-    /**
-     * Kumpulan session_id yang BENAR-BENAR aktif di engine (poison sedang jalan). Dipakai
-     * syncScanResults untuk membedakan blok yang ter-enforce vs session_id basi (sesi mati).
-     * Mengembalikan undefined bila engine tak terjangkau → syncScanResults tak memicu reblock massal.
-     */
-    private async _getLiveEngineSessionIds(): Promise<Set<string> | undefined> {
-        try {
-            const status = await this.python.getStatus();
-            const sessions = (status && status.sessions) || {};
-            const live = new Set<string>();
-            for (const [sid, s] of Object.entries(sessions as Record<string, any>)) {
-                if (s && s.active) live.add(sid);
-            }
-            return live;
-        } catch {
-            return undefined;
-        }
-    }
-
-    private async _attachSpoofCutStatus(): Promise<void> {
-        let sessions: Record<string, any>;
-        try {
-            const status = await this.python.getStatus();
-            sessions = (status && status.sessions) || {};
-        } catch {
-            return;
-        }
-        const byIp = new Map<string, any>();
-        const byMac = new Map<string, any>();
-        for (const s of Object.values(sessions) as any[]) {
-            if (s && s.victim_ip) byIp.set(s.victim_ip, s);
-            if (s && s.victim_mac) byMac.set(String(s.victim_mac).toLowerCase(), s);
-        }
-        for (const dev of this.devices.values()) {
-            const s = (dev.ip && byIp.get(dev.ip)) || (dev.mac && byMac.get(dev.mac.toLowerCase()));
-            if (s) {
-                const ipv4: CutStatus['ipv4'] = (s.speed_limit ?? 0) <= 0 ? 'cut' : 'throttle';
-                const ipv6: CutStatus['ipv6'] = (s.ipv6 && s.ipv6.status) || (dev.is_dual_stack ? 'leak' : 'na');
-                dev.cut_status = {
-                    ipv4,
-                    ipv6,
-                    ipv4_packets: s.packets_sent ?? 0,
-                    ipv6_packets: (s.ipv6 && s.ipv6.packets_sent) ?? 0
-                };
-            } else if (dev.is_blocked && !dev.is_gateway && !dev.is_self) {
-                dev.cut_status = { ipv4: 'off', ipv6: dev.is_dual_stack ? 'leak' : 'na', ipv4_packets: 0, ipv6_packets: 0 };
-            } else {
-                dev.cut_status = undefined;
-            }
-        }
-    }
-
     private async _handleDhcpEvent(data: any): Promise<void> {
-        {
-            this.log.debug({ data }, '[DeviceManager] DHCP event received');
-            const isRelease = data && (
-                data.kind === 'release' ||
-                data.is_release === true ||
-                data.message_type_code === 7
-            );
-            if (isRelease && (data.mac || data.ip)) {
-                let updatedAny = false;
-                if (data.mac) {
-                    const normMac = data.mac.toLowerCase();
-                    // Kumpulkan dulu (jangan mutasi Map saat iterasi): kita akan menghapus kunci IP
-                    // lama lalu menyisipkan kunci identitas di dalam loop pemrosesan.
-                    const matches: Array<[string, Device]> = [];
-                    for (const [ipKey, dev] of this.devices.entries()) {
-                        if (dev.mac.toLowerCase() === normMac) matches.push([ipKey, dev]);
-                    }
-                    for (const [ipKey, dev] of matches) {
-                        dev.is_online = false;
-                        // Bersihkan sesi Gaming Mode agar tak bocor & reconnect ter-throttle lagi.
-                        await this._stopGamingSession(normMac);
-                        if (dev.ip) {
-                            dev.last_ip = dev.ip;
-                            this.devices.delete(ipKey);
-                            dev.ip = '';
-                        }
-                        // Pertahankan perangkat yang baru offline memakai kunci IDENTITAS (bukan
-                        // menghapusnya), agar tetap tampil di tab Offline — konsisten dengan jalur
-                        // scanNetwork (BUG-17). Tanpa ini, RELEASE membuat perangkat hilang dari UI
-                        // sampai rescan berikutnya.
-                        this.devices.set(deviceMemKey(dev), dev);
-                        this.db.setDeviceOnlineStatus(dev.mac, false, this.currentNetworkId).catch(err => this.log.warn({ mac: dev.mac, err }, 'Failed to set device offline on DHCP release'));
-                        this.emit('deviceUpdated', dev);
-                        this.emit('deviceDisconnected', dev);
-                        updatedAny = true;
-                    }
-                }
-                if (updatedAny) {
-                    this.emit('devicesUpdated', Array.from(this.devices.values()));
-                }
-                this.emit('dhcpActivity', { kind: 'release', mac: data.mac, ip: data.ip });
-            } else if (data && data.mac && data.ip) {
-                // Abaikan jika DHCP event membawa IP di luar subnet gateway aktif atau pesan DHCP DECLINE
-                const activeGw = this.findGateway();
-                if (activeGw && !isIpInSameSubnet(data.ip, activeGw.ip)) {
-                    return;
-                }
-                if (data.is_decline) {
-                    return;
-                }
-                // Instant Online State Transition from Passive DHCP Discovery (MAC-First Identity)
-                const normMac = data.mac.toLowerCase();
-
-                // ⚡ [DHCP Fast-Revival] Batalkan penalti karantina 30s seketika saat sinyal DHCP aktif diterima
-                const existingPenalty = this.offlineCooldownTimers.get(normMac);
-                if (existingPenalty) {
-                    clearTimeout(existingPenalty);
-                    this.offlineCooldownTimers.delete(normMac);
-                    this.log.info({ mac: normMac, messageType: data.message_type }, `[DHCP Fast-Revival] Penalti 30s DIBATALKAN untuk ${normMac} karena sinyal DHCP ${data.message_type || 'aktif'} diterima!`);
-                }
-
-                let dev: Device | undefined;
-                let oldIpOfThisMac: string | undefined;
-
-                // 1. MAC-First Identity Lookup
-                for (const [ipKey, d] of this.devices.entries()) {
-                    if (d.mac.toLowerCase() === normMac) {
-                        dev = d;
-                        oldIpOfThisMac = ipKey;
-                        break;
-                    }
-                }
-
-                // 2. Cek apakah ada perangkat lain yang sebelumnya menempati data.ip
-                const occupantOfNewIp = this.devices.get(data.ip);
-                if (occupantOfNewIp && occupantOfNewIp.mac.toLowerCase() !== normMac) {
-                    this.log.info({ ip: data.ip, oldMac: occupantOfNewIp.mac, newMac: normMac }, `[DHCP IP Churn] IP ${data.ip} berpindah kepemilikan dari ${occupantOfNewIp.mac} ke ${normMac}`);
-                    occupantOfNewIp.is_online = false;
-                    occupantOfNewIp.ip = '';
-                    this.devices.delete(data.ip);
-                    this.devices.set(deviceMemKey(occupantOfNewIp), occupantOfNewIp);
-                    this.db.setDeviceOnlineStatus(occupantOfNewIp.mac, false, this.currentNetworkId).catch(err => this.log.warn({ mac: occupantOfNewIp.mac, err }, 'Failed to set old occupant offline on DHCP churn'));
-                    this.emit('deviceUpdated', occupantOfNewIp);
-                    this.emit('deviceDisconnected', occupantOfNewIp);
-                }
-
-                let isNewDevice = false;
-                if (!dev && occupantOfNewIp && occupantOfNewIp.mac.toLowerCase() !== normMac) {
-                    dev = {
-                        ip: data.ip,
-                        mac: normMac,
-                        hostname: data.hostname || '',
-                        vendor: '',
-                        device_type: 'Unknown',
-                        os: '',
-                        is_online: true,
-                        is_blocked: false,
-                        is_gateway: false,
-                        is_self: false,
-                        speed_limit: 100,
-                        rtt_ms: 0.1,
-                        open_ports: [],
-                        services: [],
-                        dhcp_fingerprint: data.dhcp_fingerprint,
-                        dhcp_vendor_class: data.vendor_class,
-                        dhcp_client_id: data.client_id,
-                        dhcp_fqdn: data.fqdn,
-                        network_id: this.currentNetworkId
-                    };
-                    this.devices.set(data.ip, dev);
-                    isNewDevice = true;
-                }
-
-                if (dev) {
-                    // Bersihkan mapping IP lama jika berbeda
-                    if (oldIpOfThisMac && oldIpOfThisMac !== data.ip) {
-                        this.log.info({ mac: dev.mac, hostname: dev.hostname, oldIp: oldIpOfThisMac, newIp: data.ip }, `[DHCP IP Migration] Device ${dev.hostname || dev.mac} moved from ${oldIpOfThisMac} to ${data.ip}`);
-                        this.devices.delete(oldIpOfThisMac);
-                    }
-                    const hostnameShouldChange = Boolean(
-                        data.hostname && (
-                            !dev.hostname
-                            || dev.hostname === dev.ip
-                            || dev.hostname.toLowerCase().startsWith('unknown')
-                        )
-                    );
-                    const profileChanged = Boolean(
-                        (hostnameShouldChange && dev.hostname !== data.hostname)
-                        || (data.vendor_class && dev.dhcp_vendor_class !== data.vendor_class)
-                        || (data.dhcp_fingerprint && dev.dhcp_fingerprint !== data.dhcp_fingerprint)
-                        || (data.client_id && dev.dhcp_client_id !== data.client_id)
-                        || (data.fqdn && dev.dhcp_fqdn !== data.fqdn)
-                    );
-
-                    dev.is_online = true;
-                    dev.ip = data.ip;
-                    if (hostnameShouldChange) dev.hostname = data.hostname;
-                    if (data.vendor_class) dev.dhcp_vendor_class = data.vendor_class;
-                    if (data.dhcp_fingerprint) dev.dhcp_fingerprint = data.dhcp_fingerprint;
-                    if (data.client_id) dev.dhcp_client_id = data.client_id;
-                    if (data.fqdn) dev.dhcp_fqdn = data.fqdn;
-                    this.devices.set(dev.ip, dev);
-                    if (typeof this.db.updateDeviceDhcpProfile === 'function') {
-                        await this.db.updateDeviceDhcpProfile({
-                            mac: dev.mac,
-                            ip: data.ip,
-                            hostname: hostnameShouldChange ? data.hostname : undefined,
-                            vendorClass: data.vendor_class,
-                            fingerprint: data.dhcp_fingerprint,
-                            clientId: data.client_id,
-                            fqdn: data.fqdn
-                        }, this.currentNetworkId);
-                    }
-                    this.emit('deviceUpdated', dev);
-                    this.emit('devicesUpdated', Array.from(this.devices.values()));
-                    // Perangkat aktif kembali via DHCP selagi Gaming Mode aktif -> ikut di-throttle.
-                    await this._maybeApplyGamingToNewDevice(dev);
-                    if (profileChanged) {
-                        this.scheduleProfileEnrichment(normMac, PROFILE_ENRICHMENT_DEBOUNCE_MS);
-                    }
-
-                    // SP-1: perangkat yang MASIH berstatus diblokir baru saja renew/reconnect via
-                    // DHCP (mungkin di IP baru). Sesi spoof lama menunjuk IP lama (racun basi) dan
-                    // proses DHCP renew menyegarkan cache ARP korban ke router ASLI → tanpa
-                    // re-poison, korban bebas berinternet walau UI masih merah (Blocked). Blokir
-                    // ulang di IP baru: bersihkan session_id lama (memaksa startSpoof fresh;
-                    // dedup-by-MAC IPv4 membersihkan sesi IP lama) lalu blokir lewat jalur
-                    // terverifikasi (_blockDeviceImpl — kita SUDAH di dalam runExclusive).
-                    if (dev.is_blocked && !dev.is_gateway && !dev.is_self) {
-                        const gw = this.findGateway();
-                        if (gw) {
-                            dev.session_id = undefined;
-                            try {
-                                await this._blockDeviceImpl(dev.ip, gw.ip);
-                                this.log.info({ mac: dev.mac, ip: dev.ip }, `[DHCP Re-Block] Blok ditegakkan ulang untuk ${dev.hostname || dev.mac} di ${dev.ip}`);
-                            } catch (e: any) {
-                                this.log.warn({ mac: dev.mac, err: e }, `Notice re-blocking ${dev.mac} on DHCP: ${e?.message || e}`);
-                            }
-                        }
-                    }
-                } else {
-                    isNewDevice = true;
-                    // FASE-3: MAC baru yang identitas STABIL-nya (DUID layak, atau hostname personal
-                    // + fingerprint + vendor) cocok dengan perangkat MASIH-TERBLOKIR = kemungkinan
-                    // besar target yang me-rotasi MAC untuk lolos. Picu re-block SEKETIKA (reuse scan
-                    // + auto-reblock existing, yang juga membersihkan sesi MAC lama via
-                    // zombieSessionsToStop), tanpa menunggu scan terjadwal & tanpa bergantung mode
-                    // Auto Scan. Rate-limited agar rotasi agresif tak memicu badai scan. Unblock-safe:
-                    // pencocokan menuntut is_blocked=1 → perangkat yang di-unblock tak lagi cocok.
-                    try {
-                        if (typeof this.db.hasBlockedIdentityMatch === 'function' && this.db.hasBlockedIdentityMatch(data, this.currentNetworkId)) {
-                            const now = Date.now();
-                            if (now - this.lastIdentityReblockAt >= IDENTITY_REBLOCK_MIN_INTERVAL_MS) {
-                                this.lastIdentityReblockAt = now;
-                                this.log.info({ mac: normMac }, `[Identity Re-Block] DHCP MAC baru ${normMac} cocok identitas terblokir -> picu re-block scan seketika.`);
-                                this.scanNetwork().catch(err => this.log.warn({ err }, `Notice identity re-block scan: ${err?.message || err}`));
-                            }
-                        }
-                    } catch (e: any) {
-                        this.log.warn({ err: e }, `Notice identity re-block check: ${e?.message || e}`);
-                    }
-                }
-
-                this.emit('dhcpActivity', {
-                    kind: isNewDevice ? 'new' : 'renew',
-                    mac: normMac,
-                    ip: data.ip,
-                    hostname: data.hostname,
-                    vendor_class: data.vendor_class
-                });
-
-                // Auto-scan saat perangkat baru masuk — HANYA bila Auto Scan aktif. Perangkat baru
-                // dimaterialisasi ke daftar melalui scan susulan ini; jadi di mode "Scan saja" perangkat
-                // baru BELUM muncul di tabel sampai scan berikutnya (manual/ganti-jaringan). Toast
-                // "perangkat baru" (dhcpActivity di atas) tetap memberi tahu pengguna untuk memindai.
-                if (isNewDevice && this.autoScanEnabled && !this.inFlightDhcpOptimization) {
-                    this.debouncedScan();
-                }
-            } else if (data && data.mac && !data.ip) {
-                // Event DHCP tanpa IP sah (DHCPDISCOVER / DHCPREQUEST: klien meminta IP lama via Option 50 belum disetujui router)
-                const normMac = data.mac.toLowerCase();
-                for (const d of this.devices.values()) {
-                    if (d.mac.toLowerCase() === normMac) {
-                        if (data.hostname && (!d.hostname || d.hostname.toLowerCase().startsWith('unknown'))) {
-                            d.hostname = data.hostname;
-                        }
-                        if (data.vendor_class) d.dhcp_vendor_class = data.vendor_class;
-                        if (data.dhcp_fingerprint) d.dhcp_fingerprint = data.dhcp_fingerprint;
-                        if (data.client_id) d.dhcp_client_id = data.client_id;
-                        if (data.fqdn) d.dhcp_fqdn = data.fqdn;
-                        this.emit('deviceUpdated', d);
-                        break;
-                    }
-                }
-                // Guard sama seperti cabang DHCP-with-IP: metode ini opsional pada DB dev/test.
-                // `.catch()` tak bisa menangkap TypeError sinkron bila metode absen, jadi cek dulu.
-                if (typeof this.db.updateDeviceDhcpProfile === 'function') {
-                    await this.db.updateDeviceDhcpProfile({
-                        mac: normMac,
-                        ip: '',
-                        hostname: data.hostname,
-                        vendorClass: data.vendor_class,
-                        fingerprint: data.dhcp_fingerprint,
-                        clientId: data.client_id,
-                        fqdn: data.fqdn
-                    }, this.currentNetworkId).catch(err => this.log.warn({ err }, 'Failed to save DHCP profile without IP'));
-                }
-
-                // Periksa apakah MAC ini cocok dengan perangkat terblokir untuk picu re-block cepat
-                try {
-                    if (typeof this.db.hasBlockedIdentityMatch === 'function' && this.db.hasBlockedIdentityMatch(data, this.currentNetworkId)) {
-                        const now = Date.now();
-                        if (now - this.lastIdentityReblockAt >= IDENTITY_REBLOCK_MIN_INTERVAL_MS) {
-                            this.lastIdentityReblockAt = now;
-                            this.log.info({ mac: normMac }, `[Identity Re-Block] DHCP discovery MAC ${normMac} cocok identitas terblokir -> picu scan seketika.`);
-                            this.scanNetwork().catch(err => this.log.warn({ err }, `Notice identity re-block scan: ${err?.message || err}`));
-                        }
-                    }
-                } catch (e: any) {
-                    this.log.warn({ err: e }, `Notice identity re-block check: ${e?.message || e}`);
-                }
-
-                // Picu micro-scan agar IP fisik sebenarnya segera diverifikasi via Layer 2 ARP.
-                // HANYA bila Auto Scan aktif — sejajar dengan gate perangkat-baru di cabang
-                // DHCP-with-IP. Tanpa gate ini, tiap DHCPDISCOVER/DHCPREQUEST (yang di Wi-Fi
-                // ramai tiba ~tiap detik) memicu sweep latar walau pengguna memilih "Scan saja"
-                // atau berada di tier Free — mem-bypass gate lisensi Auto Scan. (Scan re-block
-                // berbasis identitas di atas sengaja TIDAK di-gate: itu penegakan keamanan.)
-                if (this.autoScanEnabled) {
-                    this.debouncedScan(1000);
-                }
-            }
-        }
+        return this.reconciliationService.handleDhcpEvent(data);
     }
 
     private async _handleLivenessEvent(data: any): Promise<void> {
-        if (!data || !data.ip || !data.mac) return;
-        const normMac = data.mac.toLowerCase();
-        let dev = this.devices.get(data.ip);
-        if (!dev) {
-            for (const d of this.devices.values()) {
-                if (d.mac.toLowerCase() === normMac) {
-                    dev = d;
-                    break;
-                }
-            }
-        }
-
-        if (dev && !dev.is_self && !dev.is_gateway) {
-            const wasOnline = Boolean(dev.is_online);
-            const isOnline = Boolean(data.is_online);
-            dev.is_online = isOnline;
-            if (data.rtt_ms !== undefined) dev.rtt_ms = data.rtt_ms;
-            this.devices.set(dev.ip, dev);
-            await this.db.setDeviceOnlineStatus(dev.mac, isOnline, this.currentNetworkId).catch(err => this.log.warn({ mac: dev.mac, err }, 'Failed to set online status on liveness pulse'));
-            this.emit('deviceUpdated', dev);
-
-            if (wasOnline && !isOnline) {
-                this.log.info({ ip: dev.ip, mac: dev.mac, vector: data.vector || 'timeout' }, `[LivenessPulse < 0.75s] Instant Offline Confirmed: ${dev.ip} (${dev.mac}) via vector '${data.vector || 'timeout'}'`);
-                this.emit('deviceDisconnected', dev);
-                this.emit('devicesUpdated', Array.from(this.devices.values()));
-            } else if (!wasOnline && isOnline) {
-                this.log.info({ ip: dev.ip, mac: dev.mac, vector: data.vector }, `[LivenessPulse < 0.75s] Instant Online Confirmed: ${dev.ip} (${dev.mac}) via vector '${data.vector}'`);
-                this.emit('devicesUpdated', Array.from(this.devices.values()));
-            }
-        }
+        return this.discoveryService.handleLivenessEvent(data);
     }
 
     private async _verifyPreFlightLiveness(device: Device, gatewayIp: string): Promise<Device> {
@@ -862,10 +422,17 @@ export class DeviceManager extends EventEmitter implements IDeviceManager {
         return device;
     }
 
+    private async _attachSpoofCutStatus(): Promise<void> {
+        return (this.discoveryService as any).attachSpoofCutStatus();
+    }
+
+    private async _getLiveEngineSessionIds(): Promise<Set<string> | undefined> {
+        return (this.discoveryService as any).getLiveEngineSessionIds();
+    }
+
     async init(): Promise<void> {
         await this.db.init();
-        // Sembuhkan profil yang namanya generik/'Unknown' dari hostname personal perangkatnya, agar
-        // MAC hasil rotasi tak lagi mewarisi nama "Unknown" (idempoten, hanya naik generik→personal).
+        // Sembuhkan profil yang namanya generik/'Unknown' dari hostname personal perangkatnya
         try { if (typeof this.db.backfillProfileNames === "function") await this.db.backfillProfileNames(); } catch (e: any) { this.log.warn({ err: e }, `Notice profile name backfill: ${e?.message}`); }
 
         if (this.currentNetworkId === 'net_default' && typeof this.db?.getAllNetworks === 'function') {
@@ -895,14 +462,11 @@ export class DeviceManager extends EventEmitter implements IDeviceManager {
         // Load in reverse (offline first, online last) so online devices cleanly overwrite any legacy stale IP duplicates
         const sorted = [...storedDevices].sort((a, b) => (a.is_online === b.is_online ? 0 : a.is_online ? 1 : -1));
         for (const device of sorted) {
-            // Python fresh saat boot: session_id dari DB pasti basi (sesi spoof tak dipersistkan).
-            // Bersihkan agar auto-reblock membangun ulang sesi, bukan mengira sesinya hidup (SP-2).
             if (device.session_id) device.session_id = undefined;
             // INTEGRITAS CONTROLLER: Abaikan riwayat controller offline dari DB agar tidak menjadi entri hantu saat startup
             const selfHostname = os.hostname().toLowerCase();
             const devHost = (device.hostname || '').trim().toLowerCase();
             if (!device.is_online && (device.is_self || (devHost && devHost === selfHostname))) continue;
-            // Offline devices (ip='') keyed by identity so they don't collapse onto '' (BUG-17).
             this.devices.set(deviceMemKey(device), device);
         }
         this.log.info({ count: storedDevices.length, networkId: this.currentNetworkId }, `Loaded ${storedDevices.length} persistent devices from SQLite`);
@@ -915,20 +479,13 @@ export class DeviceManager extends EventEmitter implements IDeviceManager {
         }, RETENTION_SWEEP_INTERVAL_MS);
         retentionTimer.unref();
 
-        // Background Liveness Watchdog: verifikasi state jaringan tiap 25 detik — HANYA saat Auto Scan
-        // aktif. Di mode "Scan saja" watchdog diam total (tak ada scan latar).
-        const watchdogTimer = setInterval(() => {
-            if (this._shouldRunWatchdogScan()) {
-                this.scanNetwork().catch(err => this.log.warn({ err }, `Notice background watchdog scan: ${err.message}`));
-            }
-        }, 25000);
-        watchdogTimer.unref();
+        // Background Liveness Watchdog via DiscoveryService
+        this.discoveryService.startWatchdog();
     }
 
     /**
      * Arsipkan perangkat basi via DB (berpagar: hanya tamu anonim yang lama offline),
-     * bersihkan MAC acak usang & profil duplikat secara berkala, checkpoint WAL SQLite,
-     * lalu segarkan memori & UI bila ada perubahan agar database dan tabel tetap ramping.
+     * bersihkan MAC acak usang & profil duplikat secara berkala, checkpoint WAL SQLite.
      */
     private async _runRetentionSweep(): Promise<void> {
         const archived = await this.db.archiveStaleDevices(STALE_DEVICE_RETENTION_DAYS);
@@ -948,74 +505,46 @@ export class DeviceManager extends EventEmitter implements IDeviceManager {
         }
     }
 
-    private debouncedScan(delayMs: number = 8000) {
-        if (this.dhcpScanDebounceTimer) {
-            clearTimeout(this.dhcpScanDebounceTimer);
-        }
-        this.dhcpScanDebounceTimer = setTimeout(() => {
-            this.dhcpScanDebounceTimer = null;
-            if (!this.scanning) {
-                this.scanNetwork().catch(err => this.log.error({ err }, 'Error during debounced scan'));
-            }
-        }, delayMs);
-        this.dhcpScanDebounceTimer.unref();
+    debouncedScan(delayMs: number = 8000): void {
+        this.discoveryService.debouncedScan(delayMs);
     }
 
-    /**
-     * Aktifkan/nonaktifkan Auto Scan. Saat diaktifkan, langsung menjalankan satu scan
-     * seketika; watchdog latar & scan-saat-perangkat-baru menjadi aktif. Saat dimatikan,
-     * seluruh scan otomatis berhenti (mode "Scan saja"): pembatalan debounce yang tertunda
-     * agar tak ada scan latar yang menyusul. Mengembalikan status akhir.
-     */
     setAutoScan(enabled: boolean): boolean {
         const next = Boolean(enabled);
-        // Gate tier di BACKEND: Auto Scan hanya untuk tier berbayar (free = "Scan saja"). Ditegakkan
-        // di sini — bukan hanya UI — agar klien free ter-autentikasi tak bisa menyalakan scan latar
-        // via emit WS langsung. Permisif bila LicenseManager tak ada (dev/test tanpa lisensi).
         if (next && this.license && this.license.getLicense().tier === 'free') {
             this.log.warn({ tier: this.license?.getLicense().tier }, 'Auto Scan rejected: tier free is limited to manual scan. Upgrade to enable Auto Scan.');
-            if (this.autoScanEnabled) {
-                this.autoScanEnabled = false;
-                this.emit('autoScanChanged', { enabled: false });
+            if (this.discoveryService.isAutoScanEnabled()) {
+                this.discoveryService.setAutoScanEnabled(false);
             }
             return false;
         }
 
-        const changed = next !== this.autoScanEnabled;
-        this.autoScanEnabled = next;
-
-        if (!next && this.dhcpScanDebounceTimer) {
-            clearTimeout(this.dhcpScanDebounceTimer);
-            this.dhcpScanDebounceTimer = null;
-        }
-
-        this.emit('autoScanChanged', { enabled: this.autoScanEnabled });
+        const changed = next !== this.discoveryService.isAutoScanEnabled();
+        this.discoveryService.setAutoScanEnabled(next);
 
         // Mengaktifkan Auto Scan langsung memicu satu scan seketika.
-        if (next && changed && !this.scanning) {
+        if (next && changed && !this.discoveryService.isScanning()) {
             this.scanNetwork().catch(err => this.log.warn({ err }, `Notice immediate auto-scan: ${err?.message}`));
         }
-        return this.autoScanEnabled;
+        return this.discoveryService.isAutoScanEnabled();
     }
 
     isAutoScanEnabled(): boolean {
-        return this.autoScanEnabled;
+        return this.discoveryService.isAutoScanEnabled();
     }
 
-    /** Watchdog latar hanya scan bila Auto Scan aktif, tak sedang scan, & ada perangkat. */
     private _shouldRunWatchdogScan(): boolean {
-        return this.autoScanEnabled && !this.scanning && this.devices.size > 0;
+        return this.discoveryService.isAutoScanEnabled() && !this.discoveryService.isScanning() && this.devices.size > 0;
     }
 
     isScanning(): boolean {
-        return this.scanning;
+        return this.discoveryService.isScanning();
     }
 
     getCurrentNetworkId(): string {
         return this.currentNetworkId;
     }
 
-    /** True bila DB memakai fallback in-memory (data tidak tersimpan permanen) — P3. */
     isUsingMemoryFallback(): boolean {
         return this.db.usingMemoryFallback === true;
     }
@@ -1079,465 +608,11 @@ export class DeviceManager extends EventEmitter implements IDeviceManager {
     }
 
     async scanNetwork(options: DeviceScanOptions = {}): Promise<Device[]> {
-        // Single-Flight Coalescing: bila scan sedang berjalan, bagikan promise yang sama tanpa antre ulang.
-        if (this.inFlightScan) {
-            if (options.requireFresh) {
-                const priorScan = this.inFlightScan;
-                try {
-                    await priorScan;
-                } catch {
-                    // A fresh scan still gets one attempt after an older scan fails.
-                }
-                if (this.inFlightScan && this.inFlightScan !== priorScan) {
-                    return this.scanNetwork(options);
-                }
-                return this.scanNetwork({
-                    ...options,
-                    requireFresh: false
-                });
-            }
-            this.log.info('Scan is already in progress, returning shared in-flight scan promise.');
-            return this.inFlightScan;
-        }
-        this.inFlightScan = this._scanNetworkImpl(options).finally(() => {
-            this.inFlightScan = null;
-        });
-        return this.inFlightScan;
+        return this.discoveryService.scanNetwork(options);
     }
 
     private async _scanNetworkImpl(options: DeviceScanOptions): Promise<Device[]> {
-        this.scanning = true;
-        this.emit('scanStarted');
-        try {
-            const rawScanResult: any = await this.python.scan(
-                options.skipMulticastWakeup
-                    ? { skipMulticastWakeup: true }
-                    : {}
-            );
-            let rawScanned: Device[] = Array.isArray(rawScanResult)
-                ? rawScanResult
-                : (rawScanResult && Array.isArray(rawScanResult.devices) ? rawScanResult.devices : []);
-
-            // Pastikan Komputer Operator (Perangkat Ini / Controller) selalu ada & Online!
-            const activeGwForFilter = rawScanned.find(d => d.is_gateway) || this.findGateway();
-            try {
-                const ifaces = os.networkInterfaces();
-                for (const addrs of Object.values(ifaces)) {
-                    if (!addrs) continue;
-                    for (const a of addrs) {
-                        if (a.family === 'IPv4' && !a.internal && (a.address.startsWith('192.168.') || a.address.startsWith('10.') || a.address.startsWith('172.'))) {
-                            // Filter ketat: Jika gateway aktif diketahui, HANYA daftarkan interface controller yang
-                            // satu subnet dengan gateway. Abaikan adapter virtual (WSL vEthernet, Hyper-V, Docker)
-                            // yang berada di subnet berbeda agar tidak mencemari database dengan duplikasi laptop offline.
-                            if (activeGwForFilter && !isIpInSameSubnet(a.address, activeGwForFilter.ip)) {
-                                continue;
-                            }
-                            const v6Addrs: string[] = [];
-                            let v6LinkLocal = '';
-                            let v6Global = '';
-                            for (const x of addrs) {
-                                if (x.family === 'IPv6' && x.address) {
-                                    const cleanV6 = x.address.split('%')[0].trim();
-                                    if (cleanV6 && cleanV6 !== '::1') {
-                                        if (!v6Addrs.includes(cleanV6)) v6Addrs.push(cleanV6);
-                                        if (cleanV6.startsWith('fe80:') && !v6LinkLocal) {
-                                            v6LinkLocal = cleanV6;
-                                        } else if (!cleanV6.startsWith('fe80:') && !v6Global) {
-                                            v6Global = cleanV6;
-                                        }
-                                    }
-                                }
-                            }
-
-                            const selfIdx = rawScanned.findIndex(d => d.ip === a.address || d.mac.toLowerCase() === a.mac.toLowerCase());
-                            if (selfIdx >= 0) {
-                                rawScanned[selfIdx].is_self = true;
-                                rawScanned[selfIdx].is_online = true;
-                                rawScanned[selfIdx].hostname = os.hostname();
-                                if (v6Addrs.length > 0) {
-                                    rawScanned[selfIdx].ipv6_addresses = v6Addrs;
-                                    rawScanned[selfIdx].ipv6_link_local = v6LinkLocal || rawScanned[selfIdx].ipv6_link_local;
-                                    rawScanned[selfIdx].ipv6_global = v6Global || rawScanned[selfIdx].ipv6_global;
-                                    rawScanned[selfIdx].is_dual_stack = true;
-                                }
-                            } else {
-                                // OS operator dideteksi DINAMIS (bukan hardcode) agar benar
-                                // di komputer pengguna mana pun.
-                                const plt = os.platform();
-                                let selfOs = 'Unknown';
-                                if (plt === 'win32') {
-                                    const build = parseInt(os.release().split('.')[2] || '0', 10);
-                                    selfOs = build >= 22000 ? 'Windows 11' : 'Windows 10';
-                                } else if (plt === 'darwin') {
-                                    selfOs = 'macOS';
-                                } else {
-                                    selfOs = 'Linux';
-                                }
-                                rawScanned.push({
-                                    ip: a.address,
-                                    mac: a.mac.toLowerCase(),
-                                    hostname: os.hostname(),
-                                    vendor: 'This PC (Controller)',
-                                    os: selfOs,
-                                    device_type: 'This PC (Perangkat Ini)',
-                                    is_gateway: false,
-                                    is_self: true,
-                                    is_online: true,
-                                    is_blocked: false,
-                                    rtt_ms: 0.1,
-                                    open_ports: [],
-                                    services: [],
-                                    ipv6_link_local: v6LinkLocal || undefined,
-                                    ipv6_global: v6Global || undefined,
-                                    ipv6_addresses: v6Addrs,
-                                    is_dual_stack: v6Addrs.length > 0
-                                });
-                            }
-                        }
-                    }
-                }
-            } catch (err) {
-                this.log.warn({ err }, 'Notice ensuring self device');
-            }
-
-            // INTEGRITAS CONTROLLER: Pastikan hanya ada 1 perangkat controller (is_self) aktif di jaringan ini
-            const activeSelf = rawScanned.find(d => d.is_self);
-            if (activeSelf) {
-                for (const d of rawScanned) {
-                    if (d !== activeSelf && d.is_self) {
-                        d.is_self = false;
-                    }
-                }
-                for (const [k, d] of this.devices.entries()) {
-                    if (d.is_self && d.mac.toLowerCase() !== activeSelf.mac.toLowerCase()) {
-                        d.is_self = false;
-                        if (!d.is_online) {
-                            this.devices.delete(k);
-                        }
-                    }
-                }
-            }
-
-            // Saring rawScanned: Hanya proses perangkat yang berada dalam satu subnet dengan gateway aktif
-            if (activeGwForFilter) {
-                rawScanned = rawScanned.filter(d => isIpInSameSubnet(d.ip, activeGwForFilter.ip));
-                if (activeGwForFilter.mac) {
-                    const detectedNetId = deriveNetworkId(activeGwForFilter.mac);
-                    if (detectedNetId !== this.currentNetworkId) {
-                        this.log.info({ previousNetworkId: this.currentNetworkId, detectedNetworkId: detectedNetId }, `Network shift detected during scan: ${this.currentNetworkId} -> ${detectedNetId}`);
-                        this.currentNetworkId = detectedNetId;
-                        this.devices.clear();
-                        if (typeof this.db?.getAllDevices === 'function') {
-                            try {
-                                const stored = await this.db.getAllDevices(this.currentNetworkId);
-                                for (const d of stored) {
-                                    this.devices.set(deviceMemKey(d), d);
-                                }
-                            } catch (e: any) {
-                                this.log.warn({ err: e, networkId: this.currentNetworkId }, `Notice loading devices on network shift: ${e?.message}`);
-                            }
-                        }
-                    }
-                    if (typeof this.db?.ensureNetwork === 'function') {
-                        this.db.ensureNetwork({
-                            id: detectedNetId,
-                            ssid: 'Network ' + (activeGwForFilter.ip || 'LAN'),
-                            gateway_ip: activeGwForFilter.ip || '0.0.0.0',
-                            gateway_mac: activeGwForFilter.mac,
-                            subnet: (activeGwForFilter.ip ? activeGwForFilter.ip.substring(0, activeGwForFilter.ip.lastIndexOf('.')) + '.0/24' : '0.0.0.0/0')
-                        });
-                    }
-                }
-            }
-
-            // Tag each scanned device with currentNetworkId
-            for (const dev of rawScanned) {
-                dev.network_id = this.currentNetworkId;
-            }
-
-            // Sinkronkan ke SQLite:
-            // 1. Mempertahankan is_blocked jika perangkat pernah diblokir
-            // 2. Mendeteksi perangkat terblokir yang baru saja kembali ke jaringan
-            // 3. Menandai perangkat yang tidak tertangkap sebagai is_online = false (bukan dihapus!)
-            // Ambil daftar sesi HIDUP engine agar syncScanResults dapat mendeteksi session_id BASI
-            // (device ditandai blok tapi sesinya sudah mati di engine) → jadikan target reblock &
-            const liveSessionIds = await this._getLiveEngineSessionIds();
-            const syncRes = (await this.db.syncScanResults(rawScanned, liveSessionIds)) || {};
-            const allDevices: Device[] = syncRes.allDevices || [];
-            const autoReblockTargets: Device[] = syncRes.autoReblockTargets || [];
-            const autoThrottleTargets: Device[] = syncRes.autoThrottleTargets || [];
-            const zombieSessionsToStop: string[] = syncRes.zombieSessionsToStop || [];
-
-            // Sehatkan nama profil dari hostname personal yang baru dipelajari scan ini (idempoten).
-            try { if (typeof this.db.backfillProfileNames === "function") await this.db.backfillProfileNames(); } catch (e: any) { this.log.warn({ err: e }, `Notice profile name backfill (scan): ${e?.message}`); }
-
-            // Bersihkan sesi zombie lama dari MAC yang baru saja diarsipkan
-            if (zombieSessionsToStop && zombieSessionsToStop.length > 0) {
-                for (const sid of zombieSessionsToStop) {
-                    try {
-                        this.log.info({ sessionId: sid }, `Stopping zombie spoof session ${sid} from archived MAC`);
-                        await this.python.stopSpoof(sid);
-                    } catch (e) {
-                        this.log.warn({ err: e, sessionId: sid }, `Notice stopping archived session ${sid}`);
-                    }
-                }
-            }
-
-            // Deteksi perangkat yang beralih status dari online menjadi offline.
-            const prevByMac = new Map<string, Device>();
-            for (const d of this.devices.values()) prevByMac.set(d.mac.toLowerCase(), d);
-            for (const dev of allDevices) {
-                if (!dev.is_self && !dev.is_gateway && !dev.is_online) {
-                    const prev = prevByMac.get(dev.mac.toLowerCase());
-                    if (prev && prev.is_online) {
-                        this.log.info({ ip: dev.ip || dev.last_ip || '-', mac: dev.mac }, `Device disconnected: ${dev.ip || dev.last_ip || '-'} (${dev.mac})`);
-                        // Bersihkan sesi Gaming Mode agar tak bocor & agar reconnect ter-throttle lagi.
-                        await this._stopGamingSession(dev.mac.toLowerCase());
-                        if (prev.ip) {
-                            this.devices.delete(prev.ip);
-                        }
-                        // Pertahankan perangkat yang baru offline di memori memakai kunci
-                        // identitas (bukan menghapusnya), agar tetap tampil di tab Offline
-                        // alih-alih hilang dari daftar (BUG-17). Merge utama (bawah) melewati
-                        // perangkat ber-ip kosong, jadi entri ini tidak akan ditimpa.
-                        this.devices.set(deviceMemKey(dev), dev);
-                        this.emit('deviceDisconnected', dev);
-                    }
-                }
-            }
-
-            // In-Place Delta Merge: JANGAN panggil this.devices.clear() agar status manipulasi aktif tidak pernah hilang.
-            const activeGw = allDevices.find(d => d.is_gateway) || rawScanned.find(d => d.is_gateway);
-            const rawScannedIps = new Set(rawScanned.map(d => d.ip));
-
-            // Kumpulkan profile_id yang memiliki perangkat aktif online
-            const activeProfileIds = new Set<string>();
-            for (const dev of allDevices) {
-                if (dev.is_online && dev.profile_id) {
-                    activeProfileIds.add(dev.profile_id);
-                }
-            }
-
-            // Indeks perangkat saat ini di memori berdasarkan MAC untuk rekonsiliasi yang aman
-            const currentMemByMac = new Map<string, Device>();
-            for (const d of this.devices.values()) {
-                currentMemByMac.set(d.mac.toLowerCase(), d);
-            }
-            const newlyAddedProfileMacs = new Set<string>();
-
-            for (const dev of allDevices) {
-                // Lewati perangkat tanpa IP valid
-                if (!dev.ip || dev.ip.trim() === '') {
-                    continue;
-                }
-
-                // INTEGRITAS CONTROLLER: Komputer operator (is_self) tidak pernah berstatus offline di aplikasinya sendiri.
-                // Jika ada entri lama dari adapter virtual yang mati, abaikan agar tidak muncul duplikat offline.
-                if (dev.is_self && !dev.is_online) {
-                    continue;
-                }
-
-                // Jika perangkat ini offline namun ada perangkat online lain dengan profile_id yang sama, lewati duplikat lama
-                if (!dev.is_online && dev.profile_id && activeProfileIds.has(dev.profile_id)) {
-                    continue;
-                }
-
-                // Muat/Perbarui perangkat jika dalam satu subnet atau tertangkap scan
-                if (rawScannedIps.has(dev.ip) || !activeGw || isIpInSameSubnet(dev.ip, activeGw.ip)) {
-                    const devMacNorm = dev.mac.toLowerCase();
-                    const existing = currentMemByMac.get(devMacNorm);
-                    const conflictDev = this.devices.get(dev.ip);
-
-                    // ATURAN INTEGRITAS: Perangkat offline TIDAK BOLEH menimpa perangkat online di IP yang sama!
-                    if (!dev.is_online && conflictDev && conflictDev.is_online && conflictDev.mac.toLowerCase() !== devMacNorm) {
-                        continue;
-                    }
-
-                    if (existing) {
-                        // Hapus kunci lama yang DITEMPATI `existing`: bisa IP lama (migrasi IP), ATAU
-                        // kunci IDENTITAS saat perangkat sedang offline (ip='' → profile_id/MAC). Kalau
-                        // hanya cek `existing.ip`, kunci identitas tak terhapus dan object yang sama juga
-                        // diset di dev.ip (baris bawah) → duplikat identity+IP yang menggandakan hitungan
-                        // kuota lisensi (filter(is_blocked).length).
-                        const staleKey = deviceMemKey(existing);
-                        if (staleKey !== dev.ip) {
-                            this.devices.delete(staleKey);
-                        }
-
-                        // Jika ada perangkat lain yang sebelumnya menempati dev.ip di memori, bersihkan konflik tersebut
-                        if (conflictDev && conflictDev.mac.toLowerCase() !== devMacNorm) {
-                            this.devices.delete(dev.ip);
-                            conflictDev.is_online = false;
-                            conflictDev.ip = '';
-                            this.devices.set(deviceMemKey(conflictDev), conflictDev);
-                        }
-
-                        // Patch metadata discovery & hardware
-                        existing.ip = dev.ip;
-                        existing.hostname = dev.hostname || existing.hostname;
-                        existing.vendor = dev.vendor || existing.vendor;
-                        existing.os = dev.os || existing.os;
-                        existing.device_type = dev.device_type || existing.device_type;
-                        existing.rtt_ms = dev.rtt_ms;
-                        existing.open_ports = dev.open_ports || existing.open_ports;
-                        existing.services = dev.services || existing.services;
-                        existing.is_online = dev.is_online;
-                        existing.last_seen = dev.last_seen || existing.last_seen;
-                        existing.distance_zone = dev.distance_zone || existing.distance_zone;
-                        existing.estimated_range = dev.estimated_range || existing.estimated_range;
-                        existing.ipv6_link_local = dev.ipv6_link_local || existing.ipv6_link_local;
-                        existing.ipv6_global = dev.ipv6_global || existing.ipv6_global;
-                        existing.ipv6_addresses = dev.ipv6_addresses || existing.ipv6_addresses;
-                        existing.is_dual_stack = dev.is_dual_stack ?? existing.is_dual_stack;
-                        existing.profile_id = dev.profile_id || existing.profile_id;
-                        existing.dhcp_vendor_class = dev.dhcp_vendor_class || existing.dhcp_vendor_class;
-                        existing.dhcp_fingerprint = dev.dhcp_fingerprint || existing.dhcp_fingerprint;
-                        existing.dhcp_client_id = dev.dhcp_client_id || existing.dhcp_client_id;
-                        existing.dhcp_fqdn = dev.dhcp_fqdn || existing.dhcp_fqdn;
-                        if (dev.alias) existing.alias = dev.alias;
-                        if (dev.is_gateway !== undefined) existing.is_gateway = dev.is_gateway;
-                        if (dev.is_self !== undefined) existing.is_self = dev.is_self;
-
-                        // Jika perangkat di memori belum punya sesi aktif, sinkronkan status block/throttle dari DB
-                        if (!existing.session_id && dev.is_blocked !== undefined) {
-                            existing.is_blocked = dev.is_blocked;
-                            existing.speed_limit = dev.speed_limit;
-                        }
-
-                        this.devices.set(dev.ip, existing);
-                    } else {
-                        // Jika ada perangkat lain yang sebelumnya menempati dev.ip di memori, bersihkan konflik
-                        if (conflictDev && conflictDev.mac.toLowerCase() !== devMacNorm) {
-                            this.devices.delete(dev.ip);
-                            conflictDev.is_online = false;
-                            conflictDev.ip = '';
-                            this.devices.set(deviceMemKey(conflictDev), conflictDev);
-                        }
-                        this.devices.set(dev.ip, { ...dev });
-                        if (
-                            dev.is_online
-                            && !dev.is_gateway
-                            && !dev.is_self
-                            && normalizeProfileMac(dev.mac)
-                            && isPrivateIpv4(dev.ip)
-                        ) {
-                            newlyAddedProfileMacs.add(devMacNorm);
-                        }
-                    }
-                }
-            }
-
-            // Temukan gateway untuk eksekusi spoofing
-            const gateway = this.findGateway();
-
-            // 1. Eksekusi AUTO-REBLOCK dengan LATE-CHECK otoritatif
-            if (gateway && autoReblockTargets.length > 0) {
-                for (const target of autoReblockTargets) {
-                    if (target.is_gateway || target.is_self || target.ip === gateway.ip) continue;
-
-                    const currentDev = this.devices.get(target.ip);
-                    if (!currentDev || currentDev.is_self || currentDev.is_gateway) continue;
-
-                    // Late-Check: Jika user baru saja unblock saat scan berjalan, batalkan auto-reblock
-                    if (!currentDev.is_blocked) {
-                        this.log.info({ ip: target.ip, mac: target.mac }, `[AUTO-REBLOCK] Skipping ${target.ip} because it was unblocked during scan`);
-                        continue;
-                    }
-
-                    // Bersihkan sesi lama jika ada (dari sebelum offline / IP lama) sebelum membangun sesi fresh
-                    await this._clearStaleSpoofSession(currentDev);
-
-                    try {
-                        this.log.info({ hostname: currentDev.hostname, ip: currentDev.ip, mac: currentDev.mac }, `[AUTO-REBLOCK] Target detected returning: ${currentDev.hostname || currentDev.ip} (MAC: ${currentDev.mac}, IP: ${currentDev.ip})`);
-                        const sessionId = await this.python.startSpoof(
-                            currentDev.ip,
-                            currentDev.mac,
-                            gateway.ip,
-                            gateway.mac,
-                            0,
-                            currentDev.ipv6_link_local || currentDev.ipv6_global,
-                            gateway.ipv6_link_local || gateway.ipv6_global
-                        );
-
-                        currentDev.is_blocked = true;
-                        currentDev.speed_limit = 0;
-                        currentDev.session_id = sessionId;
-                        await this.db.setDeviceBlocked(currentDev.mac, true, sessionId, this.currentNetworkId);
-                        await this.db.setDeviceSpeedLimit(currentDev.mac, 0, this.currentNetworkId);
-
-                        this.devices.set(currentDev.ip, currentDev);
-                        this.emit('deviceUpdated', currentDev);
-                        this.emit('autoReblocked', currentDev);
-                    } catch (err) {
-                        this.log.error({ err, ip: target.ip, mac: target.mac }, `[AUTO-REBLOCK] Failed to auto-block ${target.ip}`);
-                    }
-                }
-            }
-
-            // 2. Eksekusi AUTO-THROTTLE dengan LATE-CHECK otoritatif
-            if (gateway && autoThrottleTargets.length > 0) {
-                for (const target of autoThrottleTargets) {
-                    if (target.is_gateway || target.is_self || target.ip === gateway.ip) continue;
-
-                    const currentDev = this.devices.get(target.ip);
-                    if (!currentDev || currentDev.is_self || currentDev.is_gateway) continue;
-
-                    // Late-Check: Jika speed limit sudah diubah ke 100% atau diblokir penuh, lewati
-                    if (currentDev.speed_limit === undefined || currentDev.speed_limit >= 100 || currentDev.is_blocked) {
-                        continue;
-                    }
-
-                    // Bersihkan sesi lama jika ada (dari sebelum offline / IP lama) sebelum membangun sesi fresh
-                    await this._clearStaleSpoofSession(currentDev);
-
-                    try {
-                        const limit = currentDev.speed_limit ?? 50;
-                        this.log.info({ limit, hostname: currentDev.hostname, ip: currentDev.ip, mac: currentDev.mac }, `[AUTO-THROTTLE] Reapplying speed limit ${limit}% for ${currentDev.hostname || currentDev.ip} (${currentDev.mac})`);
-                        const sessionId = await this.python.startSpoof(
-                            currentDev.ip,
-                            currentDev.mac,
-                            gateway.ip,
-                            gateway.mac,
-                            limit,
-                            currentDev.ipv6_link_local || currentDev.ipv6_global,
-                            gateway.ipv6_link_local || gateway.ipv6_global
-                        );
-
-                        currentDev.is_blocked = false;
-                        currentDev.speed_limit = limit;
-                        currentDev.session_id = sessionId;
-                        await this.db.setDeviceBlocked(currentDev.mac, false, sessionId, this.currentNetworkId);
-                        await this.db.setDeviceSpeedLimit(currentDev.mac, limit, this.currentNetworkId);
-
-                        this.devices.set(currentDev.ip, currentDev);
-                        this.emit('deviceUpdated', currentDev);
-                    } catch (err) {
-                        this.log.error({ err, ip: target.ip, mac: target.mac }, `[AUTO-THROTTLE] Failed to auto-throttle ${target.ip}`);
-                    }
-                }
-            }
-
-            // 3. Gaming Mode: throttle perangkat yang baru terdeteksi online selagi mode aktif,
-            // agar isolasi airtime tetap menyeluruh untuk perangkat yang bergabung belakangan.
-            // Diserialisasi (runExclusive) + recheck gamingActive agar tak balapan dgn disable.
-            if (this.gamingActive && gateway) {
-                await this._reapplyGamingSweep(gateway);
-            }
-
-            for (const mac of newlyAddedProfileMacs) {
-                this.scheduleProfileEnrichment(mac, PROFILE_ENRICHMENT_DEBOUNCE_MS);
-            }
-
-            // Lekatkan status pemutusan dua-stack (IPv4+IPv6) dari engine agar UI dapat menampilkan
-            // indikator kill-switch & menyorot kebocoran IPv6. Best-effort: kegagalan tak menggagalkan scan.
-            await this._attachSpoofCutStatus();
-
-            this.emit('devicesUpdated', Array.from(this.devices.values()));
-            return Array.from(this.devices.values());
-        } finally {
-            this.scanning = false;
-            this.emit('scanComplete', Array.from(this.devices.values()));
-        }
+        return (this.discoveryService as any)._scanNetworkImpl(options);
     }
 
     async blockDevice(ip: string, gatewayIp?: string): Promise<Device> {
@@ -1548,14 +623,9 @@ export class DeviceManager extends EventEmitter implements IDeviceManager {
         return this.trafficService.blockDeviceDirect(ip, gatewayIp);
     }
 
-    /**
-     * Hentikan sesi spoof lama pada perangkat (dari sebelum offline / IP lama) sebelum
-     * membangun sesi fresh. Mendelegasikan ke TrafficService.
-     */
     private async _clearStaleSpoofSession(device: Device): Promise<void> {
         return this.trafficService.clearStaleSpoofSession(device);
     }
-
 
     async unblockDevice(identifier: string): Promise<Device> {
         return this.trafficService.unblockDevice(identifier);
@@ -1564,7 +634,6 @@ export class DeviceManager extends EventEmitter implements IDeviceManager {
     private async _unblockDeviceImpl(identifier: string): Promise<Device> {
         return this.trafficService.unblockDeviceDirect(identifier);
     }
-
 
     async redirectDevice(ip: string, redirectUrl: string, instagramUsername: string = '', gatewayIp?: string): Promise<Device> {
         return this.trafficService.redirectDevice(ip, redirectUrl, instagramUsername, gatewayIp);
@@ -1581,7 +650,6 @@ export class DeviceManager extends EventEmitter implements IDeviceManager {
     private async _stopRedirectDeviceImpl(ip: string): Promise<Device> {
         return this.trafficService.stopRedirectDeviceDirect(ip);
     }
-
 
     async deleteDevice(mac: string): Promise<void> {
         return this.runExclusive(() => this._deleteDeviceImpl(mac));
@@ -1683,7 +751,6 @@ export class DeviceManager extends EventEmitter implements IDeviceManager {
         return this.trafficService.setSpeedLimitDirect(ip, limit, gatewayIp);
     }
 
-
     async getStatus(): Promise<any> {
         return this.python.getStatus();
     }
@@ -1696,8 +763,7 @@ export class DeviceManager extends EventEmitter implements IDeviceManager {
                 continue;
             }
             const devHost = (dev.hostname || '').trim().toLowerCase();
-            // INTEGRITAS CONTROLLER: Komputer operator (is_self atau hostname This PC) yang offline adalah entri MAC usang.
-            // Jangan pernah tampilkan entri controller offline.
+            // INTEGRITAS CONTROLLER: Komputer operator yang offline adalah entri MAC usang.
             if (!dev.is_online && (dev.is_self || (devHost && devHost === selfHostname))) {
                 continue;
             }
@@ -1716,23 +782,10 @@ export class DeviceManager extends EventEmitter implements IDeviceManager {
         return this.devices.get(ip);
     }
 
-    /**
-     * Cari perangkat berdasarkan MAC (bukan IP). Peta `devices` di-key oleh IP untuk perangkat
-     * online, jadi getDevice(mac) selalu meleset — jalur yang hanya punya MAC (mis. DELETE
-     * /api/devices/:mac) wajib memakai ini agar invarian Gateway/Self benar-benar tegak.
-     */
     getDeviceByMac(mac: string): Device | undefined {
         return this._findDeviceByMac(mac);
     }
 
-    /**
-     * Saring daftar perangkat untuk TAMPILAN: hanya subnet gateway aktif, dengan
-     * SUBNET MASK nyata dari OS (os.networkInterfaces → netmask adapter yang memuat
-     * gateway), bukan tebakan. Titik-choke tunggal yang dipakai bridge WebSocket &
-     * REST. Fallback bertingkat: bila gateway ATAU mask aktif belum diketahui,
-     * kembalikan apa adanya (tak pernah menyembunyikan semua). Jangan dipakai di
-     * jalur enforcement/hitung lisensi (yang membaca map mentah).
-     */
     scopeForDisplay(devices: Device[]): Device[] {
         const selfHostname = os.hostname().toLowerCase();
         const scopedByNet = devices.filter(d => {
@@ -1757,6 +810,7 @@ export class DeviceManager extends EventEmitter implements IDeviceManager {
     findGateway(): Device | undefined {
         return selectGateway(Array.from(this.devices.values()));
     }
+
     async getTelemetry() {
         return this.python.getTelemetry();
     }
@@ -1864,152 +918,22 @@ export class DeviceManager extends EventEmitter implements IDeviceManager {
     }
 
     async optimizeDhcpProfiling(): Promise<DhcpOptimizationResult> {
-        if (this.inFlightDhcpOptimization) {
-            if (
-                this.inFlightDhcpOptimizationGeneration !== this.dhcpOptimizationGeneration
-            ) {
-                throw new Error(
-                    'Network changed during Discovery Refresh. Wait for cleanup, then retry.'
-                );
-            }
-            return this.inFlightDhcpOptimization;
-        }
-
-        const now = Date.now();
-        if (
-            this.lastDhcpOptimization
-            && now - this.lastDhcpOptimization.completedAt < DHCP_OPTIMIZATION_COOLDOWN_MS
-        ) {
-            const elapsed = now - this.lastDhcpOptimization.completedAt;
-            return {
-                ...this.lastDhcpOptimization.result,
-                cached: true,
-                cooldown_remaining_ms: Math.max(0, DHCP_OPTIMIZATION_COOLDOWN_MS - elapsed)
-            };
-        }
-
-        const generation = this.dhcpOptimizationGeneration;
-        this.inFlightDhcpOptimizationGeneration = generation;
-        this.inFlightDhcpOptimization = (async () => {
-            const startedAt = Date.now();
-            this.log.info('Triggering measured Discovery Refresh & DHCP Observation...');
-            const observation = await this.python.optimizeDhcpProfiling();
-            const devices = await this.scanNetwork({
-                skipMulticastWakeup: true,
-                requireFresh: true
-            });
-            if (generation !== this.dhcpOptimizationGeneration) {
-                throw new Error(
-                    'Network changed before Discovery Refresh completed.'
-                );
-            }
-            const completedAt = Date.now();
-            const result: DhcpOptimizationResult = {
-                success: true,
-                delivery: observation?.data?.delivery || {},
-                dhcpDelta: observation?.data?.dhcp_delta || {},
-                dhcpStats: observation?.data || {},
-                devices,
-                cached: false,
-                cooldown_remaining_ms: DHCP_OPTIMIZATION_COOLDOWN_MS,
-                duration_ms: completedAt - startedAt
-            };
-            this.lastDhcpOptimization = { completedAt, result };
-            return result;
-        })().finally(() => {
-            this.inFlightDhcpOptimization = null;
-            this.inFlightDhcpOptimizationGeneration = null;
-        });
-
-        return this.inFlightDhcpOptimization;
+        return this.reconciliationService.optimizeDhcpProfiling();
     }
 
     async getDhcpStats(): Promise<any> {
-        return this.python.getDhcpStats();
+        return this.reconciliationService.getDhcpStats();
     }
 
     async profileRefresh(): Promise<ProfileRefreshResult> {
-        let waitedForSubset = false;
-        while (this.inFlightProfileRefresh) {
-            if (this.inFlightProfileRefreshScope === 'all') {
-                return this.inFlightProfileRefresh;
-            }
-            waitedForSubset = true;
-            const subset = this.inFlightProfileRefresh;
-            try {
-                await subset;
-            } catch {
-                // A manual request still gets one fresh full attempt after subset failure.
-            }
-        }
-
-        const now = Date.now();
-        if (
-            !waitedForSubset
-            &&
-            this.lastProfileRefresh
-            && now - this.lastProfileRefresh.completedAt < PROFILE_REFRESH_COOLDOWN_MS
-        ) {
-            const elapsed = now - this.lastProfileRefresh.completedAt;
-            return {
-                ...this.lastProfileRefresh.result,
-                cached: true,
-                cooldown_remaining_ms: Math.max(0, PROFILE_REFRESH_COOLDOWN_MS - elapsed)
-            };
-        }
-
-        return this.runProfileRefresh(null, 'all');
+        return this.reconciliationService.profileRefresh();
     }
 
     async runProfileRefresh(
         targetMacs: Set<string> | null,
         scope: 'all' | 'subset'
     ): Promise<ProfileRefreshResult> {
-        while (this.inFlightProfileRefresh) {
-            const active = this.inFlightProfileRefresh;
-            if (this.inFlightProfileRefreshScope === 'all') {
-                if (scope === 'subset') {
-                    this.pendingProfileMacs.clear();
-                }
-                return active;
-            }
-            try {
-                await active;
-            } catch {
-                // A queued operation is independent and may still make a fresh attempt.
-            }
-        }
-
-        if (scope === 'all') {
-            this.pendingProfileMacs.clear();
-            if (this.profileEnrichmentTimer) {
-                clearTimeout(this.profileEnrichmentTimer);
-                this.profileEnrichmentTimer = null;
-            }
-        }
-
-        const normalizedTargetMacs = targetMacs === null
-            ? null
-            : new Set(
-                Array.from(targetMacs)
-                    .map(normalizeProfileMac)
-                    .filter((mac): mac is string => mac !== null)
-            );
-        const generation = this.profileRefreshGeneration;
-        let trackedPromise: Promise<ProfileRefreshResult>;
-        trackedPromise = this.executeProfileRefresh(normalizedTargetMacs, scope, generation)
-            .finally(() => {
-                if (this.inFlightProfileRefresh === trackedPromise) {
-                    this.inFlightProfileRefresh = null;
-                    this.inFlightProfileRefreshScope = null;
-                }
-                if (this.pendingProfileMacs.size > 0 && !this.profileEnrichmentTimer) {
-                    this.armProfileEnrichmentTimer(0);
-                }
-            });
-        this.inFlightProfileRefresh = trackedPromise;
-        this.inFlightProfileRefreshScope = scope;
-        return trackedPromise;
+        return this.reconciliationService.runProfileRefresh(targetMacs, scope);
     }
 
     private async executeProfileRefresh(
@@ -2017,297 +941,14 @@ export class DeviceManager extends EventEmitter implements IDeviceManager {
         scope: 'all' | 'subset',
         generation: number
     ): Promise<ProfileRefreshResult> {
-        const targets = this.snapshotProfileTargets(targetMacs);
-        const visibleCount = targets.length;
-        const startedPayload = {
-            operation: 'profile_refresh',
-            scope,
-            count: visibleCount
-        };
-        this.emit('profileRefreshStarted', startedPayload);
-        this.emit('quickReauthStarted', { ...startedPayload, deprecated: true });
-
-        const response = await this.python.profileRefresh(targets, 5);
-        if (generation !== this.profileRefreshGeneration) {
-            throw new Error('Network changed before Profile Refresh completed.');
-        }
-
-        const uniqueAssessments = new Map<string, ProfileAssessment>();
-        for (const assessment of response.devices || []) {
-            const normalizedMac = normalizeProfileMac(assessment.mac);
-            if (normalizedMac) {
-                uniqueAssessments.set(normalizedMac, {
-                    ...assessment,
-                    mac: normalizedMac
-                });
-            }
-        }
-
-        const persistedAssessmentMacs = new Set<string>();
-        for (const assessment of uniqueAssessments.values()) {
-            if (await this.persistCurrentProfileAssessment(assessment, generation)) {
-                persistedAssessmentMacs.add(assessment.mac);
-            }
-        }
-
-        this.assertProfileRefreshGeneration(generation);
-        const updatedDevices: Device[] = [];
-        for (const assessment of uniqueAssessments.values()) {
-            if (!persistedAssessmentMacs.has(assessment.mac)) continue;
-            const liveDevice = this.findCurrentOnlineProfileDeviceByMac(assessment.mac);
-            if (!liveDevice) continue;
-            this.mergeProfileAssessment(liveDevice, assessment);
-            updatedDevices.push(liveDevice);
-        }
-        for (const liveDevice of updatedDevices) {
-            this.emit('deviceUpdated', liveDevice);
-        }
-        if (updatedDevices.length > 0) {
-            this.emit('devicesUpdated', Array.from(this.devices.values()));
-        }
-
-        this.assertProfileRefreshGeneration(generation);
-        const result: ProfileRefreshResult = {
-            ...response,
-            success: true,
-            devices: this.getDevices(),
-            cached: false,
-            cooldown_remaining_ms: scope === 'all' ? PROFILE_REFRESH_COOLDOWN_MS : 0
-        };
-        const completedAt = Date.now();
-        this.assertProfileRefreshGeneration(generation);
-        for (const target of targets) {
-            this.profileEnrichmentCooldowns.set(target.mac, completedAt);
-        }
-        this.assertProfileRefreshGeneration(generation);
-        if (scope === 'all') {
-            this.lastProfileRefresh = { completedAt, result };
-        }
-
-        this.assertProfileRefreshGeneration(generation);
-        const donePayload = {
-            ...result,
-            operation: 'profile_refresh',
-            scope,
-            count: visibleCount
-        };
-        this.emit('profileRefreshDone', donePayload);
-        this.assertProfileRefreshGeneration(generation);
-        this.emit('quickReauthDone', { ...donePayload, deprecated: true });
-        this.assertProfileRefreshGeneration(generation);
-        return result;
+        return (this.reconciliationService as any).executeProfileRefresh(targetMacs, scope, generation);
     }
 
-    private snapshotProfileTargets(
-        targetMacs: Set<string> | null
-    ): Array<{ ip: string; mac: string; ipv6_addresses: string[] }> {
-        const targets = new Map<string, { ip: string; mac: string; ipv6_addresses: string[] }>();
-        for (const device of this.devices.values()) {
-            const mac = normalizeProfileMac(device.mac);
-            if (
-                !mac
-                || (targetMacs !== null && !targetMacs.has(mac))
-                || !device.is_online
-                || device.is_gateway
-                || device.is_self
-                || !isPrivateIpv4(device.ip)
-            ) {
-                continue;
-            }
-            const ipv6Addresses = normalizeProfileIpv6Addresses([
-                ...(device.ipv6_addresses || []),
-                device.ipv6_link_local,
-                device.ipv6_global
-            ]);
-            targets.set(mac, {
-                ip: device.ip.trim(),
-                mac,
-                ipv6_addresses: ipv6Addresses
-            });
-        }
-        return Array.from(targets.values());
-    }
-
-    private assertProfileRefreshGeneration(generation: number): void {
-        if (generation !== this.profileRefreshGeneration) {
-            throw new Error('Network changed before Profile Refresh completed.');
-        }
-    }
-
-    private findCurrentOnlineProfileDeviceByMac(mac: string): Device | undefined {
-        const normalizedMac = normalizeProfileMac(mac);
-        if (!normalizedMac) return undefined;
-        for (const [ip, device] of this.devices.entries()) {
-            if (
-                ip !== device.ip.trim()
-                || normalizeProfileMac(device.mac) !== normalizedMac
-                || !device.is_online
-                || device.is_gateway
-                || device.is_self
-                || !isPrivateIpv4(device.ip)
-            ) {
-                continue;
-            }
-            const occupant = this.devices.get(device.ip.trim());
-            if (occupant && normalizeProfileMac(occupant.mac) === normalizedMac) {
-                return occupant;
-            }
-        }
-        return undefined;
-    }
-
-    private async persistCurrentProfileAssessment(
-        assessment: ProfileAssessment,
-        generation: number
-    ): Promise<boolean> {
-        let persistedIp: string | null = null;
-        for (let attempt = 0; attempt < 3; attempt++) {
-            this.assertProfileRefreshGeneration(generation);
-            const liveDevice = this.findCurrentOnlineProfileDeviceByMac(assessment.mac);
-            if (!liveDevice) return false;
-            const currentIp = liveDevice.ip.trim();
-            if (persistedIp === currentIp) return true;
-
-            try {
-                await this.db.updateDeviceProfileAssessment({
-                    ...assessment,
-                    ip: currentIp
-                }, this.currentNetworkId);
-                this.assertProfileRefreshGeneration(generation);
-                persistedIp = currentIp;
-            } catch (err: any) {
-                if (err.message && err.message.includes('Network changed')) {
-                    throw err;
-                }
-                this.log.warn({ err, mac: assessment.mac }, `Notice updating device profile assessment for ${assessment.mac}: ${err?.message}`);
-                return false;
-            }
-
-            const currentDevice = this.findCurrentOnlineProfileDeviceByMac(assessment.mac);
-            if (!currentDevice) return false;
-            if (currentDevice.ip.trim() === persistedIp) return true;
-        }
-        return false;
-    }
-
-    private findDeviceByMac(mac: string): Device | undefined {
-        const normalizedMac = normalizeProfileMac(mac);
-        if (!normalizedMac) return undefined;
-        for (const device of this.devices.values()) {
-            if (normalizeProfileMac(device.mac) === normalizedMac) {
-                return device;
-            }
-        }
-        return undefined;
-    }
-
-    private mergeProfileAssessment(device: Device, assessment: ProfileAssessment): void {
-        if (!isGenericProfileLabel(assessment.vendor, 'vendor')) {
-            device.vendor = assessment.vendor;
-        }
-        if (!isGenericProfileLabel(assessment.device_type, 'device_type')) {
-            device.device_type = assessment.device_type;
-        }
-        if (!isGenericProfileLabel(assessment.hostname, 'hostname')) {
-            device.hostname = assessment.hostname;
-        }
-        if (!isGenericProfileLabel(assessment.os, 'os')) {
-            device.os = assessment.os;
-        }
-        device.vendor_confidence = assessment.vendor_confidence;
-        device.type_confidence = assessment.type_confidence;
-        device.hostname_confidence = assessment.hostname_confidence;
-        device.profile_status = assessment.profile_status;
-        device.profile_evidence = assessment.profile_evidence;
-        device.profiled_at = assessment.profiled_at;
-        device.profile_version = assessment.profile_version;
-    }
-
-    private scheduleProfileEnrichment(
+    scheduleProfileEnrichment(
         mac: string,
-        delayMs: number = PROFILE_ENRICHMENT_DEBOUNCE_MS
+        delayMs: number = 1500
     ): void {
-        const normalizedMac = normalizeProfileMac(mac);
-        if (!normalizedMac) return;
-        if (this.inFlightProfileRefreshScope === 'all') {
-            this.pendingProfileMacs.delete(normalizedMac);
-            return;
-        }
-        const completedAt = this.profileEnrichmentCooldowns.get(normalizedMac);
-        if (
-            completedAt !== undefined
-            && Date.now() - completedAt < PROFILE_ENRICHMENT_COOLDOWN_MS
-        ) {
-            return;
-        }
-        this.pendingProfileMacs.add(normalizedMac);
-        if (!this.profileEnrichmentTimer) {
-            this.armProfileEnrichmentTimer(delayMs);
-        }
-    }
-
-    private armProfileEnrichmentTimer(delayMs: number): void {
-        this.profileEnrichmentTimer = setTimeout(() => {
-            this.profileEnrichmentTimer = null;
-            this.drainProfileEnrichment().catch(error => {
-                this.log.warn({ err: error }, 'Notice automatic profile enrichment');
-            });
-        }, Math.max(0, delayMs));
-        this.profileEnrichmentTimer.unref();
-    }
-
-    private async drainProfileEnrichment(): Promise<void> {
-        if (this.pendingProfileMacs.size === 0) return;
-        if (this.inFlightProfileRefresh) {
-            if (this.inFlightProfileRefreshScope === 'all') {
-                this.pendingProfileMacs.clear();
-                return;
-            }
-            const active = this.inFlightProfileRefresh;
-            active.then(
-                () => {
-                    if (this.pendingProfileMacs.size > 0 && !this.profileEnrichmentTimer) {
-                        this.armProfileEnrichmentTimer(0);
-                    }
-                },
-                () => {
-                    if (this.pendingProfileMacs.size > 0 && !this.profileEnrichmentTimer) {
-                        this.armProfileEnrichmentTimer(0);
-                    }
-                }
-            );
-            return;
-        }
-
-        const now = Date.now();
-        const eligibleMacs = new Set<string>();
-        for (const mac of this.pendingProfileMacs) {
-            const completedAt = this.profileEnrichmentCooldowns.get(mac);
-            if (
-                completedAt !== undefined
-                && now - completedAt < PROFILE_ENRICHMENT_COOLDOWN_MS
-            ) {
-                this.pendingProfileMacs.delete(mac);
-                continue;
-            }
-            const device = this.findDeviceByMac(mac);
-            if (
-                !device
-                || !device.is_online
-                || device.is_gateway
-                || device.is_self
-                || !isPrivateIpv4(device.ip)
-            ) {
-                this.pendingProfileMacs.delete(mac);
-                continue;
-            }
-            eligibleMacs.add(mac);
-            this.pendingProfileMacs.delete(mac);
-        }
-
-        if (eligibleMacs.size > 0) {
-            await this.runProfileRefresh(eligibleMacs, 'subset');
-        }
+        this.reconciliationService.scheduleProfileEnrichment(mac, delayMs);
     }
 
     /** @deprecated Use profileRefresh(). */
@@ -2415,7 +1056,6 @@ export class DeviceManager extends EventEmitter implements IDeviceManager {
         return this.gamingService.toggleGamingMode(enabled, mode, targetPingMs);
     }
 
-
     private _findDeviceByMac(macKey: string): Device | undefined {
         const norm = (macKey || '').toLowerCase();
         for (const device of this.devices.values()) {
@@ -2455,5 +1095,4 @@ export class DeviceManager extends EventEmitter implements IDeviceManager {
     private async _reapplyGamingSweep(gateway: Device): Promise<void> {
         return this.gamingService.reapplyGamingSweep(gateway);
     }
-
 }

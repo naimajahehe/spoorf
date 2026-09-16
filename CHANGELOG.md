@@ -2,6 +2,38 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.47] - 2026-09-17
+
+### Tahap 6: Dekomposisi Fisik Monolit DeviceManager ke DiscoveryService & ReconciliationService (`backend-node`)
+- **Ekstraksi `DiscoveryService` (`src/services/discoveryService.ts`)**:
+  - Mengisolasi seluruh pipeline pemindaian Layer 2/Layer 3 (`scanNetwork`, `debouncedScan`) ke dalam service tersendiri.
+  - Mengimplementasikan *Single-Flight Promise Coalescing* untuk mengeliminasi pemindaian paralel ganda yang membebani Npcap/Scapy.
+  - Menjamin integritas controller operator host (`is_self: true`, *anti self-cut*, penyaringan adapter virtual offline).
+  - Menangani adaptasi pergeseran jaringan dinamis (*Network Shift Adaptation* via `deriveNetworkId` dari gateway MAC).
+  - Menjalankan *In-Place Delta Merge* pada metadata penemuan jaringan tanpa mengganggu sesi pemblokiran aktif.
+  - Menjalankan loop watchdog latar belakang (*Background Liveness Watchdog*) yang di-gate oleh toggle Auto Scan dan state pemindaian aktif.
+  - Mengelola dispatching penegakan blokir otomatis (*Auto-Reblock*) dan pembatasan bandwidth (*Auto-Throttle*) dengan late-check verifikasi.
+- **Ekstraksi `ReconciliationService` (`src/services/reconciliationService.ts`)**:
+  - Mengisolasi penanganan event sniffing paket DHCP (`handleDhcpEvent`, DHCP RELEASE, DHCP churn).
+  - Mengimplementasikan resolusi identitas berbasis MAC (*MAC-First Identity Resolution*) dan preservasi entri offline menggunakan kunci identitas (`deviceMemKey`) untuk mencegah tabulasi ganda (*BUG-17*).
+  - Mengimplementasikan *DHCP Fast-Revival*: membatalkan penalti karantina offline 30s seketika saat sinyal DHCP aktif diterima.
+  - Mengimplementasikan *Identity-Match Auto-Reblock*: mendeteksi perangkat terblokir yang merotasi MAC dan memicu pemindaian re-block darurat secara instan.
+  - Mengisolasi penyegaran profil (*Profile Refresh*) dan pengayaan debounced (*Debounced Profile Enrichment*) dengan validasi generasi jaringan (*generation-check*).
+- **Rampingisasi Fasad `DeviceManager` (`src/services/deviceManager.ts`)**:
+  - Memangkas lebih dari 1.360 baris kode dari monolit `DeviceManager.ts` (dari 2.460 baris menjadi 1.098 baris).
+  - Mempertahankan `DeviceManager` sebagai fasad registri in-memory dan koordinator retensi berkala SQLite (*stale device retention sweep*).
+  - Memasang delegator penuh dan getter/setter backward-compatible untuk menjamin interoperabilitas 100% bagi seluruh pengujian dan pemanggil yang ada.
+- **Pembaruan Kontrak & IoC Container (`src/container.ts`)**:
+  - Membuat interface murni `IDiscoveryService.ts` dan `IReconciliationService.ts` di `src/interfaces/`.
+  - Mendaftarkan dan menginjeksi `DiscoveryService` dan `ReconciliationService` ke dalam `ServiceContainer` dan fungsi `createContainer`.
+- **Pengujian Otomatis & Verifikasi Menyeluruh**:
+  - Menambahkan test suite terisolasi `tests/unit_discoveryService.test.ts` (5 pengujian).
+  - Menambahkan test suite terisolasi `tests/unit_reconciliationService.test.ts` (5 pengujian).
+  - Hasil pengujian Node.js meningkat dari **80 menjadi 90 tests PASSED (100% Green)**.
+  - Hasil pengujian Python: **379 / 379 tests PASSED (100% Green)**.
+  - Total verifikasi test otomatis seluruh ekosistem: **469 tests PASSED (100% Green)**.
+  - Frontend SPA build (`tsc && vite build`): 100% bersih tanpa error.
+
 ## [v2.41.46] - 2026-09-17
 
 ### Superpowers Code Review Hardening: Konsolidasi Kunci Memori & Penguatan Invariant L2

@@ -1,4 +1,14 @@
-import { IServiceContainer, IDatabaseService, IPythonBridge, ILicenseManager, ITrafficService, IGamingService, IDeviceManager } from './interfaces';
+import {
+    IServiceContainer,
+    IDatabaseService,
+    IPythonBridge,
+    ILicenseManager,
+    ITrafficService,
+    IGamingService,
+    IDiscoveryService,
+    IReconciliationService,
+    IDeviceManager
+} from './interfaces';
 import { DatabaseService } from './services/database';
 import { PythonBridge } from './services/pythonBridge';
 import { LicenseManager } from './services/licenseManager';
@@ -13,6 +23,8 @@ export class ServiceContainer implements IServiceContainer {
     public readonly licenseManager: ILicenseManager;
     public readonly trafficService: ITrafficService;
     public readonly gamingService: IGamingService;
+    public readonly discoveryService: IDiscoveryService;
+    public readonly reconciliationService: IReconciliationService;
     public readonly deviceManager: IDeviceManager;
 
     constructor(options: {
@@ -21,6 +33,8 @@ export class ServiceContainer implements IServiceContainer {
         licenseManager: ILicenseManager;
         trafficService: ITrafficService;
         gamingService: IGamingService;
+        discoveryService: IDiscoveryService;
+        reconciliationService: IReconciliationService;
         deviceManager: IDeviceManager;
     }) {
         this.databaseService = options.databaseService;
@@ -28,6 +42,8 @@ export class ServiceContainer implements IServiceContainer {
         this.licenseManager = options.licenseManager;
         this.trafficService = options.trafficService;
         this.gamingService = options.gamingService;
+        this.discoveryService = options.discoveryService;
+        this.reconciliationService = options.reconciliationService;
         this.deviceManager = options.deviceManager;
     }
 
@@ -62,6 +78,8 @@ export function createContainer(overrides: Partial<{
     licenseManager: ILicenseManager;
     trafficService: ITrafficService;
     gamingService: IGamingService;
+    discoveryService: IDiscoveryService;
+    reconciliationService: IReconciliationService;
     deviceManager: IDeviceManager;
 }> = {}): ServiceContainer {
     const databaseService = overrides.databaseService || new DatabaseService();
@@ -72,10 +90,14 @@ export function createContainer(overrides: Partial<{
         databaseService,
         licenseManager,
         overrides.trafficService as any,
-        overrides.gamingService as any
+        overrides.gamingService as any,
+        overrides.discoveryService as any,
+        overrides.reconciliationService as any
     );
     const trafficService = overrides.trafficService || (deviceManager instanceof DeviceManager ? deviceManager.trafficService : (deviceManager as unknown as ITrafficService));
     const gamingService = overrides.gamingService || (deviceManager instanceof DeviceManager ? deviceManager.gamingService : (deviceManager as unknown as IGamingService));
+    const discoveryService = overrides.discoveryService || (deviceManager instanceof DeviceManager ? deviceManager.discoveryService : (deviceManager as unknown as IDiscoveryService));
+    const reconciliationService = overrides.reconciliationService || (deviceManager instanceof DeviceManager ? deviceManager.reconciliationService : (deviceManager as unknown as IReconciliationService));
 
     return new ServiceContainer({
         databaseService,
@@ -83,6 +105,8 @@ export function createContainer(overrides: Partial<{
         licenseManager,
         trafficService,
         gamingService,
+        discoveryService,
+        reconciliationService,
         deviceManager,
     });
 }

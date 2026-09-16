@@ -1,3 +1,4 @@
+import os from 'os';
 import { Device } from '../types';
 
 export const PROFILE_MAC_PATTERN = /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/i;
@@ -36,4 +37,154 @@ export function isPrivateIpv4(ip: unknown): ip is string {
     return octets[0] === 10
         || (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31)
         || (octets[0] === 192 && octets[1] === 168);
+}
+
+export function isGenericProfileLabel(
+    value: unknown,
+    field: 'vendor' | 'device_type' | 'hostname' | 'os'
+): boolean {
+    if (typeof value !== 'string' || value.trim() === '') return true;
+    const normalized = value.trim().toLowerCase();
+    if (normalized === '-' || normalized === 'n/a' || normalized === 'none') return true;
+    if (normalized === 'unknown' || normalized.startsWith('unknown ')) return true;
+    if (normalized === 'generic' || normalized.startsWith('generic ')) return true;
+    if (field === 'vendor' && normalized.startsWith('private device')) return true;
+    if (field === 'hostname' && normalized === 'device') return true;
+    if (field === 'device_type' && (normalized === 'device' || normalized === 'client device')) return true;
+    return false;
+}
+
+export function isIpInSameSubnet(ip: string, gatewayIp: string): boolean {
+    if (!ip || !gatewayIp) return true;
+    try {
+        const ipParts = ip.split('.').map(Number);
+        const gwParts = gatewayIp.split('.').map(Number);
+        if (ipParts.length !== 4 || gwParts.length !== 4) return false;
+
+        // Same /24 (standar rumah & kantor)
+        if (ipParts[0] === gwParts[0] && ipParts[1] === gwParts[1] && ipParts[2] === gwParts[2]) {
+            return true;
+        }
+
+        // Public Wi-Fi Supernets:
+        // 10.x.x.x (Class A - Kafe besar / Kampus / Bandara / Hotel)
+        if (gwParts[0] === 10 && ipParts[0] === 10) {
+            return ipParts[1] === gwParts[1];
+        }
+
+        // 172.16.x.x - 172.31.x.x (Class B)
+        if (gwParts[0] === 172 && ipParts[0] === 172) {
+            return ipParts[1] === gwParts[1];
+        }
+
+        // 192.168.x.x (/22 or /20 or /16 supernet)
+        if (gwParts[0] === 192 && gwParts[1] === 168 && ipParts[0] === 192 && ipParts[1] === 168) {
+            return (ipParts[2] & 0xfc) === (gwParts[2] & 0xfc);
+        }
+
+        return false;
+    } catch {
+        return false;
+    }
+}
+
+export function ipv4ToInt(ip: string): number | null {
+    const parts = (ip || '').trim().split('.');
+    if (parts.length !== 4) return null;
+    let acc = 0;
+    for (const p of parts) {
+        if (!/^\d{1,3}$/.test(p)) return null;
+        const n = Number(p);
+        if (n > 255) return null;
+        acc = acc * 256 + n;
+    }
+    return acc >>> 0;
+}
+
+export function netmaskToPrefix(netmask: string): number | null {
+    const n = ipv4ToInt(netmask);
+    if (n === null) return null;
+    let prefix = 0;
+    let seenZero = false;
+    for (let i = 31; i >= 0; i--) {
+        const bit = (n >>> i) & 1;
+        if (bit === 1) {
+            if (seenZero) return null;
+            prefix++;
+        } else {
+            seenZero = true;
+        }
+    }
+    return prefix;
+}
+
+export function isSameSubnetMasked(ip: string, gatewayIp: string, prefixLen: number): boolean {
+    const a = ipv4ToInt(ip);
+    const g = ipv4ToInt(gatewayIp);
+    if (a === null || g === null) return false;
+    if (prefixLen <= 0) return true;
+    if (prefixLen >= 32) return a === g;
+    const mask = (0xFFFFFFFF << (32 - prefixLen)) >>> 0;
+    return ((a & mask) >>> 0) === ((g & mask) >>> 0);
+}
+
+export interface NetIfaceLike { address: string; netmask: string; family: string | number; internal: boolean; }
+
+export function resolveActivePrefix(gatewayIp: string, ifaces: NetIfaceLike[]): number | null {
+    if (ipv4ToInt(gatewayIp) === null) return null;
+    for (const a of ifaces) {
+        const isV4 = a.family === 'IPv4' || a.family === 4;
+        if (!isV4 || a.internal) continue;
+        const prefix = netmaskToPrefix(a.netmask);
+        if (prefix === null) continue;
+        if (isSameSubnetMasked(a.address, gatewayIp, prefix)) return prefix;
+    }
+    return null;
+}
+
+export function scopeDevicesToActiveSubnet(devices: Device[], gatewayIp?: string, prefixLen?: number): Device[] {
+    if (!gatewayIp || prefixLen === undefined || prefixLen === null) return devices;
+    return devices.filter(d => isSameSubnetMasked(d.ip || d.last_ip || '', gatewayIp, prefixLen));
+}
+
+export function selectGateway(devices: Device[]): Device | undefined {
+    const ifaces: NetIfaceLike[] = [];
+    try {
+        for (const addrs of Object.values(os.networkInterfaces())) {
+            for (const a of addrs || []) {
+                if (a.family === 'IPv4' && !a.internal) {
+                    ifaces.push({ address: a.address, netmask: a.netmask, family: a.family, internal: a.internal });
+                }
+            }
+        }
+    } catch {}
+
+    const isLocalSubnet = (ip: string): boolean => {
+        if (!ip) return false;
+        if (ifaces.length === 0) return true;
+        return ifaces.some(iface => {
+            const prefix = resolveActivePrefix(iface.address, ifaces);
+            return prefix !== null && isIpInSameSubnet(ip, iface.address);
+        });
+    };
+
+    for (const d of devices) {
+        if (d.is_gateway && d.is_online && isLocalSubnet(d.ip)) return d;
+    }
+    for (const d of devices) {
+        if (d.is_gateway && d.is_online) return d;
+    }
+    for (const d of devices) {
+        if (d.is_gateway && isLocalSubnet(d.ip)) return d;
+    }
+    for (const d of devices) {
+        if (d.is_gateway) return d;
+    }
+    for (const d of devices) {
+        if (!d.is_self && isLocalSubnet(d.ip) && (d.ip.endsWith('.1') || d.ip.endsWith('.254'))) return d;
+    }
+    for (const d of devices) {
+        if (!d.is_self && (d.ip.endsWith('.1') || d.ip.endsWith('.254'))) return d;
+    }
+    return undefined;
 }
