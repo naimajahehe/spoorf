@@ -7,7 +7,10 @@ import { LicenseManager, FeatureLimitError, FeatureLockedError } from './license
 import { Device, CutStatus, ProfileAssessment, ProfileRefreshResult } from '../types';
 import type { ScanOptions } from './pythonBridge';
 import { createChildLogger } from '../utils/logger';
-import { IDeviceManager, IPythonBridge, IDatabaseService, ILicenseManager } from '../interfaces';
+import { IDeviceManager, IPythonBridge, IDatabaseService, ILicenseManager, ITrafficService, IGamingService } from '../interfaces';
+import { TrafficService, IDeviceRegistry } from './trafficService';
+import { GamingService, IGamingStateDelegate, PendingGamingDisable, GamingRestorePlan } from './gamingService';
+export { PendingGamingDisable, GamingRestorePlan };
 
 // Retensi: perangkat tamu yang offline lebih lama dari ini diarsipkan (bukan dihapus)
 // agar daftar mencerminkan jaringan nyata, bukan riwayat semua tamu. Lihat
@@ -262,26 +265,6 @@ export function selectGateway(devices: Device[]): Device | undefined {
     return undefined;
 }
 
-interface GamingRestorePlan {
-    macKey: string;
-    priorLimit: number;
-    hadSession: boolean;
-    sessionId?: string;
-    device?: Pick<Device, 'ip' | 'mac' | 'ipv6_link_local' | 'profile_id'>;
-    stopped: boolean;
-    restoredSessionId?: string;
-    blockedPersisted: boolean;
-    speedLimitPersisted: boolean;
-}
-
-interface PendingGamingDisable {
-    mode: string;
-    targetPingMs: number;
-    gateway?: Pick<Device, 'ip' | 'mac' | 'ipv6_link_local'>;
-    restorePlans: GamingRestorePlan[];
-    pythonOff: boolean;
-    result?: any;
-}
 
 export class DeviceManager extends EventEmitter implements IDeviceManager {
     private readonly log = createChildLogger('DeviceManager');
@@ -313,16 +296,45 @@ export class DeviceManager extends EventEmitter implements IDeviceManager {
     private dhcpScanDebounceTimer: NodeJS.Timeout | null = null;
     private offlineCooldownTimers: Map<string, NodeJS.Timeout> = new Map();
     private lastIdentityReblockAt: number = 0; // FASE-3: rate-limit re-block scan berbasis identitas
-    // Perangkat yang dikelola Gaming Mode, DIKUNCI per-MAC (lowercase) agar tahan ganti-IP.
-    // Menyimpan limit sebelumnya (untuk pemulihan tepat) + sessionId aktif (agar sesi bisa
-    // dihentikan saat disable/disconnect meski objek device sudah hilang dari daftar).
-    private gamingManaged: Map<string, { priorLimit: number; hadSession: boolean; sessionId?: string }> = new Map();
-    // Status Gaming Mode agar throttle bisa idempoten (re-enter/ganti mode) dan diterapkan
-    // ke perangkat yang baru online selagi mode aktif.
-    private gamingActive: boolean = false;
-    private gamingMode: string = 'auto_airtime';
-    private gamingTargetLimit: number = 100;
-    private pendingGamingDisable: PendingGamingDisable | null = null;
+
+    public readonly trafficService: TrafficService;
+    public readonly gamingService: GamingService;
+
+    get gamingManaged(): Map<string, { priorLimit: number; hadSession: boolean; sessionId?: string }> {
+        return this.gamingService.gamingManaged;
+    }
+    set gamingManaged(val: Map<string, { priorLimit: number; hadSession: boolean; sessionId?: string }>) {
+        this.gamingService.gamingManaged = val;
+    }
+
+    get pendingGamingDisable(): PendingGamingDisable | null {
+        return this.gamingService.pendingGamingDisable;
+    }
+    set pendingGamingDisable(val: PendingGamingDisable | null) {
+        this.gamingService.pendingGamingDisable = val;
+    }
+
+    get gamingActive(): boolean {
+        return this.gamingService.gamingActive;
+    }
+    set gamingActive(val: boolean) {
+        this.gamingService.gamingActive = val;
+    }
+
+    get gamingMode(): string {
+        return this.gamingService.gamingMode;
+    }
+    set gamingMode(val: string) {
+        this.gamingService.gamingMode = val;
+    }
+
+    get gamingTargetLimit(): number {
+        return this.gamingService.gamingTargetLimit;
+    }
+    set gamingTargetLimit(val: number) {
+        this.gamingService.gamingTargetLimit = val;
+    }
+
     // Mutex serialisasi: operasi tulis perangkat (block/unblock/throttle/redirect)
     // diserialisasi untuk mencegah race condition antar-aksi pengguna.
     private opChain: Promise<void> = Promise.resolve();
@@ -336,9 +348,29 @@ export class DeviceManager extends EventEmitter implements IDeviceManager {
     constructor(
         public python: IPythonBridge,
         private db: IDatabaseService,
-        private license?: ILicenseManager
+        private license?: ILicenseManager,
+        trafficService?: TrafficService,
+        gamingService?: GamingService
     ) {
         super();
+        const registry: IDeviceRegistry & IGamingStateDelegate = {
+            getDevice: (ip: string) => this.devices.get(ip),
+            findDeviceByMac: (mac: string) => this._findDeviceByMac(mac),
+            getAllDevices: () => Array.from(this.devices.values()),
+            findGateway: (gwIp?: string) => (gwIp ? this.devices.get(gwIp) : undefined) || this.findGateway(),
+            setDevice: (key: string, dev: Device) => { this.devices.set(key, dev); },
+            getCurrentNetworkId: () => this.currentNetworkId,
+            emit: (event: string, ...args: any[]) => this.emit(event, ...args),
+            runExclusive: <T>(fn: () => Promise<T>) => this.runExclusive(fn),
+            assertNoPendingGamingConflict: (devs: Iterable<Device>) => {
+                this._assertNoPendingGamingRecoveryConflict(devs);
+            },
+            getLicense: () => this.license
+        };
+
+        this.trafficService = trafficService || new TrafficService(this.python, this.db, this.license, registry);
+        this.gamingService = gamingService || new GamingService(this.python, this.db, registry);
+
         // Listen for network changes from Python
         this.python.on('telemetry', (data) => {
             this.emit('telemetry', data);
@@ -853,192 +885,8 @@ export class DeviceManager extends EventEmitter implements IDeviceManager {
     }
 
     private async _verifyPreFlightLiveness(device: Device, gatewayIp: string): Promise<Device> {
-        try {
-            const pulseResult = await this.python.pulseLiveness(
-                [{
-                    ip: device.ip,
-                    mac: device.mac,
-                    ipv6_link_local: device.ipv6_link_local,
-                    ipv6_global: device.ipv6_global
-                }],
-                gatewayIp
-            );
-            const targetPulse = pulseResult ? pulseResult[device.ip] : null;
-
-            // ⚡ [Dynamic ARP Reconciliation] Periksa apakah ada MAC aktif berbeda yang menjawab untuk IP ini
-            if (targetPulse && targetPulse.resolved_mac) {
-                const liveMac = String(targetPulse.resolved_mac).toLowerCase();
-                const currentMac = device.mac.toLowerCase();
-                if (liveMac !== currentMac) {
-                    // T-4 DEFENSE-IN-DEPTH: INVARIANT 1 - Gateway Immunity
-                    const gw = this.devices.get(gatewayIp) || this.findGateway();
-                    const gwMac = (gw?.mac || '').toLowerCase();
-                    if (gwMac && gwMac === liveMac) {
-                        throw new Error(`Cannot target gateway router (${device.ip} resolves to gateway MAC ${liveMac})`);
-                    }
-
-                    // T-4 DEFENSE-IN-DEPTH: INVARIANT 2 - Controller Self-Protection
-                    const selfDev = Array.from(this.devices.values()).find(d => d.is_self);
-                    const localHostMacs = new Set<string>();
-                    try {
-                        for (const addrs of Object.values(os.networkInterfaces())) {
-                            for (const a of addrs || []) {
-                                if (a.mac && a.mac !== '00:00:00:00:00:00') {
-                                    localHostMacs.add(a.mac.toLowerCase());
-                                }
-                            }
-                        }
-                    } catch {}
-                    if ((selfDev && selfDev.mac.toLowerCase() === liveMac) || localHostMacs.has(liveMac)) {
-                        throw new Error(`Cannot target operator host (${device.ip} resolves to host MAC ${liveMac})`);
-                    }
-
-                    // T-1 INNOCENT DEVICE PROTECTION & SEMANTIC IDENTITY GUARD:
-                    // Periksa apakah liveMac sudah terdaftar sebagai perangkat lain yang aktif di memori
-                    let existingLiveDevice: Device | undefined;
-                    for (const [, d] of this.devices.entries()) {
-                        if (d.mac.toLowerCase() === liveMac) {
-                            existingLiveDevice = d;
-                            break;
-                        }
-                    }
-
-                    // R-3 CONTINUITY MATCHING (Profile ID atau Hostname non-generik yang sama)
-                    const isSameIdentity = Boolean(
-                        existingLiveDevice && (
-                            (existingLiveDevice.profile_id && device.profile_id && existingLiveDevice.profile_id === device.profile_id) ||
-                            (device.hostname && existingLiveDevice.hostname &&
-                             device.hostname !== 'Unknown' && existingLiveDevice.hostname !== 'Unknown' &&
-                             device.hostname.toLowerCase() === existingLiveDevice.hostname.toLowerCase())
-                        )
-                    );
-
-                    if (existingLiveDevice) {
-                        // Jika perangkat yang hidup memiliki identitas/profil berbeda,
-                        // tolak auto-rebind untuk mencegah salah potong perangkat tamu yang tidak bersalah.
-                        if (!isSameIdentity) {
-                            const occupantName = (existingLiveDevice.alias && existingLiveDevice.alias.trim()) ||
-                                                 (existingLiveDevice.hostname && existingLiveDevice.hostname.trim()) ||
-                                                 existingLiveDevice.ip ||
-                                                 existingLiveDevice.mac;
-                            throw new Error(`Perangkat target offline: IP ${device.ip} saat ini ditempati oleh perangkat lain (${occupantName} / ${liveMac}).`);
-                        }
-                    } else {
-                        // 🛡️ R-1 FIX (DEFAULT-DENY FOR UNKNOWN OCCUPANT):
-                        // liveMac sama sekali belum dikenal di sistem (belum pernah di-scan).
-                        // Jangan adopsi buta & jangan potong, tolak dengan instruksi scan agar tamu baru aman dari salah potong.
-                        throw new Error(`Perangkat target offline: IP ${device.ip} saat ini ditempati oleh perangkat asing (${liveMac}) yang belum terdaftar. Silakan lakukan Scan terlebih dahulu.`);
-                    }
-
-                    this.log.info({ ip: device.ip, oldMac: currentMac, liveMac }, `[Pre-Flight Dynamic Re-Bind] IP ${device.ip} shifted from ${currentMac} to live MAC ${liveMac}. Reconciling target!`);
-                    await this._clearStaleSpoofSession(device);
-
-                    // Canonical Object Unification (device selalu menjadi referensi kanonik tunggal):
-                    const oldKey = deviceMemKey(existingLiveDevice);
-                    if (oldKey !== device.ip) {
-                        this.devices.delete(oldKey);
-                    }
-                    const targetIp = device.ip;
-                    Object.assign(device, existingLiveDevice);
-                    device.ip = targetIp;
-                    device.is_online = true;
-                    this.devices.set(device.ip, device);
-
-                    await this.db.saveDevice(device, this.currentNetworkId).catch(err => this.log.warn({ mac: device.mac, err }, 'Failed to save reconciled device'));
-                    this.emit('deviceUpdated', device);
-                    this.emit('devicesUpdated', Array.from(this.devices.values()));
-                    return device; // Terbukti hidup dan telah disinkronkan ke live MAC
-                }
-            }
-
-            if (targetPulse && targetPulse.is_alive === false) {
-                // Cek apakah perangkat baru saja bermigrasi ke IP lain sebelum menyatakan offline
-                let migratedIp: string | undefined;
-                let migratedMac = device.mac;
-                for (const [ipKey, d] of this.devices.entries()) {
-                    if (d.mac.toLowerCase() === device.mac.toLowerCase() && ipKey !== device.ip && d.is_online) {
-                        migratedIp = ipKey;
-                        migratedMac = d.mac;
-                        break;
-                    }
-                }
-
-                // Cek profil yang sama jika MAC sudah berotasi (misal Android / iOS MAC acak)
-                if (!migratedIp && device.profile_id) {
-                    for (const [ipKey, d] of this.devices.entries()) {
-                        if (d.profile_id === device.profile_id && ipKey !== device.ip && d.is_online) {
-                            migratedIp = ipKey;
-                            migratedMac = d.mac;
-                            break;
-                        }
-                    }
-                }
-
-                if (migratedIp) {
-                    this.log.info({ mac: device.mac, oldIp: device.ip, newIp: migratedIp, newMac: migratedMac }, `[Pre-Flight Auto-Migration] Target ${device.mac} berpindah dari ${device.ip} ke ${migratedIp} (MAC: ${migratedMac}), memverifikasi IP baru...`);
-                    const reCheck = await this.python.pulseLiveness(
-                        [{ ip: migratedIp, mac: migratedMac }],
-                        gatewayIp
-                    );
-                    if (reCheck && reCheck[migratedIp] && reCheck[migratedIp].is_alive) {
-                        this.log.info({ mac: migratedMac, ip: migratedIp }, `[Pre-Flight Auto-Migration] Target ${migratedMac} TERBUKTI HIDUP di IP baru ${migratedIp}!`);
-                        if (device.ip) this.devices.delete(device.ip);
-                        device.ip = migratedIp;
-                        device.mac = migratedMac;
-                        device.is_online = true;
-                        this.devices.set(migratedIp, device);
-                        await this.db.updateDeviceIp(device.mac, migratedIp, this.currentNetworkId).catch(err => this.log.warn({ mac: device.mac, err }, 'Failed to update device IP on auto-migration'));
-                        this.emit('deviceUpdated', device);
-                        this.emit('devicesUpdated', Array.from(this.devices.values()));
-                        return device;
-                    }
-                }
-
-                // TRUST-FRESH BYPASS: bila perangkat baru terverifikasi online sangat baru-baru ini,
-                // kegagalan satu probe jauh lebih mungkin karena contention Npcap/CPU (mis. saat scan/
-                // gaming) ketimbang perangkat benar-benar pergi. Percayai kehadiran segar & lanjutkan
-                // aksi daripada gagal-palsu. Ambang 15s ≈ satu siklus watchdog liveness.
-                const TRUST_FRESH_ONLINE_MS = 15_000;
-                const lastSeenMs = device.last_seen ? new Date(device.last_seen).getTime() : 0;
-                const sinceSeenMs = lastSeenMs > 0 ? Date.now() - lastSeenMs : Infinity;
-                if (sinceSeenMs < TRUST_FRESH_ONLINE_MS) {
-                    this.log.info({ mac: device.mac, sinceSeenMs }, `[Pre-Flight Trust-Fresh] ${device.mac} terakhir online ${Math.round(sinceSeenMs / 1000)}s lalu (< ${TRUST_FRESH_ONLINE_MS / 1000}s) — melewati vonis offline, lanjutkan aksi.`);
-                    return device;
-                }
-
-                // Target terbukti offline (tidak membalas Pre-Flight Liveness Probe)
-                const normMac = device.mac.toLowerCase();
-                device.is_online = false;
-                this.devices.set(device.ip, device);
-                await this.db.setDeviceOnlineStatus(device.mac, false, this.currentNetworkId).catch(err => this.log.warn({ mac: device.mac, err }, 'Failed to set device offline on pre-flight'));
-                this.emit('deviceUpdated', device);
-                this.emit('deviceDisconnected', device);
-                this.emit('devicesUpdated', Array.from(this.devices.values()));
-
-                // ⏱️ [30-Second Penalty Window] Karantina offline selama 30 detik (kecuali ada DHCP Fast-Revival)
-                const prevTimer = this.offlineCooldownTimers.get(normMac);
-                if (prevTimer) clearTimeout(prevTimer);
-
-                const penaltyTimer = setTimeout(() => {
-                    this.offlineCooldownTimers.delete(normMac);
-                    this.log.info({ mac: normMac }, `[Cooldown 30s Expired] Masa karantina offline untuk ${device.hostname || device.ip} (${normMac}) selesai.`);
-                }, 30000);
-                this.offlineCooldownTimers.set(normMac, penaltyTimer);
-
-                const name = (device.alias && device.alias.trim()) || (device.hostname && device.hostname.trim()) || device.ip;
-                throw new Error(`Perangkat ${name} tidak merespons (Offline / sudah tidak terhubung ke Wi-Fi).`);
-            }
-        } catch (err: any) {
-            if (
-                err.message && (
-                    err.message.includes('tidak merespons') ||
-                    err.message.includes('Cannot target') ||
-                    err.message.includes('saat ini ditempati oleh')
-                )
-            ) {
-                throw err;
-            }
-            this.log.warn({ err }, `Notice in pre-flight liveness check: ${err.message || err}`);
+        if (this.trafficService && 'verifyPreFlightLiveness' in this.trafficService) {
+            return await (this.trafficService as any).verifyPreFlightLiveness(device, gatewayIp);
         }
         return device;
     }
@@ -1721,279 +1569,48 @@ export class DeviceManager extends EventEmitter implements IDeviceManager {
         }
     }
 
-    async blockDevice(ip: string, gatewayIp: string): Promise<Device> {
-        return this.runExclusive(() => this._blockDeviceImpl(ip, gatewayIp));
+    async blockDevice(ip: string, gatewayIp?: string): Promise<Device> {
+        return this.trafficService.blockDevice(ip, gatewayIp);
     }
 
-    private async _blockDeviceImpl(ip: string, gatewayIp: string): Promise<Device> {
-        let device = this.devices.get(ip) || this._findDeviceByMac(ip);
-        if (!device) {
-            throw new Error(`Device ${ip} not found`);
-        }
-        this._assertNoPendingGamingRecoveryConflict([device]);
-
-        // Jika IP perangkat kosong (perangkat offline / rotasi MAC), cari IP aktif via MAC atau profil
-        if (!device.ip) {
-            for (const d of this.devices.values()) {
-                if ((d.mac.toLowerCase() === device.mac.toLowerCase() || (device.profile_id && d.profile_id === device.profile_id)) && d.ip && d.is_online) {
-                    device.ip = d.ip;
-                    device.mac = d.mac;
-                    break;
-                }
-            }
-        }
-
-        if (device.is_self) {
-            throw new Error(`Cannot block operator host / This PC (${ip})`);
-        }
-
-        if (device.is_gateway || device.ip === gatewayIp) {
-            throw new Error(`Cannot block the gateway (${ip})`);
-        }
-
-        if (device.is_blocked && device.session_id) {
-            throw new Error(`Device ${ip} already actively blocked`);
-        }
-
-        if (this.license) {
-            const activeBlockedCount = Array.from(this.devices.values()).filter(d => d.is_blocked).length;
-            const check = this.license.checkCanBlock(activeBlockedCount, Boolean(device.is_blocked));
-            if (!check.allowed) {
-                throw new FeatureLimitError(check.reason || 'Batas kuota pemutusan tercapai. Upgrade ke Pro untuk memutus tanpa batas!');
-            }
-        }
-
-        const gateway = this.devices.get(gatewayIp) || this.findGateway();
-        if (!gateway) {
-            throw new Error(`Gateway ${gatewayIp} not found`);
-        }
-
-        // Pre-Flight Validation: Verifikasi apakah target benar-benar aktif di jaringan L2
-        device = await this._verifyPreFlightLiveness(device, gateway.ip);
-
-        let sessionId = device.session_id;
-        if (sessionId) {
-            // Jika sudah ada sesi aktif (misal dari throttling), cukup ubah limit menjadi 0 (cut-off)
-            await this.python.setSpoofLimit(sessionId, 0);
-        } else {
-            sessionId = await this.python.startSpoof(
-                device.ip,
-                device.mac,
-                gateway.ip,
-                gateway.mac,
-                0,
-                device.ipv6_link_local || device.ipv6_global,
-                gateway.ipv6_link_local || gateway.ipv6_global
-            );
-        }
-
-        device.is_blocked = true;
-        device.speed_limit = 0;
-        device.session_id = sessionId;
-        device.is_online = true;
-        this.devices.set(ip, device);
-
-        // Sinkronkan juga perangkat lain di memori yang berbagi profile_id sama
-        if (device.profile_id) {
-            for (const [key, d] of this.devices.entries()) {
-                if (d.profile_id === device.profile_id && d.mac.toLowerCase() !== device.mac.toLowerCase()) {
-                    d.is_blocked = true;
-                    d.speed_limit = 0;
-                    this.devices.set(key, d);
-                }
-            }
-        }
-
-        // Simpan status blokir secara persisten di SQLite
-        await this.db.setDeviceBlocked(device.mac, true, sessionId, this.currentNetworkId);
-        await this.db.setDeviceSpeedLimit(device.mac, 0, this.currentNetworkId);
-        await this.db.setDeviceOnlineStatus(device.mac, true, this.currentNetworkId);
-
-        this.emit('deviceUpdated', device);
-        this.emit('devicesUpdated', Array.from(this.devices.values()));
-        return device;
+    private async _blockDeviceImpl(ip: string, gatewayIp?: string): Promise<Device> {
+        return this.trafficService.blockDeviceDirect(ip, gatewayIp);
     }
 
     /**
      * Hentikan sesi spoof lama pada perangkat (dari sebelum offline / IP lama) sebelum
-     * membangun sesi fresh. Kegagalan stopSpoof diabaikan: sesi lama mungkin sudah mati
-     * di engine (404), yang penting ID-nya dinolkan agar tak membingungkan state.
+     * membangun sesi fresh. Mendelegasikan ke TrafficService.
      */
     private async _clearStaleSpoofSession(device: Device): Promise<void> {
-        if (!device.session_id) return;
-        const oldSessionId = device.session_id;
-        device.session_id = undefined;
-        try {
-            await this.python.stopSpoof(oldSessionId);
-        } catch {
-            // Engine mungkin sudah menghapus sesi ini (mis. restart/timeout) — aman diabaikan
-        }
+        return this.trafficService.clearStaleSpoofSession(device);
     }
 
+
     async unblockDevice(identifier: string): Promise<Device> {
-        return this.runExclusive(() => this._unblockDeviceImpl(identifier));
+        return this.trafficService.unblockDevice(identifier);
     }
 
     private async _unblockDeviceImpl(identifier: string): Promise<Device> {
-        const device = this._findDeviceByMac(identifier) || this.devices.get(identifier);
-        if (!device) {
-            const dbDev = await this.db.getDeviceByMac(identifier, this.currentNetworkId);
-            if (!dbDev) {
-                throw new Error(`Device ${identifier} not found`);
-            }
-            // Device exists in DB but not in active memory
-            dbDev.is_blocked = false;
-            dbDev.speed_limit = 100;
-
-            // Sinkronkan juga perangkat lain di memori yang berbagi profile_id sama
-            if (dbDev.profile_id) {
-                for (const [key, d] of this.devices.entries()) {
-                    if (d.profile_id === dbDev.profile_id) {
-                        if (d.session_id) {
-                            try { await this.python.stopSpoof(d.session_id); } catch {}
-                        }
-                        d.is_blocked = false;
-                        d.is_redirected = false;
-                        d.redirect_url = undefined;
-                        d.speed_limit = 100;
-                        d.session_id = undefined;
-                        this.devices.set(key, d);
-                    }
-                }
-            }
-
-            await this.db.setDeviceBlocked(dbDev.mac, false, undefined, this.currentNetworkId);
-            await this.db.setDeviceSpeedLimit(dbDev.mac, 100, this.currentNetworkId);
-            this.emit('deviceUpdated', dbDev);
-            this.emit('devicesUpdated', Array.from(this.devices.values()));
-            return dbDev;
-        }
-
-        this._assertNoPendingGamingRecoveryConflict([device]);
-
-        if (device.is_redirected) {
-            await this.python.stopRedirect(device.ip);
-        } else if (device.session_id) {
-            await this.python.stopSpoof(device.session_id);
-        }
-
-        device.is_blocked = false;
-        device.is_redirected = false;
-        device.redirect_url = undefined;
-        device.speed_limit = 100;
-        device.session_id = undefined;
-        this.devices.set(deviceMemKey(device), device);
-
-        // Sinkronkan juga perangkat lain di memori yang berbagi profile_id sama
-        if (device.profile_id) {
-            for (const [key, d] of this.devices.entries()) {
-                if (d.profile_id === device.profile_id && d.mac.toLowerCase() !== device.mac.toLowerCase()) {
-                    if (d.session_id) {
-                        try { await this.python.stopSpoof(d.session_id); } catch {}
-                    }
-                    d.is_blocked = false;
-                    d.is_redirected = false;
-                    d.redirect_url = undefined;
-                    d.speed_limit = 100;
-                    d.session_id = undefined;
-                    this.devices.set(key, d);
-                }
-            }
-        }
-
-        // Hapus status blokir dan pulihkan speed limit ke 100% di SQLite
-        await this.db.setDeviceBlocked(device.mac, false, undefined, this.currentNetworkId);
-        await this.db.setDeviceSpeedLimit(device.mac, 100, this.currentNetworkId);
-        if (device.is_online) {
-            await this.db.setDeviceOnlineStatus(device.mac, true, this.currentNetworkId);
-        }
-
-        this.emit('deviceUpdated', device);
-        this.emit('devicesUpdated', Array.from(this.devices.values()));
-        return device;
+        return this.trafficService.unblockDeviceDirect(identifier);
     }
 
+
     async redirectDevice(ip: string, redirectUrl: string, instagramUsername: string = '', gatewayIp?: string): Promise<Device> {
-        return this.runExclusive(() => this._redirectDeviceImpl(ip, redirectUrl, instagramUsername, gatewayIp));
+        return this.trafficService.redirectDevice(ip, redirectUrl, instagramUsername, gatewayIp);
     }
 
     private async _redirectDeviceImpl(ip: string, redirectUrl: string, instagramUsername: string = '', gatewayIp?: string): Promise<Device> {
-        const device = this.devices.get(ip);
-        if (!device) {
-            throw new Error(`Device ${ip} not found`);
-        }
-        this._assertNoPendingGamingRecoveryConflict([device]);
-
-        if (device.is_gateway || (gatewayIp && device.ip === gatewayIp)) {
-            throw new Error(`Cannot redirect the gateway (${ip})`);
-        }
-
-        if (device.is_self) {
-            throw new Error(`Cannot redirect operator host (${ip})`);
-        }
-
-        // If device is actively blocked or throttled, unblock first
-        if (device.is_blocked || (device.session_id && !device.is_redirected)) {
-            if (device.session_id) await this.python.stopSpoof(device.session_id);
-            device.is_blocked = false;
-            device.speed_limit = 100;
-            device.session_id = undefined;
-            await this.db.setDeviceBlocked(device.mac, false, undefined, this.currentNetworkId);
-            await this.db.setDeviceSpeedLimit(device.mac, 100, this.currentNetworkId);
-        }
-
-        const gw = (gatewayIp ? this.devices.get(gatewayIp) : null) || this.findGateway();
-        if (!gw) {
-            throw new Error('Gateway not found');
-        }
-
-        const res = await this.python.startRedirect(
-            device.ip,
-            device.mac,
-            gw.ip,
-            gw.mac,
-            redirectUrl,
-            instagramUsername
-        );
-
-        device.is_redirected = true;
-        device.redirect_url = redirectUrl;
-        device.is_online = true;
-        if (res && res.arp_session_id) {
-            device.session_id = res.arp_session_id;
-        }
-
-        this.devices.set(ip, device);
-        await this.db.setDeviceOnlineStatus(device.mac, true, this.currentNetworkId);
-        this.emit('deviceUpdated', device);
-        this.emit('devicesUpdated', Array.from(this.devices.values()));
-        return device;
+        return this.trafficService.redirectDeviceDirect(ip, redirectUrl, instagramUsername, gatewayIp);
     }
 
     async stopRedirectDevice(ip: string): Promise<Device> {
-        return this.runExclusive(() => this._stopRedirectDeviceImpl(ip));
+        return this.trafficService.stopRedirectDevice(ip);
     }
 
     private async _stopRedirectDeviceImpl(ip: string): Promise<Device> {
-        const device = this.devices.get(ip);
-        if (!device) {
-            throw new Error(`Device ${ip} not found`);
-        }
-        this._assertNoPendingGamingRecoveryConflict([device]);
-
-        await this.python.stopRedirect(device.ip);
-
-        device.is_redirected = false;
-        device.redirect_url = undefined;
-        device.session_id = undefined;
-        device.is_online = true;
-
-        this.devices.set(ip, device);
-        await this.db.setDeviceOnlineStatus(device.mac, true, this.currentNetworkId);
-        this.emit('deviceUpdated', device);
-        this.emit('devicesUpdated', Array.from(this.devices.values()));
-        return device;
+        return this.trafficService.stopRedirectDeviceDirect(ip);
     }
+
 
     async deleteDevice(mac: string): Promise<void> {
         return this.runExclusive(() => this._deleteDeviceImpl(mac));
@@ -2088,142 +1705,13 @@ export class DeviceManager extends EventEmitter implements IDeviceManager {
     }
 
     async setSpeedLimit(ip: string, limit: number, gatewayIp?: string): Promise<Device> {
-        return this.runExclusive(() => this._setSpeedLimitImpl(ip, limit, gatewayIp));
+        return this.trafficService.setSpeedLimit(ip, limit, gatewayIp);
     }
 
     private async _setSpeedLimitImpl(ip: string, limit: number, gatewayIp?: string): Promise<Device> {
-        let device = this.devices.get(ip);
-        if (!device) {
-            throw new Error(`Device with IP ${ip} not found`);
-        }
-        this._assertNoPendingGamingRecoveryConflict([device]);
-
-        if (device.is_gateway || device.is_self) {
-            throw new Error(`Perangkat infrastruktur (${device.is_gateway ? 'Gateway' : 'Perangkat Ini'}) dilindungi dan tidak dapat dibatasi kecepatannya.`);
-        }
-
-        const cleanLimit = Math.max(0, Math.min(100, Math.round(limit)));
-
-        if (cleanLimit > 0 && cleanLimit < 100 && this.license) {
-            const check = this.license.checkCanThrottle();
-            if (!check.allowed) {
-                throw new FeatureLockedError(check.reason || 'Fitur Pembatasan Kecepatan (PWM Bandwidth Throttling) khusus untuk pengguna PRO.');
-            }
-        }
-
-        if (cleanLimit === 0 && this.license) {
-            const activeBlockedCount = Array.from(this.devices.values()).filter(d => d.is_blocked).length;
-            const check = this.license.checkCanBlock(activeBlockedCount, Boolean(device.is_blocked));
-            if (!check.allowed) {
-                throw new FeatureLimitError(check.reason || 'Batas kuota pemutusan tercapai. Upgrade ke Pro untuk memutus tanpa batas!');
-            }
-        }
-
-        const gateway = (gatewayIp ? this.devices.get(gatewayIp) : undefined) || this.findGateway();
-        if (!gateway) {
-            throw new Error('Gateway not found');
-        }
-
-        if (cleanLimit < 100) {
-            // Pre-Flight Validation: Verifikasi apakah target benar-benar aktif di jaringan L2
-            device = await this._verifyPreFlightLiveness(device, gateway.ip);
-        }
-
-        if (cleanLimit === 100) {
-            // Pulihkan kecepatan penuh (100%): stop spoof jika ada
-            if (device.session_id) {
-                await this.python.stopSpoof(device.session_id);
-                device.session_id = undefined;
-            }
-            device.is_blocked = false;
-            device.speed_limit = 100;
-            if (device.profile_id) {
-                for (const [key, d] of this.devices.entries()) {
-                    if (d.profile_id === device.profile_id && d.mac.toLowerCase() !== device.mac.toLowerCase()) {
-                        if (d.session_id) {
-                            try { await this.python.stopSpoof(d.session_id); } catch {}
-                        }
-                        d.is_blocked = false;
-                        d.is_redirected = false;
-                        d.redirect_url = undefined;
-                        d.speed_limit = 100;
-                        d.session_id = undefined;
-                        this.devices.set(key, d);
-                    }
-                }
-            }
-            await this.db.setDeviceBlocked(device.mac, false, undefined, this.currentNetworkId);
-            await this.db.setDeviceSpeedLimit(device.mac, 100, this.currentNetworkId);
-            await this.db.setDeviceOnlineStatus(device.mac, true, this.currentNetworkId);
-        } else if (cleanLimit === 0) {
-            // Mode Blokir Penuh (0%): Setara cut-off
-            if (!device.session_id) {
-                const sessionId = await this.python.startSpoof(
-                    device.ip,
-                    device.mac,
-                    gateway.ip,
-                    gateway.mac,
-                    0,
-                    device.ipv6_link_local || device.ipv6_global,
-                    gateway.ipv6_link_local || gateway.ipv6_global
-                );
-                device.session_id = sessionId;
-            } else {
-                await this.python.setSpoofLimit(device.session_id, 0);
-            }
-            device.is_blocked = true;
-            device.speed_limit = 0;
-            if (device.profile_id) {
-                for (const [key, d] of this.devices.entries()) {
-                    if (d.profile_id === device.profile_id && d.mac.toLowerCase() !== device.mac.toLowerCase()) {
-                        d.is_blocked = true;
-                        d.speed_limit = 0;
-                        this.devices.set(key, d);
-                    }
-                }
-            }
-            await this.db.setDeviceBlocked(device.mac, true, device.session_id, this.currentNetworkId);
-            await this.db.setDeviceSpeedLimit(device.mac, 0, this.currentNetworkId);
-            await this.db.setDeviceOnlineStatus(device.mac, true, this.currentNetworkId);
-        } else {
-            // Mode Throttle (1% - 99%): Duty cycle PWM
-            if (!device.session_id) {
-                const sessionId = await this.python.startSpoof(
-                    device.ip,
-                    device.mac,
-                    gateway.ip,
-                    gateway.mac,
-                    cleanLimit,
-                    device.ipv6_link_local || device.ipv6_global,
-                    gateway.ipv6_link_local || gateway.ipv6_global
-                );
-                device.session_id = sessionId;
-            } else {
-                await this.python.setSpoofLimit(device.session_id, cleanLimit);
-            }
-            // Penting: Perangkat TIDAK diblokir total, hanya di-throttle
-            device.is_blocked = false;
-            device.speed_limit = cleanLimit;
-            if (device.profile_id) {
-                for (const [key, d] of this.devices.entries()) {
-                    if (d.profile_id === device.profile_id && d.mac.toLowerCase() !== device.mac.toLowerCase()) {
-                        d.is_blocked = false;
-                        d.speed_limit = cleanLimit;
-                        this.devices.set(key, d);
-                    }
-                }
-            }
-            await this.db.setDeviceBlocked(device.mac, false, device.session_id, this.currentNetworkId);
-            await this.db.setDeviceSpeedLimit(device.mac, cleanLimit, this.currentNetworkId);
-            await this.db.setDeviceOnlineStatus(device.mac, true, this.currentNetworkId);
-        }
-
-        device.is_online = true;
-        this.devices.set(ip, device);
-        this.emit('deviceUpdated', device);
-        this.emit('devicesUpdated', Array.from(this.devices.values()));
-        return device;
+        return this.trafficService.setSpeedLimitDirect(ip, limit, gatewayIp);
     }
+
 
     async getStatus(): Promise<any> {
         return this.python.getStatus();
@@ -2949,157 +2437,13 @@ export class DeviceManager extends EventEmitter implements IDeviceManager {
     }
 
     async getGamingStatus(): Promise<any> {
-        return this.python.getGamingStatus();
+        return this.gamingService.getGamingStatus();
     }
 
     async toggleGamingMode(enabled: boolean, mode: string = 'auto_airtime', targetPingMs: number = 25.0): Promise<any> {
-        return this.runExclusive(async () => {
-            if (enabled) {
-                if (this.pendingGamingDisable) {
-                    throw new Error('Gaming disable recovery is pending');
-                }
-                const result = await this.python.toggleGamingMode(true, mode, targetPingMs);
-                const gateway = selectGateway(Array.from(this.devices.values()));
-                if (!gateway) {
-                    this.emit('gamingStatusChanged', result);
-                    return result;
-                }
-
-                // Auto-Isolate / Auto-Throttle seluruh perangkat LAN yang sedang online (kecuali Gateway & This PC)
-                const targetLimit = mode === 'blackhole_priority' ? 0 : 20;
-                this.gamingActive = true;
-                this.gamingMode = mode;
-                this.gamingTargetLimit = targetLimit;
-
-                const onlineTargets = Array.from(this.devices.values()).filter(d =>
-                    !d.is_gateway && !d.is_self && d.is_online
-                );
-
-                this.log.info({ count: onlineTargets.length, mode, targetLimit }, `[GAMING MODE AKTIF] Mengisolasi otomatis ${onlineTargets.length} perangkat LAN (Mode: ${mode}, Limit: ${targetLimit}%)...`);
-
-                for (const target of onlineTargets) {
-                    await this._applyGamingToDevice(target, gateway);
-                }
-
-                this.emit('devicesUpdated', Array.from(this.devices.values()));
-                this.emit('gamingStatusChanged', result);
-                return result;
-            } else {
-                const pending = this.pendingGamingDisable || this._createPendingGamingDisable(mode, targetPingMs);
-                this.pendingGamingDisable = pending;
-                this.log.info({ count: pending.restorePlans.length }, `[GAMING MODE NONAKTIF] Memulihkan ${pending.restorePlans.length} perangkat yang dikelola Gaming Mode...`);
-
-                for (const plan of pending.restorePlans) {
-                    if (!plan.stopped && plan.sessionId) {
-                        await this.python.stopSpoof(plan.sessionId);
-                        plan.stopped = true;
-                    }
-                }
-
-                if (!pending.pythonOff) {
-                    pending.result = await this.python.toggleGamingMode(
-                        false,
-                        pending.mode,
-                        pending.targetPingMs
-                    );
-                    pending.pythonOff = true;
-                    this.gamingActive = false;
-                }
-
-                for (const plan of pending.restorePlans) {
-                    if (!plan.device) continue;
-                    if (plan.hadSession && !plan.restoredSessionId) {
-                        const gateway = pending.gateway;
-                        if (!gateway) {
-                            throw new Error('Gateway not found');
-                        }
-                        plan.restoredSessionId = await this.python.startSpoof(
-                            plan.device.ip,
-                            plan.device.mac,
-                            gateway.ip,
-                            gateway.mac,
-                            plan.priorLimit,
-                            plan.device.ipv6_link_local,
-                            gateway.ipv6_link_local
-                        );
-                    }
-                }
-
-                for (const plan of pending.restorePlans) {
-                    if (!plan.device) continue;
-                    const restoredSessionId = plan.hadSession ? plan.restoredSessionId : undefined;
-                    const speedLimit = plan.hadSession ? plan.priorLimit : 100;
-                    const isBlocked = plan.hadSession && plan.priorLimit <= 0;
-                    if (!plan.blockedPersisted) {
-                        await this.db.setDeviceBlocked(plan.device.mac, isBlocked, restoredSessionId);
-                        plan.blockedPersisted = true;
-                    }
-                    if (!plan.speedLimitPersisted) {
-                        await this.db.setDeviceSpeedLimit(plan.device.mac, speedLimit);
-                        plan.speedLimitPersisted = true;
-                    }
-                }
-
-                const updatedDevices: Device[] = [];
-                for (const plan of pending.restorePlans) {
-                    if (!plan.device) continue;
-                    const device = this._findDeviceByMac(plan.macKey);
-                    if (!device) continue;
-                    device.session_id = plan.hadSession ? plan.restoredSessionId : undefined;
-                    device.speed_limit = plan.hadSession ? plan.priorLimit : 100;
-                    device.is_blocked = plan.hadSession && plan.priorLimit <= 0;
-                    this.devices.set(device.ip, device);
-                    updatedDevices.push(device);
-                }
-
-                this.gamingActive = false;
-                this.gamingManaged.clear();
-                this.pendingGamingDisable = null;
-                for (const device of updatedDevices) {
-                    this.emit('deviceUpdated', device);
-                }
-                this.emit('devicesUpdated', Array.from(this.devices.values()));
-                this.emit('gamingStatusChanged', pending.result);
-                return pending.result;
-            }
-        });
+        return this.gamingService.toggleGamingMode(enabled, mode, targetPingMs);
     }
 
-    private _createPendingGamingDisable(mode: string, targetPingMs: number): PendingGamingDisable {
-        const restorePlans = Array.from(this.gamingManaged.entries()).map(([macKey, meta]) => {
-            const device = this._findDeviceByMac(macKey);
-            return {
-                macKey,
-                priorLimit: meta.priorLimit,
-                hadSession: meta.hadSession,
-                sessionId: meta.sessionId || device?.session_id,
-                device: device ? {
-                    ip: device.ip,
-                    mac: device.mac,
-                    ipv6_link_local: device.ipv6_link_local,
-                    profile_id: device.profile_id,
-                } : undefined,
-                stopped: false,
-                blockedPersisted: false,
-                speedLimitPersisted: false,
-            };
-        });
-        const gateway = selectGateway(Array.from(this.devices.values()));
-        if (restorePlans.some(plan => plan.hadSession && plan.device) && !gateway) {
-            throw new Error('Gateway not found');
-        }
-        return {
-            mode,
-            targetPingMs,
-            gateway: gateway ? {
-                ip: gateway.ip,
-                mac: gateway.mac,
-                ipv6_link_local: gateway.ipv6_link_local,
-            } : undefined,
-            restorePlans,
-            pythonOff: false,
-        };
-    }
 
     private _findDeviceByMac(macKey: string): Device | undefined {
         const norm = (macKey || '').toLowerCase();
@@ -3109,126 +2453,36 @@ export class DeviceManager extends EventEmitter implements IDeviceManager {
         return undefined;
     }
 
-    private _assertNoPendingGamingRecoveryConflict(devices: Iterable<Device>): void {
-        for (const device of devices) {
-            this._assertNoPendingGamingRecoveryConflictByIdentity({
-                mac: device.mac,
-                ip: device.ip,
-                profileId: device.profile_id,
-            });
-        }
-    }
-
-    private _assertNoPendingGamingRecoveryConflictByIdentity(
-        identity: { mac?: string; ip?: string; profileId?: string }
-    ): void {
-        if (!this.pendingGamingDisable) return;
-
-        for (const plan of this.pendingGamingDisable.restorePlans) {
-            if (
-                (identity.mac && plan.macKey === identity.mac.toLowerCase()) ||
-                (identity.ip && plan.device?.ip === identity.ip) ||
-                (identity.profileId && plan.device?.profile_id === identity.profileId)
-            ) {
-                throw this._pendingGamingRecoveryError();
-            }
-        }
-    }
-
     private _pendingGamingRecoveryError(): Error {
         return new Error(
             'Gaming disable recovery is pending for a managed device. Retry disabling Gaming Mode before changing its network state.'
         );
     }
 
-    /**
-     * Terapkan throttle Gaming Mode ke SATU perangkat (sesi blackhole).
-     * Baseline (limit sebelum gaming) hanya direkam SEKALI di gamingManaged; pemanggilan
-     * ulang (ganti target ping / ganti mode / perangkat baru) tidak menimpanya, sehingga
-     * pemulihan saat gaming OFF selalu kembali ke nilai asli — bukan ke 20%/0% milik gaming.
-     * Wajib dipanggil dari konteks yang sudah runExclusive.
-     */
+    private _assertNoPendingGamingRecoveryConflict(devices: Iterable<Device>): void {
+        this.gamingService.assertNoPendingGamingRecoveryConflict(devices);
+    }
+
+    private _assertNoPendingGamingRecoveryConflictByIdentity(
+        identity: { mac?: string; ip?: string; profileId?: string }
+    ): void {
+        this.gamingService.assertNoPendingGamingRecoveryConflictByIdentity(identity);
+    }
+
     private async _applyGamingToDevice(target: Device, gateway: Device): Promise<void> {
-        if (target.is_gateway || target.is_self) return;
-        const macKey = target.mac.toLowerCase();
-        try {
-            const already = this.gamingManaged.get(macKey);
-            const priorLimit = already ? already.priorLimit : (target.speed_limit ?? 100);
-            const hadSession = already ? already.hadSession : Boolean(target.session_id);
-
-            // Gaming SELALU memakai sesi BLACKHOLE (racun ke MAC hantu, bukan MAC operator)
-            // agar trafik perangkat lain jatuh di AP & tidak membanjiri Wi-Fi operator (anti-lag).
-            // Hentikan sesi lama (manual atau gaming sebelumnya) dulu bila ada.
-            if (target.session_id) {
-                try { await this.python.stopSpoof(target.session_id); } catch {}
-            }
-            const sessionId = await this.python.startSpoof(
-                target.ip,
-                target.mac,
-                gateway.ip,
-                gateway.mac,
-                this.gamingTargetLimit,
-                target.ipv6_link_local,
-                gateway.ipv6_link_local,
-                true  // blackhole
-            );
-            target.session_id = sessionId;
-            target.speed_limit = this.gamingTargetLimit;
-            target.is_blocked = (this.gamingTargetLimit <= 0);
-            this.gamingManaged.set(macKey, { priorLimit, hadSession, sessionId });
-            this.devices.set(target.ip, target);
-            this.emit('deviceUpdated', target);
-        } catch (err: any) {
-            this.log.warn({ err, ip: target.ip, mac: target.mac }, `Notice mengisolasi perangkat ${target.ip} untuk Gaming Mode: ${err.message}`);
-        }
+        return this.gamingService.applyGamingToDevice(target, gateway);
     }
 
-    /**
-     * Bila Gaming Mode aktif, throttle perangkat yang BARU online (belum dikelola gaming).
-     * Dipanggil dari jalur yang sudah runExclusive (scan merge, liveness, dhcp).
-     */
     private async _maybeApplyGamingToNewDevice(dev: Device): Promise<void> {
-        if (!this.gamingActive) return;
-        if (dev.is_gateway || dev.is_self || !dev.is_online) return;
-        if (this.gamingManaged.has(dev.mac.toLowerCase())) return;
-        const gateway = selectGateway(Array.from(this.devices.values()));
-        if (!gateway) return;
-        await this._applyGamingToDevice(dev, gateway);
+        return this.gamingService.maybeApplyGamingToNewDevice(dev);
     }
 
-    /**
-     * Hentikan sesi Gaming Mode untuk satu MAC (dipakai saat perangkat disconnect).
-     * Menghentikan sesi Python via sessionId tersimpan lalu menghapus entri agar:
-     *  - sesi tak bocor (loop spoof Python berhenti), dan
-     *  - saat perangkat kembali online, ia di-throttle ulang (bukan terkunci entri basi).
-     */
     private async _stopGamingSession(macKey: string): Promise<void> {
-        const gm = this.gamingManaged.get(macKey);
-        if (!gm) return;
-        if (gm.sessionId) {
-            try {
-                await this.python.stopSpoof(gm.sessionId);
-            } catch (error) {
-                this.log.warn({ err: error, sessionId: gm.sessionId, mac: macKey }, `Notice stopping Gaming Mode session ${gm.sessionId}`);
-            }
-        }
-        this.gamingManaged.delete(macKey);
+        return this.gamingService.stopGamingSession(macKey);
     }
 
-    /**
-     * Terapkan throttle gaming ke semua perangkat online yang belum dikelola.
-     * Diserialisasi via runExclusive agar tak balapan dengan toggle/DHCP, dan mengecek
-     * ulang gamingActive agar tidak men-throttle perangkat SETELAH user menekan disable.
-     */
     private async _reapplyGamingSweep(gateway: Device): Promise<void> {
-        await this.runExclusive(async () => {
-            if (!this.gamingActive) return;
-            for (const dev of Array.from(this.devices.values())) {
-                if (dev.is_gateway || dev.is_self || !dev.is_online) continue;
-                if (this.gamingManaged.has(dev.mac.toLowerCase())) continue;
-                await this._applyGamingToDevice(dev, gateway);
-            }
-        });
+        return this.gamingService.reapplyGamingSweep(gateway);
     }
 
 }

@@ -7,3 +7,5 @@ export interface ITrafficService {
     redirectDevice(ip: string, redirectUrl: string, instagramUsername?: string, gatewayIp?: string): Promise<Device>;
     stopRedirectDevice(ip: string): Promise<Device>;
 }
+
+

@@ -12,6 +12,7 @@ import { runEnvTests } from './unit_env.test';
 import { runErrorTests } from './unit_errors.test';
 import { runLoggerTests } from './unit_logger.test';
 import { runContainerTests } from './unit_container.test';
+import { runTrafficServiceTests } from './unit_trafficService.test';
 
 async function main() {
     console.log('=====================================================');
@@ -135,6 +136,15 @@ async function main() {
         console.error('❌ ServiceContainer Test Failed:', err);
         failed++;
     }
+
+    try {
+        await runTrafficServiceTests();
+        passed += 8;
+    } catch (err: any) {
+        console.error('❌ TrafficService Test Failed:', err);
+        failed++;
+    }
+
 
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
     console.log('\n=====================================================');

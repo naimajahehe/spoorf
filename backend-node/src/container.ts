@@ -67,9 +67,15 @@ export function createContainer(overrides: Partial<{
     const databaseService = overrides.databaseService || new DatabaseService();
     const pythonBridge = overrides.pythonBridge || new PythonBridge();
     const licenseManager = overrides.licenseManager || new LicenseManager(databaseService);
-    const deviceManager = overrides.deviceManager || new DeviceManager(pythonBridge, databaseService, licenseManager);
-    const trafficService = overrides.trafficService || (deviceManager as unknown as ITrafficService);
-    const gamingService = overrides.gamingService || (deviceManager as unknown as IGamingService);
+    const deviceManager = overrides.deviceManager || new DeviceManager(
+        pythonBridge,
+        databaseService,
+        licenseManager,
+        overrides.trafficService as any,
+        overrides.gamingService as any
+    );
+    const trafficService = overrides.trafficService || (deviceManager instanceof DeviceManager ? deviceManager.trafficService : (deviceManager as unknown as ITrafficService));
+    const gamingService = overrides.gamingService || (deviceManager instanceof DeviceManager ? deviceManager.gamingService : (deviceManager as unknown as IGamingService));
 
     return new ServiceContainer({
         databaseService,

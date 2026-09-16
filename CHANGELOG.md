@@ -2,6 +2,29 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.45] - 2026-09-17
+
+### Tahap 5: Dekomposisi Fisik God Object DeviceManager ke TrafficService & GamingService (`backend-node`)
+- **Ekstraksi `TrafficService` (`src/services/trafficService.ts`)**:
+  - Mengisolasi seluruh logika manipulasi trafik Layer 2 dari `DeviceManager.ts` ke dalam service mandiri: pemutusan ARP spoof (`blockDevice`), pembatasan *bandwidth* berbasis siklus PWM duty-cycle (`setSpeedLimit`), dan pengalihan portal captive HTTP (`redirectDevice`).
+  - Mengenkapsulasi verifikasi liveness pra-tindakan (*Pre-Flight Liveness Probe*) dengan pemeriksaan konflik penempatan IP (*occupant collision*), mitigasi rotasi MAC dinamis (*MAC randomization re-bind*), dan pembersihan sesi basi (*stale spoof session cleanup*).
+  - Menyediakan varian eksekusi langsung (`*Direct`) untuk mencegah *promise deadlock* saat dipanggil dari konteks yang telah memegang mutex `runExclusive` (mis. auto-reblock saat event DHCP).
+  - Menegakkan Invariant 1 (Gateway Immunity: penolakan keras pemotongan router gateway) dan Invariant 2 (Controller Self-Protection: penolakan keras pemotongan host PC operator).
+- **Ekstraksi `GamingService` (`src/services/gamingService.ts`)**:
+  - Memisahkan subsistem Gaming Mode: isolasi airtime Wi-Fi, sesi *blackhole priority spoofing*, pelacakan latency jitter, dan penegakan target ping.
+  - Mengisolasi *state machine* pemulihan pending (*pending recovery state machine*) dan eksekusi bertahap rencana restorasi (*restore plans*) agar limit asli perangkat sebelum gaming aktif selalu dipulihkan secara akurat.
+- **Rampingisasi & Refactoring `DeviceManager.ts`**:
+  - Memangkas lebih dari 840 baris kode berisiko tinggi dari `DeviceManager.ts` sehingga fokus murni pada manajemen registri perangkat, penemuan jaringan (*discovery scans*), rekonsiliasi DHCP, dan continuity profiling.
+  - Memasang metode fasad dan getter/setter delegator (`gamingManaged`, `pendingGamingDisable`, `gamingActive`, dll.) sehingga seluruh pemanggil eksternal dan test suite yang ada tetap kompatibel 100% tanpa perubahan breaking.
+- **Pembaruan Container IoC (`src/container.ts`)**:
+  - Menghubungkan instans konkret `TrafficService` dan `GamingService` ke dalam `ServiceContainer` dan menyuntikkannya ke `DeviceManager`.
+- **Automated Testing & Full Verification**:
+  - Menambahkan test suite baru `tests/unit_trafficService.test.ts` (8 pengujian terisolasi: Gateway Immunity, Host Self-Protection, Cut-off ARP spoof, Quota Enforcement, Restorasi 100%, Throttling PWM PRO, Redirection captive portal, dan Stale session cleanup).
+  - Hasil pengujian Node.js meningkat dari **72 menjadi 80 tests PASSED (100% Green)**.
+  - Python tests: **379 / 379 PASSED (100% Green)**.
+  - Frontend SPA build: `tsc && vite build` bersih 100%.
+  - Total pengujian otomatis seluruh ekosistem: **459 tests 100% Green**.
+
 ## [v2.41.44] - 2026-09-17
 
 ### Tahap 4: Dependency Injection (DI) & Modular Service Decoupling (`backend-node`)
