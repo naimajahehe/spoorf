@@ -1,7 +1,6 @@
 import { Request, Response } from 'express';
-import { DeviceManager, isPrivateIpv4 } from '../services/deviceManager';
+import { DeviceManager } from '../services/deviceManager';
 import { LicenseManager, FeatureLockedError } from '../services/licenseManager';
-import { parsePositiveInt } from '../middlewares/errorHandler';
 
 export class BettercapController {
     constructor(
@@ -32,10 +31,6 @@ export class BettercapController {
     addDnsRule = async (req: Request, res: Response): Promise<void> => {
         this.assertCanArsenal();
         const { domain, target_ip, action, is_enabled } = req.body;
-        if (!domain) {
-            res.status(400).json({ success: false, error: 'Domain is required' });
-            return;
-        }
         const result = await this.deviceManager.addBettercapDnsRule(domain, target_ip || '192.168.1.1', action || 'spoof', is_enabled !== false);
         res.json(result);
     };
@@ -65,23 +60,19 @@ export class BettercapController {
     loadDnsHosts = async (req: Request, res: Response): Promise<void> => {
         this.assertCanArsenal();
         const { content, default_address, action } = req.body;
-        if (!content) {
-            res.status(400).json({ success: false, error: 'content is required' });
-            return;
-        }
         const result = await this.deviceManager.loadBettercapDnsHosts(content, default_address || '', action || 'spoof');
         res.json(result);
     };
 
     setDnsTtl = async (req: Request, res: Response): Promise<void> => {
         this.assertCanArsenal();
-        const ttl = parseInt(req.body?.ttl, 10);
-        const result = await this.deviceManager.setBettercapDnsTtl(isNaN(ttl) ? 10 : ttl);
+        const { ttl } = req.body;
+        const result = await this.deviceManager.setBettercapDnsTtl(ttl);
         res.json(result);
     };
 
     getCredentials = async (req: Request, res: Response): Promise<void> => {
-        const limit = parsePositiveInt(req.query.limit, 100);
+        const limit = Number(req.query.limit) || 100;
         const credentials = await this.deviceManager.getBettercapCredentials(limit);
         res.json({ success: true, credentials });
     };
@@ -95,14 +86,6 @@ export class BettercapController {
     runSynScan = async (req: Request, res: Response): Promise<void> => {
         this.assertCanArsenal();
         const { target_ip, ports, profile } = req.body;
-        if (!target_ip) {
-            res.status(400).json({ success: false, error: 'Target IP is required' });
-            return;
-        }
-        if (!isPrivateIpv4(target_ip)) {
-            res.status(400).json({ success: false, error: 'Target IP must be an RFC 1918 private address' });
-            return;
-        }
         const data = await this.deviceManager.runBettercapSynScan(target_ip, ports, profile || 'top-20');
         res.json({ success: true, data });
     };

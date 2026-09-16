@@ -7,6 +7,7 @@ import { runSecurityTests } from './unit_security.test';
 import { runGamingModeTests } from './unit_gamingMode.test';
 import { runNetworkIsolationTests } from './unit_network_isolation.test';
 import { runReconciliationTests } from './unit_reconciliation.test';
+import { runValidationTests } from './unit_validation.test';
 
 async function main() {
     console.log('=====================================================');
@@ -88,6 +89,14 @@ async function main() {
         passed += 8;
     } catch (err: any) {
         console.error('❌ Reconciliation Test Failed:', err);
+        failed++;
+    }
+
+    try {
+        await runValidationTests();
+        passed += 6;
+    } catch (err: any) {
+        console.error('❌ Validation Test Failed:', err);
         failed++;
     }
 

@@ -2,6 +2,32 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.38] - 2026-09-16
+
+### Declarative Schema Validation & Slim Controllers with Zod (`backend-node`)
+- **Type-Safe Declarative Schema Validation (`src/schemas/`)**:
+  - Mengintegrasikan `zod@^3.24.2` untuk mendefinisikan kontrak data input secara deklaratif dan type-safe.
+  - Memisahkan skema ke dalam domain modular:
+    - `deviceSchemas.ts`: Validasi numerik batas kecepatan (0-100), sanitasi alias perangkat, validasi URL pengalihan, parameter MAC/IP.
+    - `gatewaySchemas.ts`: Validasi IP target transparent gateway, domain sinkhole DNS, limit log query.
+    - `bettercapSchemas.ts`: Validasi aturan DNS Bettercap, spoof-all, hosts, TTL, dan penegakan RFC 1918 private IPv4 untuk SYN scan.
+    - `interceptorSchemas.ts`: Validasi parameter domain sertifikat daun (leaf cert) dan filter query flows L7.
+    - `shieldSchemas.ts`: Validasi toggle status Sentinel Shield, mode penguncian, dan target retaliate.
+    - `gamingSchemas.ts`: Validasi mode gaming dan target latency ping.
+    - `authSchemas.ts`: Validasi kredensial login (email/token) dan serial key aktivasi lisensi.
+- **Generic Validation Middleware (`src/middlewares/validation.ts`)**:
+  - Menyediakan middleware `validateBody(schema)`, `validateParams(schema)`, `validateQuery(schema)` serta wrapper terintegrasi `validateAndHandle(schemas, handler)`.
+  - Otomatis menolak request tidak valid dengan status HTTP 400 dan pesan error yang terformat ramah pengguna (*fail-fast*).
+- **Slimming Down Controllers (`src/controllers/`)**:
+  - Mengeliminasi seluruh pengecekan manual berulang (`typeof x !== 'string'`, `if (limit < 0 || limit > 100)`) dari controller.
+  - Controller kini murni berfokus pada eksekusi service dan penyajian HTTP response.
+- **Automated Testing & Coverage**:
+  - Menambahkan test suite baru `tests/unit_validation.test.ts` (6 blok pengujian skema Zod dan *boundary edge cases*).
+  - Pengujian Node.js meningkat dari **48 menjadi 54 tests (100% PASSED)**.
+  - TypeScript build: **0 Error (`tsc` clean)**.
+  - Python tests: **379 / 379 PASSED**.
+  - Total pengujian otomatis: **433 tests 100% Green**.
+
 ## [v2.41.37] - 2026-09-16
 
 ### Enterprise Clean Layered Architecture & Separation of Concerns (`backend-node`)

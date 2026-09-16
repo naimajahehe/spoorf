@@ -1,6 +1,5 @@
 import { Request, Response } from 'express';
 import { DeviceManager } from '../services/deviceManager';
-import { parsePositiveInt } from '../middlewares/errorHandler';
 
 export class InterceptorController {
     constructor(private readonly deviceManager: DeviceManager) {}
@@ -18,12 +17,7 @@ export class InterceptorController {
     };
 
     getFlows = async (req: Request, res: Response): Promise<void> => {
-        const limit = parsePositiveInt(req.query.limit, 100);
-        const search = req.query.search as string;
-        const scheme = req.query.scheme as string;
-        const method = req.query.method as string;
-        const is_blocked = req.query.is_blocked !== undefined ? req.query.is_blocked === 'true' : undefined;
-
+        const { limit = 100, search, scheme, method, is_blocked } = req.query as any;
         const result = await this.deviceManager.getL7Flows({ limit, search, scheme, method, is_blocked });
         res.json(result);
     };
@@ -35,10 +29,6 @@ export class InterceptorController {
 
     generateLeafCert = async (req: Request, res: Response): Promise<void> => {
         const { domain } = req.body;
-        if (!domain) {
-            res.status(400).json({ success: false, error: 'Domain parameter is required' });
-            return;
-        }
         const result = await this.deviceManager.generateLeafCert(domain);
         res.json(result);
     };

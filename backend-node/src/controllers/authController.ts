@@ -41,11 +41,6 @@ export class AuthController {
     login = async (req: Request, res: Response): Promise<void> => {
         try {
             const { email, password, token, cloudUrl } = req.body;
-            if (!email && !token) {
-                res.status(400).json({ success: false, error: 'Email atau token lisensi diperlukan' });
-                return;
-            }
-
             if (!this.licenseManager) {
                 res.json({ success: true, user: { email, plan: 'free' }, license: { tier: 'free' } });
                 return;
@@ -61,11 +56,6 @@ export class AuthController {
     activate = async (req: Request, res: Response): Promise<void> => {
         try {
             const { key } = req.body;
-            if (!key) {
-                res.status(400).json({ success: false, error: 'Kode lisensi diperlukan' });
-                return;
-            }
-
             if (!this.licenseManager) {
                 res.status(400).json({ success: false, error: 'License manager not available' });
                 return;

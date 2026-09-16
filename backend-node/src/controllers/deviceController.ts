@@ -54,11 +54,6 @@ export class DeviceController {
     redirectDevice = async (req: Request, res: Response): Promise<void> => {
         const { ip } = req.params;
         const { redirectUrl, instagramUsername, gatewayIp } = req.body;
-        if (!redirectUrl || typeof redirectUrl !== 'string') {
-            res.status(400).json({ success: false, error: 'Valid redirectUrl string is required' });
-            return;
-        }
-
         const device = await this.deviceManager.redirectDevice(ip, redirectUrl, instagramUsername, gatewayIp);
         res.json({
             success: true,
@@ -98,10 +93,6 @@ export class DeviceController {
     setDeviceAlias = async (req: Request, res: Response): Promise<void> => {
         const { mac } = req.params;
         const { alias } = req.body;
-        if (alias === undefined || typeof alias !== 'string') {
-            res.status(400).json({ success: false, error: 'Valid alias string is required' });
-            return;
-        }
         const cleanAlias = alias.trim();
         const updated = await this.deviceManager.setDeviceAlias(mac, cleanAlias);
         res.json({
@@ -114,10 +105,6 @@ export class DeviceController {
     setSpeedLimit = async (req: Request, res: Response): Promise<void> => {
         const { ip } = req.params;
         const { limit } = req.body;
-        if (limit === undefined || typeof limit !== 'number' || !Number.isFinite(limit) || Number.isNaN(limit) || limit < 0 || limit > 100) {
-            res.status(400).json({ success: false, error: 'Numeric speed limit (0-100) is required' });
-            return;
-        }
         const updated = await this.deviceManager.setSpeedLimit(ip, limit);
         res.json({
             success: true,
