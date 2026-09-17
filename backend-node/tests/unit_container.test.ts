@@ -27,6 +27,8 @@ export async function runContainerTests() {
         let mockPythonStopCalled = false;
         let mockDbCloseCalled = false;
 
+        let mockDeviceShutdownCalled = false;
+
         const mockDb: Partial<IDatabaseService> = {
             init: async () => { mockDbInitCalled = true; },
             close: async () => { mockDbCloseCalled = true; }
@@ -56,6 +58,7 @@ export async function runContainerTests() {
 
         const mockDevice: Partial<IDeviceManager> = {
             init: async () => { mockDeviceInitCalled = true; },
+            shutdown: () => { mockDeviceShutdownCalled = true; },
             getDevices: () => []
         };
 
@@ -79,6 +82,7 @@ export async function runContainerTests() {
 
         // Test container.shutdown()
         await container.shutdown();
+        assert.strictEqual(mockDeviceShutdownCalled, true, 'mockDevice.shutdown() must be invoked during container.shutdown()');
         assert.strictEqual(mockPythonStopCalled, true, 'mockBridge.stop() must be invoked during container.shutdown()');
         assert.strictEqual(mockDbCloseCalled, true, 'mockDb.close() must be invoked during container.shutdown()');
 

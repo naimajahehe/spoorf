@@ -58,6 +58,14 @@ export class ServiceContainer implements IServiceContainer {
     async shutdown(): Promise<void> {
         this.log.info('Shutting down service container components...');
         try {
+            if (this.deviceManager && typeof this.deviceManager.shutdown === 'function') {
+                this.deviceManager.shutdown();
+            }
+        } catch (err) {
+            this.log.warn({ err }, 'Error during DeviceManager shutdown');
+        }
+
+        try {
             this.pythonBridge.stop();
         } catch (err) {
             this.log.warn({ err }, 'Error during PythonBridge shutdown');

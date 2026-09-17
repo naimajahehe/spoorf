@@ -1,6 +1,5 @@
 import { EventEmitter } from 'events';
 import crypto from 'crypto';
-import { DatabaseService } from './database';
 import { IDatabaseService, ILicenseManager } from '../interfaces';
 import { LicenseTier, UserLicense, AuthUser, CachedLicense, AuthStatusResponse } from '../types';
 import { env } from '../config/env';

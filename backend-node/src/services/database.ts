@@ -23,9 +23,7 @@ import {
 import { runMigrations } from '../database/migrations';
 import { reconcileCanonicalDeviceMacs } from '../database/maintenance';
 import {
-    deriveNetworkId,
     OFFLINE_GRACE_SECONDS,
-    deriveProfileId,
     safeParseJson,
     normalizeMacAddress,
     isGenericProfileLabel,
@@ -118,32 +116,28 @@ export class DatabaseService implements IDatabaseService {
     async init(): Promise<void> {
         if (this.initialized) return;
 
-        try {
-            // 1. Pastikan tabel networks & device_profiles tersedia terlebih dahulu
-            this.db.exec(`
-                ${CREATE_NETWORKS_TABLE_SQL}
-                ${INSERT_DEFAULT_NETWORK_SQL}
-                ${CREATE_PROFILES_TABLE_SQL}
-            `);
+        // 1. Pastikan tabel networks & device_profiles tersedia terlebih dahulu
+        this.db.exec(`
+            ${CREATE_NETWORKS_TABLE_SQL}
+            ${INSERT_DEFAULT_NETWORK_SQL}
+            ${CREATE_PROFILES_TABLE_SQL}
+        `);
 
-            // 2. Jalankan migrasi schema legacy (migrasi devices ke composite PK network_id) & additive columns
-            runMigrations(this.db, this.log);
+        // 2. Jalankan migrasi schema legacy (migrasi devices ke composite PK network_id) & additive columns
+        runMigrations(this.db, this.log);
 
-            // 3. Pastikan tabel devices, license_cache & indeks tersedia
-            this.db.exec(`
-                ${CREATE_DEVICES_TABLE_SQL}
-                ${CREATE_LICENSE_CACHE_TABLE_SQL}
-                ${CREATE_INDEXES_SQL}
-            `);
+        // 3. Pastikan tabel devices, license_cache & indeks tersedia
+        this.db.exec(`
+            ${CREATE_DEVICES_TABLE_SQL}
+            ${CREATE_LICENSE_CACHE_TABLE_SQL}
+            ${CREATE_INDEXES_SQL}
+        `);
 
-            // 4. Jalankan rekonsiliasi MAC canonical & pembersihan stale
-            this.reconcileCanonicalDeviceMacs();
+        // 4. Jalankan rekonsiliasi MAC canonical & pembersihan stale
+        this.reconcileCanonicalDeviceMacs();
 
-            this.log.info({ dbPath: this.dbPath }, `SQLite connected & schema initialized (${this.dbPath})`);
-            this.initialized = true;
-        } catch (error) {
-            throw error;
-        }
+        this.log.info({ dbPath: this.dbPath }, `SQLite connected & schema initialized (${this.dbPath})`);
+        this.initialized = true;
     }
 
     ensureNetwork(net: Network): void {
@@ -717,10 +711,6 @@ export class DatabaseService implements IDatabaseService {
             autoThrottleTargets,
             zombieSessionsToStop
         };
-    }
-
-    private rowToDevice(row: any): Device {
-        return this.deviceRepo.rowToDevice(row);
     }
 
     async saveLicenseCache(lic: CachedLicense): Promise<void> {

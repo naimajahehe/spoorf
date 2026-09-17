@@ -44,7 +44,7 @@ app.use(express.json());
 // Composition Root (Service Container)
 const container = createContainer();
 const { pythonBridge, databaseService, licenseManager, deviceManager } = container;
-const wsManager = new WebSocketManager(server, deviceManager as any, licenseManager as any);
+new WebSocketManager(server, deviceManager, licenseManager);
 
 // Routes
 app.use('/', createRouter(container));

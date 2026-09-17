@@ -106,6 +106,7 @@ function makeTrafficServiceSetup() {
         setDevice: (key: string, dev: Device) => {
             devices.set(key, dev);
         },
+        deleteDevice: (key: string) => devices.delete(key),
         getCurrentNetworkId: () => 'net_test',
         emit: (event: string, ...args: any[]) => {
             emittedEvents.push({ event, args });
@@ -346,6 +347,38 @@ export async function runTrafficServiceTests() {
         assert.strictEqual(deviceMemKey(offlineDev), 'prof-123');
         assert.strictEqual(deviceMemKey(unprofiledOfflineDev), 'aa:bb:cc:dd:ee:99');
         console.log('  ✓ Architecture: Canonical deviceMemKey contract strictly isolates offline and profiled devices');
+    }
+
+    // Test 12: Stop redirect fallback by MAC address (Bug 2 fix)
+    {
+        const { service, devices, stopRedirectCalls } = makeTrafficServiceSetup();
+        const gw = makeDevice({ ip: '192.168.1.1', mac: '00:00:00:00:00:01', is_gateway: true });
+        const dev = makeDevice({ ip: '192.168.1.55', mac: 'AA:BB:CC:DD:EE:77', is_redirected: true, redirect_url: 'https://test.lan', session_id: 'redir-sess-1' });
+        devices.set(dev.ip, dev);
+        devices.set(gw.ip, gw);
+
+        // Calling stopRedirectDevice using MAC address AA:BB:CC:DD:EE:77
+        const stopped = await service.stopRedirectDevice('AA:BB:CC:DD:EE:77');
+        assert.strictEqual(stopped.is_redirected, false);
+        assert.strictEqual(stopped.speed_limit, 100);
+        assert.strictEqual(stopRedirectCalls.includes('192.168.1.55'), true);
+        console.log('  ✓ Fallback: stopRedirectDevice resolves targets by MAC address when IP is not supplied');
+    }
+
+    // Test 13: Registry canonical key persistence & ghost key eviction (Bug 1 & 3 fix)
+    {
+        const { service, devices } = makeTrafficServiceSetup();
+        const gw = makeDevice({ ip: '192.168.1.1', mac: '00:00:00:00:00:01', is_gateway: true });
+        const target = makeDevice({ ip: '192.168.1.80', mac: 'AA:BB:CC:DD:EE:88', is_blocked: true, session_id: 'sess-old' });
+        devices.set(target.ip, target);
+        devices.set(gw.ip, gw);
+
+        // Unblock by MAC address
+        await service.unblockDevice('AA:BB:CC:DD:EE:88');
+        // Must NOT create a ghost key with MAC
+        assert.strictEqual(devices.has('AA:BB:CC:DD:EE:88'), false, 'Registry must not store device under raw MAC parameter');
+        assert.strictEqual(devices.has('192.168.1.80'), true, 'Registry must preserve canonical IP key');
+        console.log('  ✓ Registry: Operations keyed by MAC preserve canonical memory keys without ghost duplicates');
     }
 }
 

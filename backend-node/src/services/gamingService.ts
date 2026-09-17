@@ -1,7 +1,7 @@
 import { EventEmitter } from 'events';
 import { Device } from '../types';
 import { IPythonBridge, IDatabaseService, IGamingService } from '../interfaces';
-import { selectGateway } from './deviceManager';
+import { selectGateway } from '../utils/deviceUtils';
 import { createChildLogger } from '../utils/logger';
 
 export interface GamingRestorePlan {

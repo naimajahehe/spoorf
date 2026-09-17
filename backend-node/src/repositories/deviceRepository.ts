@@ -1,5 +1,5 @@
 import type Database from 'better-sqlite3';
-import { Device, ProfileEvidence, ProfileStatus } from '../types';
+import { Device, ProfileEvidence } from '../types';
 import { IDeviceRepository } from '../interfaces';
 import {
     safeParseJson,
@@ -400,16 +400,20 @@ export class DeviceRepository implements IDeviceRepository {
         }
 
         const allProfiles = this.db.prepare(`SELECT * FROM device_profiles`).all() as any[];
+        const remainingCountStmt = this.db.prepare(`SELECT count(*) as count FROM devices WHERE profile_id = ?`);
+        const deleteProfileStmt = this.db.prepare(`DELETE FROM device_profiles WHERE id = ?`);
+        const updateLinkedStmt = this.db.prepare(`UPDATE device_profiles SET linked_macs = ? WHERE id = ?`);
+
         for (const p of allProfiles) {
             const linked = safeParseJson<string[]>(p.linked_macs, []);
             const hasNormMac = linked.some(m => m.toLowerCase() === normMac);
             if (hasNormMac) {
                 const nextLinked = linked.filter(m => m.toLowerCase() !== normMac);
-                const remainingDevs = this.db.prepare(`SELECT count(*) as count FROM devices WHERE profile_id = ?`).get(p.id) as { count: number };
+                const remainingDevs = remainingCountStmt.get(p.id) as { count: number };
                 if (nextLinked.length === 0 || remainingDevs.count === 0) {
-                    this.db.prepare(`DELETE FROM device_profiles WHERE id = ?`).run(p.id);
+                    deleteProfileStmt.run(p.id);
                 } else {
-                    this.db.prepare(`UPDATE device_profiles SET linked_macs = ? WHERE id = ?`).run(JSON.stringify(nextLinked), p.id);
+                    updateLinkedStmt.run(JSON.stringify(nextLinked), p.id);
                 }
             }
         }

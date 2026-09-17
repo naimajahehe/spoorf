@@ -1,5 +1,5 @@
 import type Database from 'better-sqlite3';
-import { ProfileAssessment, ProfileEvidence, ProfileStatus } from '../types';
+import { ProfileAssessment } from '../types';
 import { IProfileRepository } from '../interfaces';
 import {
     isUsableClientId,

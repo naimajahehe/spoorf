@@ -12,6 +12,7 @@ export interface IDeviceRegistry {
     getAllDevices(): Device[];
     findGateway(gatewayIp?: string): Device | undefined;
     setDevice(key: string, device: Device): void;
+    deleteDevice?(key: string): boolean | void;
     getCurrentNetworkId(): string;
     emit(event: string, ...args: any[]): boolean;
     runExclusive<T>(fn: () => Promise<T>): Promise<T>;
@@ -142,7 +143,7 @@ export class TrafficService extends EventEmitter implements ITrafficService {
         device.session_id = sessionId;
         device.is_online = true;
         if (this.registry) {
-            this.registry.setDevice(ip, device);
+            this.registry.setDevice(deviceMemKey(device), device);
 
             // Sinkronkan juga perangkat lain di memori yang berbagi profile_id sama
             if (device.profile_id) {
@@ -394,7 +395,7 @@ export class TrafficService extends EventEmitter implements ITrafficService {
 
         device.is_online = true;
         if (this.registry) {
-            this.registry.setDevice(ip, device);
+            this.registry.setDevice(deviceMemKey(device), device);
         }
         this.emitUpdate(device);
         return device;
@@ -465,7 +466,7 @@ export class TrafficService extends EventEmitter implements ITrafficService {
         }
 
         if (this.registry) {
-            this.registry.setDevice(ip, device);
+            this.registry.setDevice(deviceMemKey(device), device);
         }
         await this.db.setDeviceOnlineStatus(device.mac, true, this.currentNetworkId);
         this.emitUpdate(device);
@@ -481,7 +482,7 @@ export class TrafficService extends EventEmitter implements ITrafficService {
     }
 
     private async _stopRedirectDeviceImpl(ip: string): Promise<Device> {
-        const device = this.registry?.getDevice(ip);
+        const device = this.registry?.getDevice(ip) || this.registry?.findDeviceByMac(ip);
         if (!device) {
             throw new Error(`Device ${ip} not found`);
         }
@@ -507,7 +508,7 @@ export class TrafficService extends EventEmitter implements ITrafficService {
         device.speed_limit = 100;
 
         if (this.registry) {
-            this.registry.setDevice(ip, device);
+            this.registry.setDevice(deviceMemKey(device), device);
         }
         await this.db.setDeviceBlocked(device.mac, false, undefined, this.currentNetworkId);
         await this.db.setDeviceSpeedLimit(device.mac, 100, this.currentNetworkId);
@@ -601,15 +602,16 @@ export class TrafficService extends EventEmitter implements ITrafficService {
 
                     if (this.registry) {
                         const oldKey = deviceMemKey(existingLiveDevice);
-                        if (oldKey !== device.ip) {
-                            // delete old key if needed
-                        }
                         const targetIp = device.ip;
                         Object.assign(device, existingLiveDevice);
                         device.ip = targetIp;
                         device.mac = liveMac;
                         device.is_online = true;
-                        this.registry.setDevice(device.ip, device);
+                        const newKey = deviceMemKey(device);
+                        if (oldKey && oldKey !== newKey && typeof this.registry.deleteDevice === 'function') {
+                            this.registry.deleteDevice(oldKey);
+                        }
+                        this.registry.setDevice(newKey, device);
                     }
 
                     await this.db.saveDevice(device, this.currentNetworkId).catch(err => this.log.warn({ mac: device.mac, err }, 'Failed to save reconciled device'));

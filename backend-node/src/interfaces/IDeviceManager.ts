@@ -4,9 +4,12 @@ import { IGamingService } from './IGamingService';
 
 export interface IDeviceManager extends ITrafficService, IGamingService {
     init(): Promise<void>;
+    shutdown?(): void;
+    setAutoScan(enabled: boolean): void;
+    isScanning(): boolean;
     scanNetwork(options?: any): Promise<Device[]>;
     getDevices(): Device[];
-    scopeForDisplay?(devices: Device[]): Device[];
+    scopeForDisplay(devices: Device[]): Device[];
     getDevice(ip: string): Device | undefined;
     getDeviceByMac(mac: string): Device | undefined;
     findGateway(): Device | undefined;

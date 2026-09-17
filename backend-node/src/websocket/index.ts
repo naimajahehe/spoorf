@@ -1,7 +1,6 @@
 import { Server as SocketServer } from 'socket.io';
 import { Server as HttpServer } from 'http';
-import { DeviceManager } from '../services/deviceManager';
-import { LicenseManager } from '../services/licenseManager';
+import { IDeviceManager, ILicenseManager } from '../interfaces';
 import { isAllowedOrigin, isAllowedHost, isValidApiToken } from '../security';
 import { createChildLogger } from '../utils/logger';
 
@@ -11,8 +10,8 @@ export class WebSocketManager {
 
     constructor(
         server: HttpServer,
-        private deviceManager: DeviceManager,
-        private licenseManager?: LicenseManager
+        private deviceManager: IDeviceManager,
+        private licenseManager?: ILicenseManager
     ) {
         this.io = new SocketServer(server, {
             // Allowlist origin (bukan '*') — cegah situs jahat membuka socket.
@@ -154,9 +153,9 @@ export class WebSocketManager {
             this.io.emit('gamingStatusUpdate', data);
         });
 
-        if (this.licenseManager) {
-            this.licenseManager.on('licenseChanged', (status) => {
-                this.log.info({ event: 'licenseStatus', tier: status.license.tier }, `Broadcast licenseStatus updated: ${status.license.tier.toUpperCase()}`);
+        if (this.licenseManager && typeof this.licenseManager.on === 'function') {
+            this.licenseManager.on('licenseChanged', (status: any) => {
+                this.log.info({ event: 'licenseStatus', tier: status?.license?.tier }, `Broadcast licenseStatus updated: ${status?.license?.tier?.toUpperCase()}`);
                 this.io.emit('licenseStatus', status);
             });
         }

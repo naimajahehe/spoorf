@@ -2,6 +2,29 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.52] - 2026-09-17
+
+### Eliminasi Dead Code, Perbaikan 6 Bug Fungsional & Memory Leaks, serta Lifecycle Hardening (`backend-node`)
+- **Pembersihan Menyeluruh Dead Code & Impor Tidak Terpakai (0 Warning TS6133)**:
+  - Menghapus 17 dead code items di `src/app.ts`, `src/interfaces/IGamingService.ts`, `src/repositories/deviceRepository.ts`, `src/repositories/profileRepository.ts`, `src/services/licenseManager.ts`, `src/services/database.ts`, dan `src/services/deviceManager.ts`.
+  - Menghapus 7 delegator privat mati di `deviceManager.ts` (`_scanNetworkImpl`, `_blockDeviceImpl`, `_clearStaleSpoofSession`, `_unblockDeviceImpl`, `_redirectDeviceImpl`, `_stopRedirectDeviceImpl`, `_setSpeedLimitImpl`).
+  - Menandai metode helper pengujian legacy sebagai `public` dengan `@deprecated` (`_verifyPreFlightLiveness`, `_attachSpoofCutStatus`, `_getLiveEngineSessionIds`, `_shouldRunWatchdogScan`, `executeProfileRefresh`, `_applyGamingToDevice`, `_maybeApplyGamingToNewDevice`, `_stopGamingSession`, `_reapplyGamingSweep`).
+  - Memverifikasi compiler `npx tsc --noEmit --noUnusedLocals --noUnusedParameters` menghasilkan exit code 0 tanpa error apa pun.
+- **Perbaikan 6 Bug Fungsional & Memory Leaks**:
+  - **Bug 1 (Kunci Memori Kanonikal)**: Memperbarui seluruh `this.registry.setDevice(...)` di `TrafficService` (`_blockDeviceImpl`, `_unblockDeviceImpl`, `_redirectDeviceImpl`, `_stopRedirectDeviceImpl`) agar selalu menggunakan `deviceMemKey(device)`, mencegah duplikasi entri perangkat di tabel UI React.
+  - **Bug 2 (Fallback Stop Redirect via MAC)**: Menambahkan fallback `this.registry?.getDevice(ip) || this.registry?.findDeviceByMac(ip)` pada `_stopRedirectDeviceImpl` sehingga perangkat yang dihentikan redirect-nya menggunakan alamat MAC dapat teridentifikasi secara akurat.
+  - **Bug 3 (Ghost Key Leak pada Dynamic Re-Bind)**: Menambahkan `deleteDevice` ke antarmuka `IDeviceRegistry` dan mengeksekusi penghapusan `oldKey` di `verifyPreFlightLiveness` saat terjadi rotasi identitas MAC perangkat.
+  - **Bug 4 (Graceful Teardown Timer)**: Menyimpan `this.retentionTimer` di `DeviceManager` dan mengimplementasikan method `shutdown()` yang membersihkan retention timer dan memanggil `discoveryService.stopWatchdog()`. Mendaftarkan pemanggilannya di `ServiceContainer.shutdown()` sebelum penutupan koneksi database SQLite untuk mencegah `SqliteError: database is closed`.
+  - **Bug 5 (Optimasi Loop DeviceRepository.delete)**: Mengompilasi prepared statements (`remainingCountStmt`, `deleteProfileStmt`, `updateLinkedStmt`) satu kali di luar loop profil.
+  - **Bug 6 (Circular Dependency)**: Mengarahkan impor `selectGateway` di `GamingService` langsung ke `../utils/deviceUtils`, menghilangkan ketergantungan sirkular terhadap `DeviceManager`.
+- **Penyelarasan Antarmuka & Dekoupling Murni WebSocket**:
+  - Menambahkan `setAutoScan` dan `shutdown` ke antarmuka `IDeviceManager`.
+  - Mendekouple konstruktor `WebSocketManager` agar menerima antarmuka `IDeviceManager` dan `ILicenseManager`, menghilangkan casting `as any` di `app.ts`.
+- **Pengujian & Verifikasi Otomatis**:
+  - Menambahkan automated tests di `tests/unit_trafficService.test.ts` (Test 12: stop redirect fallback by MAC; Test 13: canonical key preservation) dan `tests/unit_container.test.ts` (mockDevice shutdown).
+  - 100% lolos verifikasi: 96 Node.js unit tests + 379 Python tests = **475 tests green**.
+  - Frontend production build: `vite build` bersih dalam 7.53s.
+
 ## [v2.41.51] - 2026-09-17
 
 ### Hardening Invariant 2 (Controller Self-Protection) pada Disosiasi IP Basi (`backend-node`)

@@ -1,21 +1,15 @@
 import os from 'os';
 import * as path from 'path';
 import { EventEmitter } from 'events';
-import { PythonBridge } from './pythonBridge';
-import { DatabaseService, deriveNetworkId } from './database';
-import { LicenseManager, FeatureLimitError, FeatureLockedError } from './licenseManager';
-import { Device, CutStatus, ProfileAssessment, ProfileRefreshResult } from '../types';
-import type { ScanOptions } from './pythonBridge';
+import { deriveNetworkId } from './database';
+import { FeatureLockedError } from './licenseManager';
+import { Device, ProfileRefreshResult } from '../types';
 import { createChildLogger } from '../utils/logger';
 import {
     IDeviceManager,
     IPythonBridge,
     IDatabaseService,
     ILicenseManager,
-    ITrafficService,
-    IGamingService,
-    IDiscoveryService,
-    IReconciliationService,
     DhcpOptimizationResult,
     DeviceScanOptions
 } from '../interfaces';
@@ -31,7 +25,6 @@ export const STALE_DEVICE_RETENTION_DAYS = 14;
 const RETENTION_SWEEP_INTERVAL_MS = 24 * 60 * 60 * 1000; // sekali per hari
 
 import {
-    PROFILE_MAC_PATTERN,
     normalizeProfileMac,
     deviceMemKey,
     isPrivateIpv4,
@@ -237,6 +230,8 @@ export class DeviceManager extends EventEmitter implements IDeviceManager {
         (this.reconciliationService as any).lastIdentityReblockAt = val;
     }
 
+    private retentionTimer: NodeJS.Timeout | null = null;
+
     constructor(
         public python: IPythonBridge,
         private db: IDatabaseService,
@@ -418,18 +413,21 @@ export class DeviceManager extends EventEmitter implements IDeviceManager {
         return this.discoveryService.handleLivenessEvent(data);
     }
 
-    private async _verifyPreFlightLiveness(device: Device, gatewayIp: string): Promise<Device> {
+    /** @deprecated Legacy test compatibility */
+    async _verifyPreFlightLiveness(device: Device, gatewayIp: string): Promise<Device> {
         if (this.trafficService && 'verifyPreFlightLiveness' in this.trafficService) {
             return await (this.trafficService as any).verifyPreFlightLiveness(device, gatewayIp);
         }
         return device;
     }
 
-    private async _attachSpoofCutStatus(): Promise<void> {
+    /** @deprecated Legacy test compatibility */
+    async _attachSpoofCutStatus(): Promise<void> {
         return (this.discoveryService as any).attachSpoofCutStatus();
     }
 
-    private async _getLiveEngineSessionIds(): Promise<Set<string> | undefined> {
+    /** @deprecated Legacy test compatibility */
+    async _getLiveEngineSessionIds(): Promise<Set<string> | undefined> {
         return (this.discoveryService as any).getLiveEngineSessionIds();
     }
 
@@ -481,13 +479,21 @@ export class DeviceManager extends EventEmitter implements IDeviceManager {
 
         // Retention Sweep: arsipkan perangkat tamu yang lama hilang saat startup, lalu harian.
         await this._runRetentionSweep();
-        const retentionTimer = setInterval(() => {
+        this.retentionTimer = setInterval(() => {
             this._runRetentionSweep().catch(err => this.log.warn({ err }, `Notice retention sweep: ${err.message}`));
         }, RETENTION_SWEEP_INTERVAL_MS);
-        retentionTimer.unref();
+        this.retentionTimer.unref();
 
         // Background Liveness Watchdog via DiscoveryService
         this.discoveryService.startWatchdog();
+    }
+
+    shutdown(): void {
+        if (this.retentionTimer) {
+            clearInterval(this.retentionTimer);
+            this.retentionTimer = null;
+        }
+        this.discoveryService.stopWatchdog();
     }
 
     /**
@@ -540,7 +546,8 @@ export class DeviceManager extends EventEmitter implements IDeviceManager {
         return this.discoveryService.isAutoScanEnabled();
     }
 
-    private _shouldRunWatchdogScan(): boolean {
+    /** @deprecated Legacy test compatibility */
+    _shouldRunWatchdogScan(): boolean {
         return this.discoveryService.isAutoScanEnabled() && !this.discoveryService.isScanning() && this.devices.size > 0;
     }
 
@@ -618,44 +625,20 @@ export class DeviceManager extends EventEmitter implements IDeviceManager {
         return this.discoveryService.scanNetwork(options);
     }
 
-    private async _scanNetworkImpl(options: DeviceScanOptions): Promise<Device[]> {
-        return (this.discoveryService as any)._scanNetworkImpl(options);
-    }
-
     async blockDevice(ip: string, gatewayIp?: string): Promise<Device> {
         return this.trafficService.blockDevice(ip, gatewayIp);
-    }
-
-    private async _blockDeviceImpl(ip: string, gatewayIp?: string): Promise<Device> {
-        return this.trafficService.blockDeviceDirect(ip, gatewayIp);
-    }
-
-    private async _clearStaleSpoofSession(device: Device): Promise<void> {
-        return this.trafficService.clearStaleSpoofSession(device);
     }
 
     async unblockDevice(identifier: string): Promise<Device> {
         return this.trafficService.unblockDevice(identifier);
     }
 
-    private async _unblockDeviceImpl(identifier: string): Promise<Device> {
-        return this.trafficService.unblockDeviceDirect(identifier);
-    }
-
     async redirectDevice(ip: string, redirectUrl: string, instagramUsername: string = '', gatewayIp?: string): Promise<Device> {
         return this.trafficService.redirectDevice(ip, redirectUrl, instagramUsername, gatewayIp);
     }
 
-    private async _redirectDeviceImpl(ip: string, redirectUrl: string, instagramUsername: string = '', gatewayIp?: string): Promise<Device> {
-        return this.trafficService.redirectDeviceDirect(ip, redirectUrl, instagramUsername, gatewayIp);
-    }
-
     async stopRedirectDevice(ip: string): Promise<Device> {
         return this.trafficService.stopRedirectDevice(ip);
-    }
-
-    private async _stopRedirectDeviceImpl(ip: string): Promise<Device> {
-        return this.trafficService.stopRedirectDeviceDirect(ip);
     }
 
     async deleteDevice(mac: string): Promise<void> {
@@ -752,10 +735,6 @@ export class DeviceManager extends EventEmitter implements IDeviceManager {
 
     async setSpeedLimit(ip: string, limit: number, gatewayIp?: string): Promise<Device> {
         return this.trafficService.setSpeedLimit(ip, limit, gatewayIp);
-    }
-
-    private async _setSpeedLimitImpl(ip: string, limit: number, gatewayIp?: string): Promise<Device> {
-        return this.trafficService.setSpeedLimitDirect(ip, limit, gatewayIp);
     }
 
     async getStatus(): Promise<any> {
@@ -943,7 +922,8 @@ export class DeviceManager extends EventEmitter implements IDeviceManager {
         return this.reconciliationService.runProfileRefresh(targetMacs, scope);
     }
 
-    private async executeProfileRefresh(
+    /** @deprecated Legacy test compatibility */
+    async executeProfileRefresh(
         targetMacs: Set<string> | null,
         scope: 'all' | 'subset',
         generation: number
@@ -1087,19 +1067,23 @@ export class DeviceManager extends EventEmitter implements IDeviceManager {
         this.gamingService.assertNoPendingGamingRecoveryConflictByIdentity(identity);
     }
 
-    private async _applyGamingToDevice(target: Device, gateway: Device): Promise<void> {
+    /** @deprecated Legacy test compatibility */
+    async _applyGamingToDevice(target: Device, gateway: Device): Promise<void> {
         return this.gamingService.applyGamingToDevice(target, gateway);
     }
 
-    private async _maybeApplyGamingToNewDevice(dev: Device): Promise<void> {
+    /** @deprecated Legacy test compatibility */
+    async _maybeApplyGamingToNewDevice(dev: Device): Promise<void> {
         return this.gamingService.maybeApplyGamingToNewDevice(dev);
     }
 
-    private async _stopGamingSession(macKey: string): Promise<void> {
+    /** @deprecated Legacy test compatibility */
+    async _stopGamingSession(macKey: string): Promise<void> {
         return this.gamingService.stopGamingSession(macKey);
     }
 
-    private async _reapplyGamingSweep(gateway: Device): Promise<void> {
+    /** @deprecated Legacy test compatibility */
+    async _reapplyGamingSweep(gateway: Device): Promise<void> {
         return this.gamingService.reapplyGamingSweep(gateway);
     }
 }
