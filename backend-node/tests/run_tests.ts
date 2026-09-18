@@ -17,6 +17,7 @@ import { runDiscoveryServiceTests } from './unit_discoveryService.test';
 import { runReconciliationServiceTests } from './unit_reconciliationService.test';
 import { runRepositoriesTests } from './unit_repositories.test';
 import { runArsenalGateTests } from './unit_arsenalGate.test';
+import { runErrorHandlerTests } from './unit_errorHandler.test';
 
 async function main() {
     console.log('=====================================================');
@@ -178,6 +179,14 @@ async function main() {
         passed += 4;
     } catch (err: any) {
         console.error('❌ Arsenal/Interceptor Gate Test Failed:', err);
+        failed++;
+    }
+
+    try {
+        await runErrorHandlerTests();
+        passed += 2;
+    } catch (err: any) {
+        console.error('❌ ErrorHandler Headers-Sent Test Failed:', err);
         failed++;
     }
 

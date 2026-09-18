@@ -119,6 +119,13 @@ export function respondError(res: Response, err: any, status = 500, req?: Reques
         jsonPayload.code = errorCode;
     }
 
+    // Jika respons sudah mulai dikirim (handler telanjur menulis lalu throw), mengirim
+    // ulang memicu ERR_HTTP_HEADERS_SENT & meng-crash proses. Logging di atas tetap jalan
+    // (titik-log tunggal); di sini cukup lewati pengiriman body kedua.
+    if (res.headersSent) {
+        return;
+    }
+
     res.status(responseStatus).json(jsonPayload);
 }
 
