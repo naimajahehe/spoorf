@@ -22,6 +22,42 @@ export function deviceMemKey(d?: Device | (Pick<Device, 'ip' | 'mac'> & Partial<
     return d.profile_id || normalizeProfileMac(d.mac) || (typeof d.mac === 'string' ? d.mac.toLowerCase() : '');
 }
 
+/**
+ * Return the ids of ACTIVE spoof sessions that are stale and must be stopped.
+ *
+ * A block/throttle session pins a fixed (victim_ip, victim_mac). When the target
+ * rotates its MAC, gets a new DHCP IP, or leaves, that pin no longer matches any
+ * live device — the session then keeps ARP-cutting a stale IP that DHCP may have
+ * reassigned to an innocent device (collateral), or nobody (zombie). Both waste
+ * engine threads (and, at scale, overload it). A session is stale when there is
+ * no currently-online device whose ip AND mac both equal the session's target.
+ * Legit sessions (target live at that exact ip+mac) are kept; the auto-reblock
+ * path re-creates a fresh session when a blocked identity reappears at a new IP.
+ */
+export function computeStaleSpoofSessions(
+    sessions: Record<string, { victim_ip?: string; victim_mac?: string; active?: boolean }> | null | undefined,
+    devices: ReadonlyArray<{ ip?: string; mac?: string; is_online?: boolean }>
+): string[] {
+    if (!sessions) return [];
+    const liveTargets = new Set<string>();
+    for (const d of devices || []) {
+        if (!d || !d.is_online) continue;
+        const ip = (d.ip || '').trim();
+        const mac = (d.mac || '').toLowerCase().replace(/-/g, ':');
+        if (ip && mac) liveTargets.add(`${ip}|${mac}`);
+    }
+    const stale: string[] = [];
+    for (const [sid, s] of Object.entries(sessions)) {
+        if (!s || s.active === false) continue;
+        const ip = (s.victim_ip || '').trim();
+        const mac = (s.victim_mac || '').toLowerCase().replace(/-/g, ':');
+        if (!ip || !mac || !liveTargets.has(`${ip}|${mac}`)) {
+            stale.push(sid);
+        }
+    }
+    return stale;
+}
+
 export function isPrivateIpv4(ip: unknown): ip is string {
     if (typeof ip !== 'string') return false;
     const text = ip.trim();

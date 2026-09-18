@@ -7,7 +7,8 @@ import {
     deviceMemKey,
     isIpInSameSubnet,
     normalizeProfileMac,
-    isPrivateIpv4
+    isPrivateIpv4,
+    computeStaleSpoofSessions
 } from '../utils/deviceUtils';
 import { deriveNetworkId } from './database';
 
@@ -569,6 +570,13 @@ export class DiscoveryService extends EventEmitter implements IDiscoveryService 
                 }
             }
 
+            // Reap stale spoof sessions: after auto-reblock re-pinned live targets, stop any
+            // session whose (ip,mac) no longer matches a live device. This prevents stale
+            // sessions from cutting an innocent device that inherited a freed DHCP IP
+            // (collateral), or a phantom IP (zombie) — the latter also relieves engine load
+            // (the observed cause of Node->Python bridge timeouts under session accumulation).
+            await this.reapStaleSpoofSessions();
+
             await this.attachSpoofCutStatus();
 
             const finalDevices = this.registry.getAllDevices();
@@ -624,6 +632,37 @@ export class DiscoveryService extends EventEmitter implements IDiscoveryService 
                     this.registry.emit('devicesUpdated', this.registry.getAllDevices());
                 }
             }
+        }
+    }
+
+    /**
+     * Stop spoof sessions whose pinned (victim_ip, victim_mac) no longer matches a
+     * live online device. Runs each scan, after auto-reblock has re-pinned currently
+     * online blocked targets, so only genuinely stale sessions (target rotated MAC /
+     * changed IP / left) are reaped. Reaping restores ARP for the stale IP (un-cuts any
+     * innocent occupant) and frees the engine thread. Safe: it only ever STOPS sessions.
+     */
+    private async reapStaleSpoofSessions(): Promise<void> {
+        let sessions: Record<string, any>;
+        try {
+            const status = await this.python.getStatus();
+            sessions = (status && status.sessions) || {};
+        } catch {
+            return;
+        }
+        const stale = computeStaleSpoofSessions(sessions, this.registry.getAllDevices());
+        if (stale.length === 0) return;
+        let reaped = 0;
+        for (const sid of stale) {
+            try {
+                await this.python.stopSpoof(sid);
+                reaped++;
+            } catch (e: any) {
+                this.log.debug({ sid, err: e }, `Notice reaping stale spoof session ${sid}`);
+            }
+        }
+        if (reaped > 0) {
+            this.log.info({ reaped, examined: Object.keys(sessions).length }, `[Session Reaper] Stopped ${reaped} stale spoof session(s) — target left / rotated MAC / IP reassigned (prevents collateral cut & engine overload)`);
         }
     }
 

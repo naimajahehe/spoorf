@@ -18,6 +18,7 @@ import { runReconciliationServiceTests } from './unit_reconciliationService.test
 import { runRepositoriesTests } from './unit_repositories.test';
 import { runArsenalGateTests } from './unit_arsenalGate.test';
 import { runErrorHandlerTests } from './unit_errorHandler.test';
+import { runSessionReaperTests } from './unit_sessionReaper.test';
 
 async function main() {
     console.log('=====================================================');
@@ -187,6 +188,14 @@ async function main() {
         passed += 2;
     } catch (err: any) {
         console.error('❌ ErrorHandler Headers-Sent Test Failed:', err);
+        failed++;
+    }
+
+    try {
+        await runSessionReaperTests();
+        passed += 6;
+    } catch (err: any) {
+        console.error('❌ Stale Session Reaper Test Failed:', err);
         failed++;
     }
 
