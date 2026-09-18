@@ -2,6 +2,18 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.61] - 2026-09-18
+
+### Restorasi Eksekusi Sekuensial Deterministik pada Auto-Reblock & Auto-Throttle (`backend-node`)
+- **Restorasi Loop Sekuensial (`DiscoveryService`)**:
+  - Mengembalikan eksekusi `autoReblockTargets` dan `autoThrottleTargets` dari model paralel konkuren (`Promise.allSettled`) menjadi loop sekuensial deterministik (`for (const target of ...)`).
+  - Menghilangkan lonjakan alokasi socket raw Npcap / Scapy thread simultan di Windows saat banyak target terdeteksi kembali secara bersamaan.
+  - Memastikan packet injection Layer 2 ARP poisoning terkirim secara teratur dan stabil tanpa membebani network adapter driver atau memicu packet drop.
+  - Menjaga late-check SQLite otoritatif dan log audit sistem tetap terurut rapi secara serial.
+- **Hasil Verifikasi**:
+  - 114 Node.js tests lulus (100% green).
+  - 379 Python tests lulus (100% green).
+
 ## [v2.41.55] - 2026-09-18
 
 ### Bounded FIFO Cooldown Queue & Konfirmasi Failure Safety Contract (`backend-node`)

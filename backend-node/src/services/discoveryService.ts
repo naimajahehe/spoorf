@@ -429,17 +429,17 @@ export class DiscoveryService extends EventEmitter implements IDiscoveryService 
 
             const gateway = this.registry.findGateway();
 
-            // 1. Eksekusi AUTO-REBLOCK dengan LATE-CHECK otoritatif (Concurrent via Promise.allSettled)
+            // 1. Eksekusi AUTO-REBLOCK dengan LATE-CHECK otoritatif (Sekuensial & Deterministik)
             if (gateway && autoReblockTargets.length > 0) {
-                await Promise.allSettled(autoReblockTargets.map(async (target) => {
-                    if (target.is_gateway || target.is_self || target.ip === gateway.ip) return;
+                for (const target of autoReblockTargets) {
+                    if (target.is_gateway || target.is_self || target.ip === gateway.ip) continue;
 
                     const currentDev = this.registry.getDevice(target.ip);
-                    if (!currentDev || currentDev.is_self || currentDev.is_gateway) return;
+                    if (!currentDev || currentDev.is_self || currentDev.is_gateway) continue;
 
                     if (!currentDev.is_blocked) {
                         this.log.info({ ip: target.ip, mac: target.mac }, `[AUTO-REBLOCK] Skipping ${target.ip} because it was unblocked during scan`);
-                        return;
+                        continue;
                     }
 
                     if (typeof this.db?.getDeviceByMac === 'function') {
@@ -448,7 +448,7 @@ export class DiscoveryService extends EventEmitter implements IDiscoveryService 
                             this.log.info({ ip: target.ip, mac: target.mac }, `[AUTO-REBLOCK] Skipping ${target.ip} because it is marked unblocked in database`);
                             currentDev.is_blocked = false;
                             currentDev.speed_limit = dbDev.speed_limit ?? 100;
-                            return;
+                            continue;
                         }
                     }
 
@@ -491,19 +491,19 @@ export class DiscoveryService extends EventEmitter implements IDiscoveryService 
                     } catch (err) {
                         this.log.error({ err, ip: target.ip, mac: target.mac }, `[AUTO-REBLOCK] Failed to auto-block ${target.ip}`);
                     }
-                }));
+                }
             }
 
-            // 2. Eksekusi AUTO-THROTTLE dengan LATE-CHECK otoritatif (Concurrent via Promise.allSettled)
+            // 2. Eksekusi AUTO-THROTTLE dengan LATE-CHECK otoritatif (Sekuensial & Deterministik)
             if (gateway && autoThrottleTargets.length > 0) {
-                await Promise.allSettled(autoThrottleTargets.map(async (target) => {
-                    if (target.is_gateway || target.is_self || target.ip === gateway.ip) return;
+                for (const target of autoThrottleTargets) {
+                    if (target.is_gateway || target.is_self || target.ip === gateway.ip) continue;
 
                     const currentDev = this.registry.getDevice(target.ip);
-                    if (!currentDev || currentDev.is_self || currentDev.is_gateway) return;
+                    if (!currentDev || currentDev.is_self || currentDev.is_gateway) continue;
 
                     if (currentDev.speed_limit === undefined || currentDev.speed_limit >= 100 || currentDev.is_blocked) {
-                        return;
+                        continue;
                     }
 
                     if (typeof this.db?.getDeviceByMac === 'function') {
@@ -512,7 +512,7 @@ export class DiscoveryService extends EventEmitter implements IDiscoveryService 
                             this.log.info({ ip: target.ip, mac: target.mac }, `[AUTO-THROTTLE] Skipping ${target.ip} because throttle was cleared in database`);
                             currentDev.is_blocked = Boolean(dbDev.is_blocked);
                             currentDev.speed_limit = dbDev.speed_limit ?? 100;
-                            return;
+                            continue;
                         }
                     }
 
@@ -554,7 +554,7 @@ export class DiscoveryService extends EventEmitter implements IDiscoveryService 
                     } catch (err) {
                         this.log.error({ err, ip: target.ip, mac: target.mac }, `[AUTO-THROTTLE] Failed to auto-throttle ${target.ip}`);
                     }
-                }));
+                }
             }
 
             // 3. Gaming Mode: throttle perangkat baru selagi mode aktif
