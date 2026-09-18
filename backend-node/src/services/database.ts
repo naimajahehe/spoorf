@@ -28,7 +28,9 @@ import {
     normalizeMacAddress,
     isGenericProfileLabel,
     validateProfileAssessment,
-    calculateProfileMatchScore
+    calculateProfileMatchScore,
+    isDuidExactMatch,
+    shouldAutoLinkReblock
 } from '../utils/databaseUtils';
 
 export class DatabaseService implements IDatabaseService {
@@ -534,7 +536,11 @@ export class DatabaseService implements IDatabaseService {
                         (bestReasons.includes('dhcp_prl_signature_match (+30)') || bestReasons.includes('generic_factory_hostname_match (+20)'))
                     );
 
-                    if (bestProfile && !hasOtherOnlineInProfile && (isHighConfidence || isContinuityFusing)) {
+                    // DUID-exact (stable client-id) is authoritative identity: allow the
+                    // reblock even when a stale same-identity MAC is still online (the same
+                    // physical device that rotated its L2 MAC). Guard unchanged for weak matches.
+                    const isDuidExact = isDuidExactMatch(bestReasons);
+                    if (bestProfile && shouldAutoLinkReblock({ isHighConfidence, isContinuityFusing, hasOtherOnlineInProfile, isDuidExact })) {
                         // High Confidence (>= 80%) or Verified Continuity Fusing (>= 60%): Auto-Link & Auto-Reblock
                         const matchTypeLabel = isHighConfidence
                             ? `HIGH CONFIDENCE (${bestScore}%)`

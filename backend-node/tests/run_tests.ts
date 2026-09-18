@@ -19,6 +19,7 @@ import { runRepositoriesTests } from './unit_repositories.test';
 import { runArsenalGateTests } from './unit_arsenalGate.test';
 import { runErrorHandlerTests } from './unit_errorHandler.test';
 import { runSessionReaperTests } from './unit_sessionReaper.test';
+import { runIdentityReblockTests } from './unit_identityReblock.test';
 
 async function main() {
     console.log('=====================================================');
@@ -196,6 +197,14 @@ async function main() {
         passed += 6;
     } catch (err: any) {
         console.error('❌ Stale Session Reaper Test Failed:', err);
+        failed++;
+    }
+
+    try {
+        await runIdentityReblockTests();
+        passed += 6;
+    } catch (err: any) {
+        console.error('❌ Identity Re-Block Guard Test Failed:', err);
         failed++;
     }
 

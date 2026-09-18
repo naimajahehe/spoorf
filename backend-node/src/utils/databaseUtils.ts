@@ -99,6 +99,38 @@ export function isUsableClientId(cid: string | undefined | null): boolean {
     return true;
 }
 
+/** Scoring reason emitted for a stable DHCP client-id (DUID) instant match. */
+export const DUID_INSTANT_MATCH_REASON = 'duid_hardware_instant_match (+100)';
+
+/** True when the profile match was decided by an authoritative DUID (client-id) match. */
+export function isDuidExactMatch(reasons: readonly string[]): boolean {
+    return Array.isArray(reasons) && reasons.includes(DUID_INSTANT_MATCH_REASON);
+}
+
+/**
+ * Decide whether a newly-seen device should be auto-linked to a matched profile and
+ * inherit its blocked/throttled state (auto-reblock).
+ *
+ * The `hasOtherOnlineInProfile` guard normally suppresses the link when another device
+ * in that profile is currently online (two simultaneously-online devices could be
+ * genuinely different — a weak hostname/fingerprint match must not merge them). A
+ * DUID-exact match (stable DHCP client-id, near-unique per NIC) is authoritative
+ * identity, so a same-identity MAC still "online" is a stale row left by the SAME
+ * physical device rotating its L2 MAC — the guard is bypassed for that case only,
+ * which closes the MAC-randomization block-evasion without weakening the guard for
+ * hostname/fingerprint matches.
+ */
+export function shouldAutoLinkReblock(opts: {
+    isHighConfidence: boolean;
+    isContinuityFusing: boolean;
+    hasOtherOnlineInProfile: boolean;
+    isDuidExact: boolean;
+}): boolean {
+    if (!(opts.isHighConfidence || opts.isContinuityFusing)) return false;
+    if (opts.isDuidExact) return true;
+    return !opts.hasOtherOnlineInProfile;
+}
+
 export function calculateProfileMatchScore(
     scanned: Device,
     profile: any,
@@ -126,7 +158,7 @@ export function calculateProfileMatchScore(
         if (pCid && pCid === sCid) {
             return {
                 score: 100,
-                reasons: ['duid_hardware_instant_match (+100)']
+                reasons: [DUID_INSTANT_MATCH_REASON]
             };
         }
     }
