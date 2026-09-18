@@ -1,7 +1,7 @@
 import { EventEmitter } from 'events';
 import { Device } from '../types';
 import { IPythonBridge, IDatabaseService, IGamingService } from '../interfaces';
-import { selectGateway } from '../utils/deviceUtils';
+import { selectGateway, deviceMemKey } from '../utils/deviceUtils';
 import { createChildLogger } from '../utils/logger';
 
 export interface GamingRestorePlan {
@@ -154,17 +154,18 @@ export class GamingService extends EventEmitter implements IGamingService {
                     }
                 }
 
+                const networkId = this.delegate ? this.delegate.getCurrentNetworkId() : 'net_default';
                 for (const plan of pending.restorePlans) {
                     if (!plan.device) continue;
                     const restoredSessionId = plan.hadSession ? plan.restoredSessionId : undefined;
                     const speedLimit = plan.hadSession ? plan.priorLimit : 100;
                     const isBlocked = plan.hadSession && plan.priorLimit <= 0;
                     if (!plan.blockedPersisted) {
-                        await this.db.setDeviceBlocked(plan.device.mac, isBlocked, restoredSessionId);
+                        await this.db.setDeviceBlocked(plan.device.mac, isBlocked, restoredSessionId, networkId);
                         plan.blockedPersisted = true;
                     }
                     if (!plan.speedLimitPersisted) {
-                        await this.db.setDeviceSpeedLimit(plan.device.mac, speedLimit);
+                        await this.db.setDeviceSpeedLimit(plan.device.mac, speedLimit, networkId);
                         plan.speedLimitPersisted = true;
                     }
                 }
@@ -178,7 +179,7 @@ export class GamingService extends EventEmitter implements IGamingService {
                     device.speed_limit = plan.hadSession ? plan.priorLimit : 100;
                     device.is_blocked = plan.hadSession && plan.priorLimit <= 0;
                     if (this.delegate) {
-                        this.delegate.setDevice(device.ip, device);
+                        this.delegate.setDevice(deviceMemKey(device), device);
                     }
                     updatedDevices.push(device);
                 }
@@ -298,7 +299,7 @@ export class GamingService extends EventEmitter implements IGamingService {
             target.is_blocked = (this.gamingTargetLimit <= 0);
             this.gamingManaged.set(macKey, { priorLimit, hadSession, sessionId });
             if (this.delegate) {
-                this.delegate.setDevice(target.ip, target);
+                this.delegate.setDevice(deviceMemKey(target), target);
                 this.delegate.emit('deviceUpdated', target);
             }
             this.emit('deviceUpdated', target);

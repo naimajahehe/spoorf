@@ -90,5 +90,5 @@ async function start() {
     }
 }
 
-registerGracefulShutdown({ pythonBridge, databaseService, server });
+registerGracefulShutdown({ container, deviceManager, pythonBridge, databaseService, server });
 start();

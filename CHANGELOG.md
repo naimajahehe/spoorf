@@ -2,6 +2,33 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.53] - 2026-09-18
+
+### Hardening Arsitektur: Graceful Teardown Wiring, Transaksi Atomik SQLite, Ghost Key Eviction, & Scoping Jaringan Gaming (`backend-node`)
+- **Wiring Graceful Teardown Terpadu ke Produksi (CRIT-1)**:
+  - Memperbarui antarmuka `ShutdownDependencies` di `src/shutdown.ts` agar menerima `deviceManager` dan `container`.
+  - Memastikan proses shutdown memanggil `deviceManager.shutdown()` atau `container.shutdown()` terlebih dahulu untuk membatalkan `retentionTimer` (30 detik) dan menghentikan `discoveryService.watchdogTimer` sebelum `pythonBridge.stopAll()` dan `databaseService.close()` dieksekusi.
+  - Mencegah timbulnya `SqliteError: database is closed` saat proses Node menerima sinyal `SIGINT`/`SIGTERM` di lingkungan produksi.
+  - Memperbarui pengujian kontrak shutdown di `tests/api_routes.test.ts`.
+- **Ghost Key Eviction pada Pre-Flight Auto-Migration (IMP-1)**:
+  - Mengamankan blok auto-migration pre-flight di `TrafficService.verifyPreFlightLiveness` (`trafficService.ts`): mengekstrak `oldKey = deviceMemKey(device)`, menghapus `oldKey` dari `this.registry` via `deleteDevice(oldKey)`, lalu mendaftarkan `newKey = deviceMemKey(device)`.
+  - Menjadikan `deleteDevice` sebagai kontrak wajib (non-opsional) pada antarmuka `IDeviceRegistry`.
+  - Menyelaraskan fallback perangkat offline agar selalu menggunakan `deviceMemKey(device)`.
+- **Enforcement Invariant 3 (Atomisitas Transaksi SQLite) pada `DeviceRepository.delete` (IMP-2)**:
+  - Membungkus seluruh mutasi penghapusan perangkat dan pembersihan profil terkait (`DELETE FROM devices`, pemeriksaan profil tertaut, `DELETE FROM device_profiles`, `UPDATE device_profiles SET linked_macs`) ke dalam `this.db.transaction(() => { ... })()`.
+  - Menjamin integritas referensial dan konsistensi data database jika terjadi kegagalan/gangguan di tengah eksekusi penghapusan.
+- **Scoping Jaringan & Kunci Memori Kanonikal pada Gaming Mode (IMP-3)**:
+  - Mengambil `networkId = this.delegate ? this.delegate.getCurrentNetworkId() : 'net_default'` pada proses disable dan pemulihan batas kecepatan/blokir di `GamingService.toggleGamingMode`.
+  - Meneruskan parameter `networkId` eksplisit ke `db.setDeviceBlocked` dan `db.setDeviceSpeedLimit` saat mengeksekusi rencana pemulihan perangkat.
+  - Menggunakan `deviceMemKey(device)` dan `deviceMemKey(target)` saat memperbarui cache delegat di `GamingService` (`toggleGamingMode` dan `applyGamingToDevice`).
+- **Penyelarasan Tipe `IDeviceManager.setAutoScan`**:
+  - Menyelaraskan signature `setAutoScan(enabled: boolean): boolean` pada `IDeviceManager.ts` dengan implementasi riil di `deviceManager.ts`.
+- **Verifikasi Komprehensif**:
+  - TypeScript compiler (`tsc --noEmit --noUnusedLocals --noUnusedParameters`): 0 error / 0 warning.
+  - Node.js test suite: 96 unit & integration tests lulus (100% green).
+  - Python test suite: 379 tests lulus (100% green).
+  - Frontend production build: Vite build sukses tanpa kendala.
+
 ## [v2.41.52] - 2026-09-17
 
 ### Eliminasi Dead Code, Perbaikan 6 Bug Fungsional & Memory Leaks, serta Lifecycle Hardening (`backend-node`)

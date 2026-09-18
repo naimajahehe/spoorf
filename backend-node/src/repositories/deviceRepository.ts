@@ -377,46 +377,50 @@ export class DeviceRepository implements IDeviceRepository {
         const existing = await this.getByMac(normMac, networkId);
         const profileId = existing?.profile_id;
 
-        if (networkId) {
-            if (profileId) {
-                this.db.prepare(`DELETE FROM devices WHERE (profile_id = ? OR LOWER(mac) = LOWER(?)) AND network_id = ?`).run(profileId, normMac, networkId);
-            } else {
-                this.db.prepare(`DELETE FROM devices WHERE LOWER(mac) = LOWER(?) AND network_id = ?`).run(normMac, networkId);
-            }
-        } else {
-            if (profileId) {
-                this.db.prepare(`DELETE FROM devices WHERE profile_id = ? OR LOWER(mac) = LOWER(?)`).run(profileId, normMac);
-            } else {
-                this.db.prepare(`DELETE FROM devices WHERE LOWER(mac) = LOWER(?)`).run(normMac);
-            }
-        }
-
-        // Garbage collection: Bersihkan normMac dari linked_macs dan hapus profil yatim tanpa perangkat tersisa
-        if (profileId) {
-            const remaining = this.db.prepare(`SELECT count(*) as count FROM devices WHERE profile_id = ?`).get(profileId) as { count: number };
-            if (remaining.count === 0) {
-                this.db.prepare(`DELETE FROM device_profiles WHERE id = ?`).run(profileId);
-            }
-        }
-
-        const allProfiles = this.db.prepare(`SELECT * FROM device_profiles`).all() as any[];
-        const remainingCountStmt = this.db.prepare(`SELECT count(*) as count FROM devices WHERE profile_id = ?`);
-        const deleteProfileStmt = this.db.prepare(`DELETE FROM device_profiles WHERE id = ?`);
-        const updateLinkedStmt = this.db.prepare(`UPDATE device_profiles SET linked_macs = ? WHERE id = ?`);
-
-        for (const p of allProfiles) {
-            const linked = safeParseJson<string[]>(p.linked_macs, []);
-            const hasNormMac = linked.some(m => m.toLowerCase() === normMac);
-            if (hasNormMac) {
-                const nextLinked = linked.filter(m => m.toLowerCase() !== normMac);
-                const remainingDevs = remainingCountStmt.get(p.id) as { count: number };
-                if (nextLinked.length === 0 || remainingDevs.count === 0) {
-                    deleteProfileStmt.run(p.id);
+        const deleteTx = this.db.transaction(() => {
+            if (networkId) {
+                if (profileId) {
+                    this.db.prepare(`DELETE FROM devices WHERE (profile_id = ? OR LOWER(mac) = LOWER(?)) AND network_id = ?`).run(profileId, normMac, networkId);
                 } else {
-                    updateLinkedStmt.run(JSON.stringify(nextLinked), p.id);
+                    this.db.prepare(`DELETE FROM devices WHERE LOWER(mac) = LOWER(?) AND network_id = ?`).run(normMac, networkId);
+                }
+            } else {
+                if (profileId) {
+                    this.db.prepare(`DELETE FROM devices WHERE profile_id = ? OR LOWER(mac) = LOWER(?)`).run(profileId, normMac);
+                } else {
+                    this.db.prepare(`DELETE FROM devices WHERE LOWER(mac) = LOWER(?)`).run(normMac);
                 }
             }
-        }
+
+            // Garbage collection: Bersihkan normMac dari linked_macs dan hapus profil yatim tanpa perangkat tersisa
+            if (profileId) {
+                const remaining = this.db.prepare(`SELECT count(*) as count FROM devices WHERE profile_id = ?`).get(profileId) as { count: number };
+                if (remaining.count === 0) {
+                    this.db.prepare(`DELETE FROM device_profiles WHERE id = ?`).run(profileId);
+                }
+            }
+
+            const allProfiles = this.db.prepare(`SELECT * FROM device_profiles`).all() as any[];
+            const remainingCountStmt = this.db.prepare(`SELECT count(*) as count FROM devices WHERE profile_id = ?`);
+            const deleteProfileStmt = this.db.prepare(`DELETE FROM device_profiles WHERE id = ?`);
+            const updateLinkedStmt = this.db.prepare(`UPDATE device_profiles SET linked_macs = ? WHERE id = ?`);
+
+            for (const p of allProfiles) {
+                const linked = safeParseJson<string[]>(p.linked_macs, []);
+                const hasNormMac = linked.some(m => m.toLowerCase() === normMac);
+                if (hasNormMac) {
+                    const nextLinked = linked.filter(m => m.toLowerCase() !== normMac);
+                    const remainingDevs = remainingCountStmt.get(p.id) as { count: number };
+                    if (nextLinked.length === 0 || remainingDevs.count === 0) {
+                        deleteProfileStmt.run(p.id);
+                    } else {
+                        updateLinkedStmt.run(JSON.stringify(nextLinked), p.id);
+                    }
+                }
+            }
+        });
+
+        deleteTx();
     }
 
     async clearAll(networkId?: string): Promise<void> {

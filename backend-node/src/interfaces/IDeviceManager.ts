@@ -5,7 +5,7 @@ import { IGamingService } from './IGamingService';
 export interface IDeviceManager extends ITrafficService, IGamingService {
     init(): Promise<void>;
     shutdown?(): void;
-    setAutoScan(enabled: boolean): void;
+    setAutoScan(enabled: boolean): boolean;
     isScanning(): boolean;
     scanNetwork(options?: any): Promise<Device[]>;
     getDevices(): Device[];

@@ -1,4 +1,10 @@
 type ShutdownDependencies = {
+    container?: {
+        shutdown?(): Promise<void> | void;
+    };
+    deviceManager?: {
+        shutdown?(): void;
+    };
     pythonBridge: {
         stopAll(): Promise<void>;
         stop(): void;
@@ -26,6 +32,8 @@ export function registerGracefulShutdown(
     signalTarget: SignalTarget = process
 ): () => Promise<void> {
     const {
+        container,
+        deviceManager,
         pythonBridge,
         databaseService,
         server,
@@ -38,6 +46,15 @@ export function registerGracefulShutdown(
         if (shutdownPromise) return shutdownPromise;
         shutdownPromise = (async () => {
             logger.log('\nShutting down...');
+            try {
+                if (deviceManager && typeof deviceManager.shutdown === 'function') {
+                    deviceManager.shutdown();
+                } else if (container && typeof container.shutdown === 'function') {
+                    await container.shutdown();
+                }
+            } catch (error) {
+                logger.warn('DeviceManager/Container cleanup failed during shutdown:', error);
+            }
             try {
                 await pythonBridge.stopAll();
             } catch (error) {

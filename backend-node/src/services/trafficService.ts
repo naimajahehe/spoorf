@@ -12,7 +12,7 @@ export interface IDeviceRegistry {
     getAllDevices(): Device[];
     findGateway(gatewayIp?: string): Device | undefined;
     setDevice(key: string, device: Device): void;
-    deleteDevice?(key: string): boolean | void;
+    deleteDevice(key: string): boolean | void;
     getCurrentNetworkId(): string;
     emit(event: string, ...args: any[]): boolean;
     runExclusive<T>(fn: () => Promise<T>): Promise<T>;
@@ -651,11 +651,16 @@ export class TrafficService extends EventEmitter implements ITrafficService {
                     );
                     if (reCheck && reCheck[migratedIp] && reCheck[migratedIp].is_alive) {
                         this.log.info({ mac: migratedMac, ip: migratedIp }, `[Pre-Flight Auto-Migration] Target ${migratedMac} TERBUKTI HIDUP di IP baru ${migratedIp}!`);
+                        const oldKey = deviceMemKey(device);
                         device.ip = migratedIp;
                         device.mac = migratedMac;
                         device.is_online = true;
                         if (this.registry) {
-                            this.registry.setDevice(migratedIp, device);
+                            const newKey = deviceMemKey(device);
+                            if (oldKey && oldKey !== newKey && typeof this.registry.deleteDevice === 'function') {
+                                this.registry.deleteDevice(oldKey);
+                            }
+                            this.registry.setDevice(newKey, device);
                         }
                         await this.db.updateDeviceIp(device.mac, migratedIp, this.currentNetworkId).catch(err => this.log.warn({ mac: device.mac, err }, 'Failed to update device IP on auto-migration'));
                         this.emitUpdate(device);
@@ -673,7 +678,7 @@ export class TrafficService extends EventEmitter implements ITrafficService {
 
                 device.is_online = false;
                 if (this.registry) {
-                    this.registry.setDevice(device.ip, device);
+                    this.registry.setDevice(deviceMemKey(device), device);
                 }
                 await this.db.setDeviceOnlineStatus(device.mac, false, this.currentNetworkId).catch(err => this.log.warn({ mac: device.mac, err }, 'Failed to set device offline on pre-flight'));
                 this.emitUpdate(device);

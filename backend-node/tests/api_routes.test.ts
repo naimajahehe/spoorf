@@ -415,6 +415,7 @@ export async function runApiRoutesTests() {
                 return this;
             }
         };
+        let dmShutdownCalls = 0;
         let stopAllCalls = 0;
         let stopCalls = 0;
         let dbCloseCalls = 0;
@@ -422,6 +423,9 @@ export async function runApiRoutesTests() {
         let exitCalls = 0;
 
         const shutdown = registerGracefulShutdown({
+            deviceManager: {
+                shutdown: () => { dmShutdownCalls++; }
+            },
             pythonBridge: {
                 stopAll: async () => { stopAllCalls++; },
                 stop: () => { stopCalls++; }
@@ -444,10 +448,10 @@ export async function runApiRoutesTests() {
         assert.strictEqual(handlers.get('SIGINT'), shutdown);
         await Promise.all([shutdown(), shutdown()]);
         assert.deepStrictEqual(
-            { stopAllCalls, stopCalls, dbCloseCalls, serverCloseCalls, exitCalls },
-            { stopAllCalls: 1, stopCalls: 1, dbCloseCalls: 1, serverCloseCalls: 1, exitCalls: 1 }
+            { dmShutdownCalls, stopAllCalls, stopCalls, dbCloseCalls, serverCloseCalls, exitCalls },
+            { dmShutdownCalls: 1, stopAllCalls: 1, stopCalls: 1, dbCloseCalls: 1, serverCloseCalls: 1, exitCalls: 1 }
         );
-        console.log('  ✓ Contract: shared shutdown handler is idempotent across both signals');
+        console.log('  ✓ Contract: shared shutdown handler is idempotent and shuts down deviceManager before closing DB');
     }
 
     // VIP Arsenal Licensing Guard Test: /api/bettercap/* mutation endpoints reject Free tier with 403
