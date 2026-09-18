@@ -2,6 +2,25 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.62] - 2026-09-18
+
+### Restorasi Kestabilan Penuh v2.41.36 pada Auto-Reblock, Auto-Throttle, & Reconciliation (`backend-node`)
+- **Restorasi Kondisi Sinkronisasi Database ke Memori (`DiscoveryService`)**:
+  - Mengembalikan kondisi sinkronisasi otoritatif dari `v2.41.36`: `if (!existing.session_id && dev.is_blocked !== undefined)` menggantikan logika cacat `existing.is_blocked === undefined` yang memicu *false unblock skip* (`[AUTO-REBLOCK] Skipping ... because it was unblocked during scan`).
+  - Menjamin perangkat terblokir yang kembali ke jaringan langsung tersinkronisasi `is_blocked = true` ke memori tanpa terlewat.
+- **Eliminasi Over-Abstraksi `blockDeviceDirect` pada Auto-Reblock & Auto-Throttle**:
+  - Menghilangkan delegasi `this.trafficService.blockDeviceDirect` di loop auto-reblock/throttle scan L2.
+  - Mengeksekusi `python.startSpoof` secara langsung, cepat, dan atomik (identik dengan `v2.41.36`), mengeliminasi probe liveness sekunder redundan (`pulseLiveness`) yang memvonis perangkat offline secara keliru pada ponsel dalam mode hemat daya, serta mengeliminasi penolakan kuota lisensi redundan.
+- **Lookup Tangguh dengan Fallback MAC**:
+  - Menggunakan `this.registry.getDevice(target.ip) || this.registry.findDeviceByMac(target.mac)` pada loop reblock/throttle, mencegah kegagalan lookup saat perangkat bertransisi dari status offline.
+- **Pembaruan `last_seen` & Fallback Micro-Scan pada Event DHCP (`ReconciliationService`)**:
+  - Memperbarui `dev.last_seen = new Date().toISOString()` dan `dev.is_online = true` saat event DHCP aktif tiba, mengaktifkan jendela toleransi `TRUST_FRESH_ONLINE_MS` (15 detik).
+  - Menambahkan fallback micro-scan (`debouncedScan(500)`) jika eksekusi pemotongan instan pada event DHCP mengalami kendala koneksi stack L2 klien yang belum stabil.
+- **Hasil Verifikasi**:
+  - 114 Node.js tests lulus (100% green).
+  - 379 Python tests lulus (100% green).
+  - Total 493 tes otomatis lulus tanpa regresi.
+
 ## [v2.41.61] - 2026-09-18
 
 ### Restorasi Eksekusi Sekuensial Deterministik pada Auto-Reblock & Auto-Throttle (`backend-node`)

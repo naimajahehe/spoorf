@@ -269,6 +269,7 @@ export class ReconciliationService extends EventEmitter implements IReconciliati
                 );
 
                 dev.is_online = true;
+                dev.last_seen = new Date().toISOString();
                 dev.ip = data.ip;
                 if (hostnameShouldChange) dev.hostname = data.hostname;
                 if (data.vendor_class) dev.dhcp_vendor_class = data.vendor_class;
@@ -322,6 +323,11 @@ export class ReconciliationService extends EventEmitter implements IReconciliati
                             this.log.info({ mac: dev.mac, ip: dev.ip }, `[DHCP Re-Block] Blok ditegakkan ulang untuk ${dev.hostname || dev.mac} di ${dev.ip}`);
                         } catch (e: any) {
                             this.log.warn({ mac: dev.mac, err: e }, `Notice re-blocking ${dev.mac} on DHCP: ${e?.message || e}`);
+                            if (this.registry.debouncedScan) {
+                                this.registry.debouncedScan(500);
+                            } else if (this.discoveryService) {
+                                this.discoveryService.debouncedScan(500);
+                            }
                         }
                     }
                 }

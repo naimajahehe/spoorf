@@ -212,4 +212,81 @@ export async function runDiscoveryServiceTests(): Promise<void> {
         assert.ok(armedCooldowns.some(c => c.mac.toLowerCase() === dev.mac.toLowerCase()), 'armOfflineCooldown called on offline pulse');
         console.log('  ✓ Liveness Event: Sub-second offline state transition and event notification verified');
     }
+
+    // 6. Auto-Reblock: Restores is_blocked from SQLite Sync & Executes Direct startSpoof (v2.41.36 Stability)
+    {
+        const { service, python, db, registry, emitted } = makeDiscoverySetup();
+        
+        // Simulasikan perangkat di memori yang berstatus is_blocked: false (belum ada sesi)
+        const inMemVictim = makeDevice({
+            ip: '192.168.1.77',
+            mac: '77:88:99:aa:bb:cc',
+            hostname: 'VictimPhone',
+            is_online: true,
+            is_blocked: false,
+            session_id: undefined
+        });
+        registry.setCurrentNetworkId?.('net_00aabbccdd01');
+        registry.setDevice(inMemVictim.ip, inMemVictim);
+
+        // Raw scan dari Scapy tidak membawa is_blocked (undefined)
+        python.scan = async () => [
+            makeDevice({ ip: '192.168.1.1', mac: '00:aa:bb:cc:dd:01', is_gateway: true }),
+            makeDevice({ ip: '192.168.1.77', mac: '77:88:99:aa:bb:cc', hostname: 'VictimPhone' })
+        ];
+
+        // Database sync mengembalikan is_blocked: true dari SQLite
+        const dbVictim = makeDevice({
+            ip: '192.168.1.77',
+            mac: '77:88:99:aa:bb:cc',
+            hostname: 'VictimPhone',
+            is_blocked: true,
+            speed_limit: 0
+        });
+
+        db.syncScanResults = async (scanned: Device[]) => ({
+            allDevices: [scanned[0], dbVictim],
+            autoReblockTargets: [dbVictim],
+            autoThrottleTargets: [],
+            zombieSessionsToStop: []
+        });
+
+        let dbSetBlockedCalled = false;
+        db.setDeviceBlocked = async (mac: string, blocked: boolean, sessionId?: string) => {
+            if (mac === dbVictim.mac && blocked && sessionId === 'sess_direct_reblock_77') {
+                dbSetBlockedCalled = true;
+            }
+        };
+        db.setDeviceSpeedLimit = async () => {};
+
+        let spoofCalls: Array<{ ip: string; mac: string; gwIp: string; limit: number }> = [];
+        python.startSpoof = async (ip: string, mac: string, gwIp: string, gwMac: string, limit: number) => {
+            spoofCalls.push({ ip, mac, gwIp, limit });
+            return 'sess_direct_reblock_77';
+        };
+
+        // Spy untuk memastikan blockDeviceDirect TIDAK dipanggil (menghindari pre-flight pulse failure & quota checks)
+        let blockDeviceDirectCalled = false;
+        const dummyTrafficService = {
+            clearStaleSpoofSession: async () => {},
+            blockDeviceDirect: async () => { blockDeviceDirectCalled = true; }
+        };
+        (service as any).trafficService = dummyTrafficService;
+
+        await service.scanNetwork();
+
+        const victimInRegistry = registry.getDevice('192.168.1.77');
+        assert.ok(victimInRegistry, 'Victim must be present in registry');
+        assert.strictEqual(blockDeviceDirectCalled, false, 'Auto-reblock must NOT delegate to blockDeviceDirect (avoids redundant pre-flight pulse)');
+        assert.strictEqual(spoofCalls.length, 1, 'Direct python.startSpoof must be invoked');
+        assert.strictEqual(spoofCalls[0].ip, '192.168.1.77');
+        assert.strictEqual(spoofCalls[0].limit, 0);
+        assert.strictEqual(victimInRegistry.is_blocked, true, 'is_blocked must be synced to true from DB');
+        assert.strictEqual(victimInRegistry.session_id, 'sess_direct_reblock_77');
+        assert.strictEqual(dbSetBlockedCalled, true, 'db.setDeviceBlocked must be called with new session ID');
+        
+        const autoReblockedEvent = emitted.find(e => e.event === 'autoReblocked');
+        assert.ok(autoReblockedEvent, 'autoReblocked event must be emitted');
+        console.log('  ✓ Auto-Reblock v2.41.36: Syncs DB is_blocked to memory and starts direct spoof without pre-flight pulse bypass');
+    }
 }

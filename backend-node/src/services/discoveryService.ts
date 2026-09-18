@@ -397,12 +397,10 @@ export class DiscoveryService extends EventEmitter implements IDiscoveryService 
                         if (dev.is_gateway !== undefined) existing.is_gateway = dev.is_gateway;
                         if (dev.is_self !== undefined) existing.is_self = dev.is_self;
 
-                        if (existing.is_blocked === undefined && dev.is_blocked !== undefined) {
+                        // Sinkronkan status block/throttle dari DB bila perangkat di memori belum punya sesi aktif (v2.41.36)
+                        if (!existing.session_id && dev.is_blocked !== undefined) {
                             existing.is_blocked = dev.is_blocked;
                             existing.speed_limit = dev.speed_limit;
-                        } else if (!existing.session_id && existing.is_blocked && dev.is_blocked === false) {
-                            existing.is_blocked = false;
-                            existing.speed_limit = dev.speed_limit ?? 100;
                         }
 
                         this.registry.setDevice(dev.ip, existing);
@@ -429,12 +427,12 @@ export class DiscoveryService extends EventEmitter implements IDiscoveryService 
 
             const gateway = this.registry.findGateway();
 
-            // 1. Eksekusi AUTO-REBLOCK dengan LATE-CHECK otoritatif (Sekuensial & Deterministik)
+            // 1. Eksekusi AUTO-REBLOCK dengan LATE-CHECK otoritatif (Sekuensial & Deterministik - v2.41.36)
             if (gateway && autoReblockTargets.length > 0) {
                 for (const target of autoReblockTargets) {
                     if (target.is_gateway || target.is_self || target.ip === gateway.ip) continue;
 
-                    const currentDev = this.registry.getDevice(target.ip);
+                    const currentDev = this.registry.getDevice(target.ip) || this.registry.findDeviceByMac(target.mac);
                     if (!currentDev || currentDev.is_self || currentDev.is_gateway) continue;
 
                     if (!currentDev.is_blocked) {
@@ -460,27 +458,24 @@ export class DiscoveryService extends EventEmitter implements IDiscoveryService 
                     }
 
                     try {
-                        this.log.info({ hostname: currentDev.hostname, ip: currentDev.ip, mac: currentDev.mac }, `[AUTO-REBLOCK] Target detected returning: ${currentDev.hostname || currentDev.ip} (MAC: ${currentDev.mac}, IP: ${currentDev.ip})`);
+                        this.log.info({ hostname: currentDev.hostname, ip: currentDev.ip, mac: currentDev.mac }, `⚡ [AUTO-REBLOCK] Target detected returning: ${currentDev.hostname || currentDev.ip} (MAC: ${currentDev.mac}, IP: ${currentDev.ip})`);
                         
-                        if (this.trafficService && 'blockDeviceDirect' in this.trafficService) {
-                            await (this.trafficService as any).blockDeviceDirect(currentDev.ip, gateway.ip);
-                        } else {
-                            const sessionId = await this.python.startSpoof(
-                                currentDev.ip,
-                                currentDev.mac,
-                                gateway.ip,
-                                gateway.mac,
-                                0,
-                                currentDev.ipv6_link_local || currentDev.ipv6_global,
-                                gateway.ipv6_link_local || gateway.ipv6_global
-                            );
-                            currentDev.is_blocked = true;
-                            currentDev.speed_limit = 0;
-                            currentDev.session_id = sessionId;
-                            await this.db.setDeviceBlocked(currentDev.mac, true, sessionId, currentNetId);
-                            await this.db.setDeviceSpeedLimit(currentDev.mac, 0, currentNetId);
-                            this.registry.setDevice(currentDev.ip, currentDev);
-                        }
+                        const sessionId = await this.python.startSpoof(
+                            currentDev.ip,
+                            currentDev.mac,
+                            gateway.ip,
+                            gateway.mac,
+                            0,
+                            currentDev.ipv6_link_local || currentDev.ipv6_global,
+                            gateway.ipv6_link_local || gateway.ipv6_global
+                        );
+                        currentDev.is_blocked = true;
+                        currentDev.speed_limit = 0;
+                        currentDev.session_id = sessionId;
+                        currentDev.is_online = true;
+                        await this.db.setDeviceBlocked(currentDev.mac, true, sessionId, currentNetId);
+                        await this.db.setDeviceSpeedLimit(currentDev.mac, 0, currentNetId);
+                        this.registry.setDevice(deviceMemKey(currentDev), currentDev);
 
                         this.emit('deviceUpdated', currentDev);
                         this.emit('autoReblocked', currentDev);
@@ -489,17 +484,17 @@ export class DiscoveryService extends EventEmitter implements IDiscoveryService 
                             this.registry.emit('autoReblocked', currentDev);
                         }
                     } catch (err) {
-                        this.log.error({ err, ip: target.ip, mac: target.mac }, `[AUTO-REBLOCK] Failed to auto-block ${target.ip}`);
+                        this.log.error({ err, ip: target.ip, mac: target.mac }, `❌ [AUTO-REBLOCK] Failed to auto-block ${target.ip}`);
                     }
                 }
             }
 
-            // 2. Eksekusi AUTO-THROTTLE dengan LATE-CHECK otoritatif (Sekuensial & Deterministik)
+            // 2. Eksekusi AUTO-THROTTLE dengan LATE-CHECK otoritatif (Sekuensial & Deterministik - v2.41.36)
             if (gateway && autoThrottleTargets.length > 0) {
                 for (const target of autoThrottleTargets) {
                     if (target.is_gateway || target.is_self || target.ip === gateway.ip) continue;
 
-                    const currentDev = this.registry.getDevice(target.ip);
+                    const currentDev = this.registry.getDevice(target.ip) || this.registry.findDeviceByMac(target.mac);
                     if (!currentDev || currentDev.is_self || currentDev.is_gateway) continue;
 
                     if (currentDev.speed_limit === undefined || currentDev.speed_limit >= 100 || currentDev.is_blocked) {
@@ -525,34 +520,31 @@ export class DiscoveryService extends EventEmitter implements IDiscoveryService 
 
                     try {
                         const limit = currentDev.speed_limit ?? 50;
-                        this.log.info({ limit, hostname: currentDev.hostname, ip: currentDev.ip, mac: currentDev.mac }, `[AUTO-THROTTLE] Reapplying speed limit ${limit}% for ${currentDev.hostname || currentDev.ip} (${currentDev.mac})`);
+                        this.log.info({ limit, hostname: currentDev.hostname, ip: currentDev.ip, mac: currentDev.mac }, `⚡ [AUTO-THROTTLE] Reapplying speed limit ${limit}% for ${currentDev.hostname || currentDev.ip} (${currentDev.mac})`);
                         
-                        if (this.trafficService && 'setSpeedLimitDirect' in this.trafficService) {
-                            await (this.trafficService as any).setSpeedLimitDirect(currentDev.ip, limit, gateway.ip);
-                        } else {
-                            const sessionId = await this.python.startSpoof(
-                                currentDev.ip,
-                                currentDev.mac,
-                                gateway.ip,
-                                gateway.mac,
-                                limit,
-                                currentDev.ipv6_link_local || currentDev.ipv6_global,
-                                gateway.ipv6_link_local || gateway.ipv6_global
-                            );
-                            currentDev.is_blocked = false;
-                            currentDev.speed_limit = limit;
-                            currentDev.session_id = sessionId;
-                            await this.db.setDeviceBlocked(currentDev.mac, false, sessionId, currentNetId);
-                            await this.db.setDeviceSpeedLimit(currentDev.mac, limit, currentNetId);
-                            this.registry.setDevice(currentDev.ip, currentDev);
-                        }
+                        const sessionId = await this.python.startSpoof(
+                            currentDev.ip,
+                            currentDev.mac,
+                            gateway.ip,
+                            gateway.mac,
+                            limit,
+                            currentDev.ipv6_link_local || currentDev.ipv6_global,
+                            gateway.ipv6_link_local || gateway.ipv6_global
+                        );
+                        currentDev.is_blocked = false;
+                        currentDev.speed_limit = limit;
+                        currentDev.session_id = sessionId;
+                        currentDev.is_online = true;
+                        await this.db.setDeviceBlocked(currentDev.mac, false, sessionId, currentNetId);
+                        await this.db.setDeviceSpeedLimit(currentDev.mac, limit, currentNetId);
+                        this.registry.setDevice(deviceMemKey(currentDev), currentDev);
 
                         this.emit('deviceUpdated', currentDev);
                         if (this.registry) {
                             this.registry.emit('deviceUpdated', currentDev);
                         }
                     } catch (err) {
-                        this.log.error({ err, ip: target.ip, mac: target.mac }, `[AUTO-THROTTLE] Failed to auto-throttle ${target.ip}`);
+                        this.log.error({ err, ip: target.ip, mac: target.mac }, `❌ [AUTO-THROTTLE] Failed to auto-throttle ${target.ip}`);
                     }
                 }
             }
