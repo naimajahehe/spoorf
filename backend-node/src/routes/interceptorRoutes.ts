@@ -1,12 +1,16 @@
 import { Router } from 'express';
-import { IDeviceManager, IPythonBridge } from '../interfaces';
+import { IDeviceManager, IPythonBridge, ILicenseManager } from '../interfaces';
 import { InterceptorController } from '../controllers/interceptorController';
 import { safeHandler } from '../middlewares/errorHandler';
 import { validateAndHandle } from '../middlewares/validation';
 import { LeafCertBodySchema, FlowsQuerySchema } from '../schemas/interceptorSchemas';
 
-export function registerInterceptorRoutes(router: Router, service: IDeviceManager | IPythonBridge): void {
-    const controller = new InterceptorController(service);
+export function registerInterceptorRoutes(
+    router: Router,
+    service: IDeviceManager | IPythonBridge,
+    licenseManager?: ILicenseManager
+): void {
+    const controller = new InterceptorController(service, licenseManager);
 
     router.get('/api/interceptor/ca', safeHandler(controller.getCaInfo));
     router.get('/api/interceptor/ca/download', safeHandler(controller.downloadCaCert));
@@ -24,8 +28,11 @@ export function registerInterceptorRoutes(router: Router, service: IDeviceManage
     );
 }
 
-export function createInterceptorRouter(service: IDeviceManager | IPythonBridge): Router {
+export function createInterceptorRouter(
+    service: IDeviceManager | IPythonBridge,
+    licenseManager?: ILicenseManager
+): Router {
     const router = Router();
-    registerInterceptorRoutes(router, service);
+    registerInterceptorRoutes(router, service, licenseManager);
     return router;
 }

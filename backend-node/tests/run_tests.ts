@@ -16,6 +16,7 @@ import { runTrafficServiceTests } from './unit_trafficService.test';
 import { runDiscoveryServiceTests } from './unit_discoveryService.test';
 import { runReconciliationServiceTests } from './unit_reconciliationService.test';
 import { runRepositoriesTests } from './unit_repositories.test';
+import { runArsenalGateTests } from './unit_arsenalGate.test';
 
 async function main() {
     console.log('=====================================================');
@@ -169,6 +170,14 @@ async function main() {
         passed += 6;
     } catch (err: any) {
         console.error('❌ Repositories Test Failed:', err);
+        failed++;
+    }
+
+    try {
+        await runArsenalGateTests();
+        passed += 4;
+    } catch (err: any) {
+        console.error('❌ Arsenal/Interceptor Gate Test Failed:', err);
         failed++;
     }
 

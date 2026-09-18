@@ -73,6 +73,7 @@ export class BettercapController {
     };
 
     getCredentials = async (req: Request, res: Response): Promise<void> => {
+        this.assertCanArsenal();
         const limit = parsePositiveInt(req.query.limit, 100);
         const credentials = await (this.service as any).getBettercapCredentials(limit);
         res.json({ success: true, credentials });

@@ -31,7 +31,7 @@ export function createRouter(
     registerDeviceRoutes(router, deviceManager);
     registerNetworkRoutes(router, deviceManager);
     registerGatewayRoutes(router, deviceManager);
-    registerInterceptorRoutes(router, deviceManager);
+    registerInterceptorRoutes(router, deviceManager, licManager);
     registerBettercapRoutes(router, deviceManager, licManager);
     registerAuthRoutes(router, licManager);
     registerShieldRoutes(router, deviceManager);
