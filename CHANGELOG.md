@@ -2,6 +2,21 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.55] - 2026-09-18
+
+### Bounded FIFO Cooldown Queue & Konfirmasi Failure Safety Contract (`backend-node`)
+- **Strict FIFO Eviction pada `profileEnrichmentCooldowns` (`ReconciliationService`)**:
+  - Menerapkan bounded queue deterministik (maksimum 500 entri) pada map `profileEnrichmentCooldowns` menggunakan FIFO key eviction (`while (this.profileEnrichmentCooldowns.size > 500) this.profileEnrichmentCooldowns.delete(oldestKey)`).
+  - Menghilangkan risiko memory growth tak terduga akibat burst event DHCP renewal/churn atau cycle refresh scan pada jaringan berskala besar.
+- **Konfirmasi Failure Safety Contract pada `DeviceManager.deleteDevice`**:
+  - Mempertahankan kegagalan operasi (`fail-fast`) jika engine L2 downstream gagal menghentikan sesi spoof atau redirect (`stopRedirect`/`stopSpoof`).
+  - Mencegah timbulnya kondisi "zombie ARP spoof" di jaringan fisik: jika un-poisoning gagal di level Scapy/Python, record perangkat di memori dan SQLite tetap dipertahankan secara utuh sehingga operator tetap dapat melihat dan mengontrol perangkat tersebut.
+- **Verifikasi Komprehensif (475 Tests Total)**:
+  - TypeScript Compiler: 0 error / 0 warning (`npx tsc --noEmit --noUnusedLocals --noUnusedParameters`).
+  - Node.js Unit & Integration Tests: 96 tests lulus (100% green).
+  - Python Service Test Suite: 379 tests lulus (100% green).
+  - Frontend Production Build: Vite build sukses (13.01s).
+
 ## [v2.41.54] - 2026-09-18
 
 ### Remediasi Adversarial Review: Eliminasi TOCTOU Race Re-Block, Transaksi Atomik, Gateway Defense-in-Depth, & Lifecycle Hardening (`backend-node`)

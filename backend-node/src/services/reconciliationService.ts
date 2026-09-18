@@ -666,6 +666,11 @@ export class ReconciliationService extends EventEmitter implements IReconciliati
                     this.profileEnrichmentCooldowns.delete(mac);
                 }
             }
+            while (this.profileEnrichmentCooldowns.size > 500) {
+                const oldestKey = this.profileEnrichmentCooldowns.keys().next().value;
+                if (!oldestKey) break;
+                this.profileEnrichmentCooldowns.delete(oldestKey);
+            }
         }
         this.assertProfileRefreshGeneration(generation);
         if (scope === 'all') {
