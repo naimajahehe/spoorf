@@ -80,6 +80,10 @@ export class DiscoveryService extends EventEmitter implements IDiscoveryService 
             clearInterval(this.watchdogTimer);
             this.watchdogTimer = null;
         }
+        if (this.debouncedScanTimer) {
+            clearTimeout(this.debouncedScanTimer);
+            this.debouncedScanTimer = null;
+        }
     }
 
     private shouldRunWatchdogScan(): boolean {
@@ -392,9 +396,12 @@ export class DiscoveryService extends EventEmitter implements IDiscoveryService 
                         if (dev.is_gateway !== undefined) existing.is_gateway = dev.is_gateway;
                         if (dev.is_self !== undefined) existing.is_self = dev.is_self;
 
-                        if (!existing.session_id && dev.is_blocked !== undefined) {
+                        if (existing.is_blocked === undefined && dev.is_blocked !== undefined) {
                             existing.is_blocked = dev.is_blocked;
                             existing.speed_limit = dev.speed_limit;
+                        } else if (!existing.session_id && existing.is_blocked && dev.is_blocked === false) {
+                            existing.is_blocked = false;
+                            existing.speed_limit = dev.speed_limit ?? 100;
                         }
 
                         this.registry.setDevice(dev.ip, existing);
@@ -432,6 +439,16 @@ export class DiscoveryService extends EventEmitter implements IDiscoveryService 
                     if (!currentDev.is_blocked) {
                         this.log.info({ ip: target.ip, mac: target.mac }, `[AUTO-REBLOCK] Skipping ${target.ip} because it was unblocked during scan`);
                         return;
+                    }
+
+                    if (typeof this.db?.getDeviceByMac === 'function') {
+                        const dbDev = await this.db.getDeviceByMac(currentDev.mac, currentNetId);
+                        if (dbDev && !dbDev.is_blocked) {
+                            this.log.info({ ip: target.ip, mac: target.mac }, `[AUTO-REBLOCK] Skipping ${target.ip} because it is marked unblocked in database`);
+                            currentDev.is_blocked = false;
+                            currentDev.speed_limit = dbDev.speed_limit ?? 100;
+                            return;
+                        }
                     }
 
                     if (this.trafficService && 'clearStaleSpoofSession' in this.trafficService) {
@@ -486,6 +503,16 @@ export class DiscoveryService extends EventEmitter implements IDiscoveryService 
 
                     if (currentDev.speed_limit === undefined || currentDev.speed_limit >= 100 || currentDev.is_blocked) {
                         return;
+                    }
+
+                    if (typeof this.db?.getDeviceByMac === 'function') {
+                        const dbDev = await this.db.getDeviceByMac(currentDev.mac, currentNetId);
+                        if (dbDev && (dbDev.is_blocked || dbDev.speed_limit === undefined || dbDev.speed_limit >= 100)) {
+                            this.log.info({ ip: target.ip, mac: target.mac }, `[AUTO-THROTTLE] Skipping ${target.ip} because throttle was cleared in database`);
+                            currentDev.is_blocked = Boolean(dbDev.is_blocked);
+                            currentDev.speed_limit = dbDev.speed_limit ?? 100;
+                            return;
+                        }
                     }
 
                     if (this.trafficService && 'clearStaleSpoofSession' in this.trafficService) {

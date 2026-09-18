@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import { IDeviceManager } from '../interfaces';
+import { parsePositiveInt } from '../middlewares/errorHandler';
 
 export class GatewayController {
     constructor(private readonly deviceManager: IDeviceManager) {}
@@ -39,7 +40,7 @@ export class GatewayController {
     };
 
     getDnsLogs = async (req: Request, res: Response): Promise<void> => {
-        const limit = Number(req.query.limit) || 100;
+        const limit = parsePositiveInt(req.query.limit, 100);
         const logs = await this.deviceManager.getGatewayDnsLogs(limit);
         res.json({ success: true, logs });
     };

@@ -380,6 +380,25 @@ export async function runTrafficServiceTests() {
         assert.strictEqual(devices.has('192.168.1.80'), true, 'Registry must preserve canonical IP key');
         console.log('  ✓ Registry: Operations keyed by MAC preserve canonical memory keys without ghost duplicates');
     }
+
+    // Test 14: Defense-in-depth Invariant 1 - Cannot block or throttle gateway even if is_gateway flag is false
+    {
+        const { service, devices } = makeTrafficServiceSetup();
+        const gw = makeDevice({ ip: '192.168.1.1', mac: '00:00:00:00:00:01', is_gateway: true });
+        devices.set(gw.ip, gw);
+
+        await assert.rejects(
+            () => service.blockDevice('192.168.1.1'),
+            (err: any) => /Cannot block the gateway/.test(err.message)
+        );
+
+        await assert.rejects(
+            () => service.setSpeedLimit('192.168.1.1', 30),
+            (err: any) => /Gateway/.test(err.message)
+        );
+
+        console.log('  ✓ Defense-in-Depth: Invariant 1 rejects targeting gateway even if is_gateway flag is omitted');
+    }
 }
 
 

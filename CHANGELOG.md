@@ -2,6 +2,32 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.54] - 2026-09-18
+
+### Remediasi Adversarial Review: Eliminasi TOCTOU Race Re-Block, Transaksi Atomik, Gateway Defense-in-Depth, & Lifecycle Hardening (`backend-node`)
+- **Pencegahan TOCTOU Race Condition Resurrect Re-Block (CRIT-1)**:
+  - Mengamankan sinkronisasi snapshot scan di `DiscoveryService._scanNetworkImpl` (`discoveryService.ts`): state `is_blocked` dan `speed_limit` dalam memori yang sudah didefinisikan tidak akan tertimpa oleh nilai `dev.is_blocked = true` dari snapshot scan basi. Sinkronisasi dari luar hanya diterima jika status lokal belum terdefinisi atau jika database mengindikasikan status unblock eksternal (`dev.is_blocked === false`).
+  - Menambahkan late-check verifikasi otoritatif database via `this.db.getDeviceByMac(currentDev.mac, currentNetId)` pada loop `autoReblockTargets` dan `autoThrottleTargets`. Jika record database menunjukkan perangkat sudah tidak diblokir/dibatasi (misalnya di-unblock user saat scan sedang berjalan), proses auto-reblock dibatalkan seketika.
+- **Penguatan Invariant 3 (Atomisitas Transaksi SQLite) pada Repositori (CRIT-2)**:
+  - Membungkus seluruh mutasi multi-query di `DeviceRepository`: `setBlocked` (update devices, linked MACs, upsert device_profiles), `setSpeedLimit` (update devices, sinkronisasi profil), dan `setAlias` (upsert profile + update devices) ke dalam `this.db.transaction(() => { ... })()`.
+  - Membungkus seluruh operasi pembersihan di `RetentionRepository.pruneStaleRandomizedMacs` (penghapusan devices usang, penghapusan archived stale, dan pembersihan orphan profiles) ke dalam `this.db.transaction(() => { ... })()`.
+- **Penguatan Invariant 1 (Gateway Immunity) Defense-in-Depth di `TrafficService` (IMP-1)**:
+  - Menambahkan verifikasi post-resolution gateway di `blockDevice`, `setSpeedLimit`, dan `redirectDevice`: jika perangkat target ternyata memiliki IP atau MAC yang sama dengan gateway yang baru ditemukan (bahkan jika flag `is_gateway` belum sempat terpasang di memori), operasi langsung ditolak dengan `InvariantViolationError`.
+  - Menambahkan automated regression test (Test 14) di `tests/unit_trafficService.test.ts`.
+- **Eliminasi Memory Leak & Lifecycle Hardening (IMP-2, IMP-3, IMP-4)**:
+  - **IMP-2**: Menambahkan pruning berbasis LRU & TTL pada `profileEnrichmentCooldowns` di `ReconciliationService` jika ukuran map melebihi 500 entri.
+  - **IMP-3**: Membersihkan `debouncedScanTimer` pada `DiscoveryService.stopWatchdog()`, menambahkan method `shutdown()` pada `IReconciliationService` dan `ReconciliationService` untuk membersihkan seluruh timer cooldown dan timer enrichment, serta memanggilnya dari `DeviceManager.shutdown()` dan `ServiceContainer.shutdown()`.
+  - **IMP-4**: Menghentikan sesi gaming yang terasosiasi via `this.gamingService.stopGamingSession(normMac)` saat perangkat dihapus di `DeviceManager._deleteDeviceImpl`, serta menggunakan kunci memori kanonikal `deviceMemKey(dev)` pada `_clearAllDevicesImpl`.
+- **Polish & Sanitasi Kode (MIN-1 s/d MIN-4)**:
+  - Mengonsolidasikan fungsi duplikat `isGenericProfileLabel` di `deviceUtils.ts` dengan me-reexport dari `databaseUtils.ts`.
+  - Menggunakan fungsi validasi query `parsePositiveInt` pada `GatewayController.getDnsLogs` dan `BettercapController.getCredentials`.
+  - Mendaftarkan global error handlers `process.on('unhandledRejection')` dan `process.on('uncaughtException')` di `src/app.ts` untuk menjamin pencatatan terstruktur saat terjadi crash asynchronous tak terduga.
+- **Hasil Verifikasi Komprehensif**:
+  - TypeScript Compiler: 0 error / 0 warning (`npx tsc --noEmit --noUnusedLocals --noUnusedParameters`).
+  - Node.js Unit Tests: 96 tests lulus (100% green).
+  - Python Test Suite: 379 tests lulus (100% green).
+  - Frontend Production Build: Vite build sukses (8.63s).
+
 ## [v2.41.53] - 2026-09-18
 
 ### Hardening Arsitektur: Graceful Teardown Wiring, Transaksi Atomik SQLite, Ghost Key Eviction, & Scoping Jaringan Gaming (`backend-node`)

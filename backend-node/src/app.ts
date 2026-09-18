@@ -24,7 +24,7 @@ app.use(requestLogger());
 
 // Security Headers: Helmet hardening with cross-origin resource policy enabled for SPA/Vite
 app.use(helmet({
-    crossOriginResourcePolicy: { policy: 'cross-origin' }
+    crossOriginResourcePolicy: { policy: 'cross-origin' },
 }));
 
 // CORS: allowlist ketat (localhost / 127.0.0.1 / file:// + ALLOWED_ORIGINS).
@@ -89,6 +89,14 @@ async function start() {
         logger.error({ module: 'Boot', err: error }, `Failed to initialize backend services: ${error?.message || error}`);
     }
 }
+
+process.on('unhandledRejection', (reason) => {
+    logger.error({ module: 'Process', err: reason }, `Unhandled promise rejection: ${reason instanceof Error ? reason.message : reason}`);
+});
+
+process.on('uncaughtException', (error) => {
+    logger.error({ module: 'Process', err: error }, `Uncaught exception: ${error.message}`);
+});
 
 registerGracefulShutdown({ container, deviceManager, pythonBridge, databaseService, server });
 start();

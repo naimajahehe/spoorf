@@ -494,6 +494,9 @@ export class DeviceManager extends EventEmitter implements IDeviceManager {
             this.retentionTimer = null;
         }
         this.discoveryService.stopWatchdog();
+        if (this.reconciliationService && typeof this.reconciliationService.shutdown === 'function') {
+            this.reconciliationService.shutdown();
+        }
     }
 
     /**
@@ -680,6 +683,12 @@ export class DeviceManager extends EventEmitter implements IDeviceManager {
             } else if (dev.session_id) {
                 await this.python.stopSpoof(dev.session_id);
             }
+            if (this.gamingService && 'stopGamingSession' in this.gamingService) {
+                await (this.gamingService as any).stopGamingSession(dev.mac.toLowerCase());
+            }
+        }
+        if (this.gamingService && 'stopGamingSession' in this.gamingService) {
+            await (this.gamingService as any).stopGamingSession(normMac);
         }
 
         await this.db.deleteDevice(mac, this.currentNetworkId);
@@ -707,7 +716,7 @@ export class DeviceManager extends EventEmitter implements IDeviceManager {
         }
         this.devices.clear();
         for (const dev of preserved) {
-            this.devices.set(dev.ip, dev);
+            this.devices.set(deviceMemKey(dev), dev);
             await this.db.saveDevice(dev, this.currentNetworkId);
         }
         this.emit('devicesUpdated', Array.from(this.devices.values()));

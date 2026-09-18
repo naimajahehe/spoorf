@@ -119,6 +119,10 @@ export class TrafficService extends EventEmitter implements ITrafficService {
             throw new Error(`Gateway IP must be an RFC 1918 private address (${gateway.ip})`);
         }
 
+        if (device.ip === gateway.ip || (device.mac && gateway.mac && device.mac.toLowerCase() === gateway.mac.toLowerCase())) {
+            throw new Error(`Cannot block the gateway (${ip})`);
+        }
+
         // Pre-Flight Validation: Verifikasi apakah target benar-benar aktif di jaringan L2
         device = await this.verifyPreFlightLiveness(device, gateway.ip);
 
@@ -301,6 +305,10 @@ export class TrafficService extends EventEmitter implements ITrafficService {
             throw new Error('Gateway not found');
         }
 
+        if (device.ip === gateway.ip || (device.mac && gateway.mac && device.mac.toLowerCase() === gateway.mac.toLowerCase())) {
+            throw new Error(`Perangkat infrastruktur (Gateway) dilindungi dan tidak dapat dibatasi kecepatannya.`);
+        }
+
         if (cleanLimit < 100) {
             if (gateway.ip && !isPrivateIpv4(gateway.ip)) {
                 throw new Error(`Gateway IP must be an RFC 1918 private address (${gateway.ip})`);
@@ -447,6 +455,10 @@ export class TrafficService extends EventEmitter implements ITrafficService {
 
         if (gw.ip && !isPrivateIpv4(gw.ip)) {
             throw new Error(`Gateway IP must be an RFC 1918 private address (${gw.ip})`);
+        }
+
+        if (device.ip === gw.ip || (device.mac && gw.mac && device.mac.toLowerCase() === gw.mac.toLowerCase())) {
+            throw new Error(`Cannot redirect the gateway (${ip})`);
         }
 
         const res = await this.python.startRedirect(

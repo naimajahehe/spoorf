@@ -251,79 +251,86 @@ export class DeviceRepository implements IDeviceRepository {
             if (maybeNetworkId) networkId = maybeNetworkId;
         }
 
-        const updateDeviceStmt = this.db.prepare(`
-            UPDATE devices 
-            SET is_blocked = ?, session_id = ?, is_online = CASE WHEN ? = 1 THEN 1 ELSE is_online END, last_seen = datetime('now', 'localtime')
-            WHERE LOWER(mac) = LOWER(?) AND network_id = ?
-        `);
-        updateDeviceStmt.run(isBlocked ? 1 : 0, sessionId || null, isBlocked ? 1 : 0, normMac, networkId);
-
-        const dev = this.db.prepare(`SELECT * FROM devices WHERE LOWER(mac) = LOWER(?) AND network_id = ?`).get(normMac, networkId) as any;
-        if (dev) {
-            const pId = dev.profile_id || dev.candidate_profile_id || deriveProfileId(dev.mac);
-
-            // Dapatkan linked_macs + nama profil yang ada
-            const existingProf = this.db.prepare(`SELECT linked_macs, alias, hostname FROM device_profiles WHERE id = ?`).get(pId) as any;
-            let linkedMacs: string[] = [normMac];
-            if (existingProf && existingProf.linked_macs) {
-                const parsed = safeParseJson<string[]>(existingProf.linked_macs, []);
-                linkedMacs = Array.from(new Set([...parsed, normMac]));
-            }
-
-            // Sinkronkan status blokir dan speed limit untuk SELURUH entri yang terafiliasi dengan profil ini di jaringan ini.
-            const placeholders = linkedMacs.map(() => '?').join(',');
-            if (!isBlocked) {
-                this.db.prepare(`
-                    UPDATE devices 
-                    SET is_blocked = 0, session_id = NULL, speed_limit = 100 
-                    WHERE (profile_id = ? OR LOWER(mac) IN (${placeholders})) AND network_id = ?
-                `).run(pId, ...linkedMacs.map(m => m.toLowerCase()), networkId);
-            } else {
-                this.db.prepare(`
-                    UPDATE devices 
-                    SET is_blocked = 1, speed_limit = 0 
-                    WHERE (profile_id = ? OR LOWER(mac) IN (${placeholders})) AND network_id = ?
-                `).run(pId, ...linkedMacs.map(m => m.toLowerCase()), networkId);
-            }
-
-            // Naikkan nama profil ke hostname PERSONAL bila ada; jangan biarkan 'Unknown'/generik
-            const candidate = dev.alias || dev.hostname || '';
-            const healedAlias = betterProfileName(existingProf?.alias, candidate) || 'Target Device';
-            const healedHost = betterProfileName(existingProf?.hostname, dev.hostname) || dev.hostname;
-
-            const upsertProfileStmt = this.db.prepare(`
-                INSERT INTO device_profiles (id, alias, hostname, os, vendor, device_type, linked_macs, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now', 'localtime'))
-                ON CONFLICT(id) DO UPDATE SET
-                    alias = excluded.alias,
-                    hostname = excluded.hostname,
-                    linked_macs = excluded.linked_macs,
-                    updated_at = datetime('now', 'localtime')
+        const setBlockedTx = this.db.transaction(() => {
+            const updateDeviceStmt = this.db.prepare(`
+                UPDATE devices 
+                SET is_blocked = ?, session_id = ?, is_online = CASE WHEN ? = 1 THEN 1 ELSE is_online END, last_seen = datetime('now', 'localtime')
+                WHERE LOWER(mac) = LOWER(?) AND network_id = ?
             `);
-            upsertProfileStmt.run(
-                pId, healedAlias, healedHost, dev.os, dev.vendor, dev.device_type,
-                JSON.stringify(linkedMacs)
-            );
+            updateDeviceStmt.run(isBlocked ? 1 : 0, sessionId || null, isBlocked ? 1 : 0, normMac, networkId);
 
-            this.db.prepare(`UPDATE devices SET profile_id = ? WHERE LOWER(mac) = LOWER(?) AND network_id = ?`).run(pId, normMac, networkId);
-        }
+            const dev = this.db.prepare(`SELECT * FROM devices WHERE LOWER(mac) = LOWER(?) AND network_id = ?`).get(normMac, networkId) as any;
+            if (dev) {
+                const pId = dev.profile_id || dev.candidate_profile_id || deriveProfileId(dev.mac);
+
+                // Dapatkan linked_macs + nama profil yang ada
+                const existingProf = this.db.prepare(`SELECT linked_macs, alias, hostname FROM device_profiles WHERE id = ?`).get(pId) as any;
+                let linkedMacs: string[] = [normMac];
+                if (existingProf && existingProf.linked_macs) {
+                    const parsed = safeParseJson<string[]>(existingProf.linked_macs, []);
+                    linkedMacs = Array.from(new Set([...parsed, normMac]));
+                }
+
+                // Sinkronkan status blokir dan speed limit untuk SELURUH entri yang terafiliasi dengan profil ini di jaringan ini.
+                const placeholders = linkedMacs.map(() => '?').join(',');
+                if (!isBlocked) {
+                    this.db.prepare(`
+                        UPDATE devices 
+                        SET is_blocked = 0, session_id = NULL, speed_limit = 100 
+                        WHERE (profile_id = ? OR LOWER(mac) IN (${placeholders})) AND network_id = ?
+                    `).run(pId, ...linkedMacs.map(m => m.toLowerCase()), networkId);
+                } else {
+                    this.db.prepare(`
+                        UPDATE devices 
+                        SET is_blocked = 1, speed_limit = 0 
+                        WHERE (profile_id = ? OR LOWER(mac) IN (${placeholders})) AND network_id = ?
+                    `).run(pId, ...linkedMacs.map(m => m.toLowerCase()), networkId);
+                }
+
+                // Naikkan nama profil ke hostname PERSONAL bila ada; jangan biarkan 'Unknown'/generik
+                const candidate = dev.alias || dev.hostname || '';
+                const healedAlias = betterProfileName(existingProf?.alias, candidate) || 'Target Device';
+                const healedHost = betterProfileName(existingProf?.hostname, dev.hostname) || dev.hostname;
+
+                const upsertProfileStmt = this.db.prepare(`
+                    INSERT INTO device_profiles (id, alias, hostname, os, vendor, device_type, linked_macs, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now', 'localtime'))
+                    ON CONFLICT(id) DO UPDATE SET
+                        alias = excluded.alias,
+                        hostname = excluded.hostname,
+                        linked_macs = excluded.linked_macs,
+                        updated_at = datetime('now', 'localtime')
+                `);
+                upsertProfileStmt.run(
+                    pId, healedAlias, healedHost, dev.os, dev.vendor, dev.device_type,
+                    JSON.stringify(linkedMacs)
+                );
+
+                this.db.prepare(`UPDATE devices SET profile_id = ? WHERE LOWER(mac) = LOWER(?) AND network_id = ?`).run(pId, normMac, networkId);
+            }
+        });
+        setBlockedTx();
     }
 
     async setSpeedLimit(mac: string, speedLimit: number, networkId: string = 'net_default'): Promise<Device> {
         const normMac = mac.toLowerCase();
-        const updateStmt = this.db.prepare(`
-            UPDATE devices 
-            SET speed_limit = ?, last_seen = datetime('now', 'localtime')
-            WHERE LOWER(mac) = LOWER(?) AND network_id = ?
-        `);
-        const info = updateStmt.run(speedLimit, normMac, networkId);
-        if (info.changes === 0) throw new Error(`Device with MAC ${mac} not found in network ${networkId}`);
+        const setSpeedLimitTx = this.db.transaction(() => {
+            const updateStmt = this.db.prepare(`
+                UPDATE devices 
+                SET speed_limit = ?, last_seen = datetime('now', 'localtime')
+                WHERE LOWER(mac) = LOWER(?) AND network_id = ?
+            `);
+            const info = updateStmt.run(speedLimit, normMac, networkId);
+            if (info.changes === 0) throw new Error(`Device with MAC ${mac} not found in network ${networkId}`);
 
-        const dev = this.db.prepare(`SELECT * FROM devices WHERE LOWER(mac) = LOWER(?) AND network_id = ?`).get(normMac, networkId) as any;
-        const pId = dev?.profile_id || dev?.candidate_profile_id;
-        if (pId) {
-            this.db.prepare(`UPDATE devices SET speed_limit = ?, profile_id = COALESCE(profile_id, ?) WHERE (profile_id = ? OR LOWER(mac) = LOWER(?)) AND network_id = ?`).run(speedLimit, pId, pId, normMac, networkId);
-        }
+            const dev = this.db.prepare(`SELECT * FROM devices WHERE LOWER(mac) = LOWER(?) AND network_id = ?`).get(normMac, networkId) as any;
+            const pId = dev?.profile_id || dev?.candidate_profile_id;
+            if (pId) {
+                this.db.prepare(`UPDATE devices SET speed_limit = ?, profile_id = COALESCE(profile_id, ?) WHERE (profile_id = ? OR LOWER(mac) = LOWER(?)) AND network_id = ?`).run(speedLimit, pId, pId, normMac, networkId);
+            }
+            return dev;
+        });
+        const dev = setSpeedLimitTx();
         return this.rowToDevice(dev);
     }
 
@@ -336,37 +343,40 @@ export class DeviceRepository implements IDeviceRepository {
 
         const pId = existing.profile_id || deriveProfileId(normMac);
 
-        // Ambil linked_macs profil yang ada
-        const existingProf = this.db.prepare(`SELECT linked_macs FROM device_profiles WHERE id = ?`).get(pId) as any;
-        let linkedMacs: string[] = [normMac];
-        if (existingProf && existingProf.linked_macs) {
-            const parsed = safeParseJson<string[]>(existingProf.linked_macs, []);
-            linkedMacs = Array.from(new Set([...parsed, normMac]));
-        }
+        const setAliasTx = this.db.transaction(() => {
+            // Ambil linked_macs profil yang ada
+            const existingProf = this.db.prepare(`SELECT linked_macs FROM device_profiles WHERE id = ?`).get(pId) as any;
+            let linkedMacs: string[] = [normMac];
+            if (existingProf && existingProf.linked_macs) {
+                const parsed = safeParseJson<string[]>(existingProf.linked_macs, []);
+                linkedMacs = Array.from(new Set([...parsed, normMac]));
+            }
 
-        this.db.prepare(`
-            INSERT INTO device_profiles (id, alias, hostname, os, vendor, device_type, linked_macs, dhcp_fingerprint, dhcp_vendor_class, dhcp_client_id, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', 'localtime'))
-            ON CONFLICT(id) DO UPDATE SET
-                alias = excluded.alias,
-                linked_macs = excluded.linked_macs,
-                dhcp_fingerprint = COALESCE(excluded.dhcp_fingerprint, device_profiles.dhcp_fingerprint),
-                dhcp_vendor_class = COALESCE(excluded.dhcp_vendor_class, device_profiles.dhcp_vendor_class),
-                dhcp_client_id = COALESCE(excluded.dhcp_client_id, device_profiles.dhcp_client_id),
-                updated_at = datetime('now', 'localtime')
-        `).run(
-            pId, alias, existing.hostname, existing.os, existing.vendor, existing.device_type,
-            JSON.stringify(linkedMacs),
-            existing.dhcp_fingerprint || null,
-            existing.dhcp_vendor_class || null,
-            existing.dhcp_client_id || null
-        );
+            this.db.prepare(`
+                INSERT INTO device_profiles (id, alias, hostname, os, vendor, device_type, linked_macs, dhcp_fingerprint, dhcp_vendor_class, dhcp_client_id, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', 'localtime'))
+                ON CONFLICT(id) DO UPDATE SET
+                    alias = excluded.alias,
+                    linked_macs = excluded.linked_macs,
+                    dhcp_fingerprint = COALESCE(excluded.dhcp_fingerprint, device_profiles.dhcp_fingerprint),
+                    dhcp_vendor_class = COALESCE(excluded.dhcp_vendor_class, device_profiles.dhcp_vendor_class),
+                    dhcp_client_id = COALESCE(excluded.dhcp_client_id, device_profiles.dhcp_client_id),
+                    updated_at = datetime('now', 'localtime')
+            `).run(
+                pId, alias, existing.hostname, existing.os, existing.vendor, existing.device_type,
+                JSON.stringify(linkedMacs),
+                existing.dhcp_fingerprint || null,
+                existing.dhcp_vendor_class || null,
+                existing.dhcp_client_id || null
+            );
 
-        this.db.prepare(`
-            UPDATE devices 
-            SET alias = ?, profile_id = ?, last_seen = datetime('now', 'localtime') 
-            WHERE (LOWER(mac) = LOWER(?) OR profile_id = ?) AND network_id = ?
-        `).run(alias, pId, normMac, pId, networkId);
+            this.db.prepare(`
+                UPDATE devices 
+                SET alias = ?, profile_id = ?, last_seen = datetime('now', 'localtime') 
+                WHERE (LOWER(mac) = LOWER(?) OR profile_id = ?) AND network_id = ?
+            `).run(alias, pId, normMac, pId, networkId);
+        });
+        setAliasTx();
 
         const updated = await this.getByMac(normMac, networkId);
         return updated!;

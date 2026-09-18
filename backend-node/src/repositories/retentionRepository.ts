@@ -69,8 +69,6 @@ export class RetentionRepository implements IRetentionRepository {
               AND last_seen IS NOT NULL
               AND last_seen < datetime('now', 'localtime', '-${days} days')
         `);
-        const devResult = deleteDevicesStmt.run();
-
         // 2. Hapus entri MAC acak yang sudah terarsipkan (is_archived = 1), offline > 1 jam, dan TIDAK diblokir
         const deleteArchivedStmt = this.db.prepare(`
             DELETE FROM devices
@@ -85,7 +83,6 @@ export class RetentionRepository implements IRetentionRepository {
               AND last_seen IS NOT NULL
               AND last_seen < datetime('now', 'localtime', '-1 hours')
         `);
-        const archResult = deleteArchivedStmt.run();
 
         // 3. Bersihkan profil duplikat 'Target Device' yang tidak memiliki perangkat aktif lagi di tabel devices
         const deleteOrphanProfilesStmt = this.db.prepare(`
@@ -93,12 +90,23 @@ export class RetentionRepository implements IRetentionRepository {
             WHERE alias = 'Target Device'
               AND id NOT IN (SELECT DISTINCT profile_id FROM devices WHERE profile_id IS NOT NULL)
         `);
-        const profResult = deleteOrphanProfilesStmt.run();
 
-        const totalDeletedDevices = devResult.changes + archResult.changes;
-        if ((totalDeletedDevices > 0 || profResult.changes > 0) && this.log?.info) {
-            this.log.info({ totalDeletedDevices, deletedProfiles: profResult.changes }, `[Garbage Collector] Berhasil membersihkan ${totalDeletedDevices} MAC acak usang dan ${profResult.changes} profil duplikat.`);
+        const pruneTx = this.db.transaction(() => {
+            const devResult = deleteDevicesStmt.run();
+            const archResult = deleteArchivedStmt.run();
+            const profResult = deleteOrphanProfilesStmt.run();
+            return {
+                devChanges: devResult.changes,
+                archChanges: archResult.changes,
+                profChanges: profResult.changes
+            };
+        });
+
+        const { devChanges, archChanges, profChanges } = pruneTx();
+        const totalDeletedDevices = devChanges + archChanges;
+        if ((totalDeletedDevices > 0 || profChanges > 0) && this.log?.info) {
+            this.log.info({ totalDeletedDevices, deletedProfiles: profChanges }, `[Garbage Collector] Berhasil membersihkan ${totalDeletedDevices} MAC acak usang dan ${profChanges} profil duplikat.`);
         }
-        return { deletedDevices: totalDeletedDevices, deletedProfiles: profResult.changes };
+        return { deletedDevices: totalDeletedDevices, deletedProfiles: profChanges };
     }
 }

@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import { IDeviceManager, IPythonBridge, ILicenseManager } from '../interfaces';
 import { FeatureLockedError } from '../services/licenseManager';
+import { parsePositiveInt } from '../middlewares/errorHandler';
 
 export class BettercapController {
     constructor(
@@ -72,7 +73,7 @@ export class BettercapController {
     };
 
     getCredentials = async (req: Request, res: Response): Promise<void> => {
-        const limit = Number(req.query.limit) || 100;
+        const limit = parsePositiveInt(req.query.limit, 100);
         const credentials = await (this.service as any).getBettercapCredentials(limit);
         res.json({ success: true, credentials });
     };

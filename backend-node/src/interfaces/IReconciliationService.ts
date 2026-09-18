@@ -23,4 +23,5 @@ export interface IReconciliationService extends EventEmitter {
     armOfflineCooldown(mac: string, hostnameOrIp?: string): void;
     clearOfflineCooldown(mac: string): boolean;
     hasOfflineCooldown(mac: string): boolean;
+    shutdown?(): void;
 }

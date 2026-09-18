@@ -94,6 +94,10 @@ export class ReconciliationService extends EventEmitter implements IReconciliati
         this.offlineCooldownTimers.clear();
     }
 
+    shutdown(): void {
+        this.onNetworkChanged();
+    }
+
     armOfflineCooldown(mac: string, hostnameOrIp?: string): void {
         const normMac = (mac || '').toLowerCase();
         if (!normMac) return;
@@ -654,6 +658,14 @@ export class ReconciliationService extends EventEmitter implements IReconciliati
         this.assertProfileRefreshGeneration(generation);
         for (const target of targets) {
             this.profileEnrichmentCooldowns.set(target.mac, completedAt);
+        }
+        if (this.profileEnrichmentCooldowns.size > 500) {
+            const cutoff = completedAt - PROFILE_ENRICHMENT_COOLDOWN_MS;
+            for (const [mac, time] of this.profileEnrichmentCooldowns.entries()) {
+                if (time < cutoff) {
+                    this.profileEnrichmentCooldowns.delete(mac);
+                }
+            }
         }
         this.assertProfileRefreshGeneration(generation);
         if (scope === 'all') {

@@ -61,8 +61,11 @@ export class ServiceContainer implements IServiceContainer {
             if (this.deviceManager && typeof this.deviceManager.shutdown === 'function') {
                 this.deviceManager.shutdown();
             }
+            if (this.reconciliationService && typeof this.reconciliationService.shutdown === 'function') {
+                this.reconciliationService.shutdown();
+            }
         } catch (err) {
-            this.log.warn({ err }, 'Error during DeviceManager shutdown');
+            this.log.warn({ err }, 'Error during DeviceManager/ReconciliationService shutdown');
         }
 
         try {

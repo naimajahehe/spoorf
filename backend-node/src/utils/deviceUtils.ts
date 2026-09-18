@@ -39,20 +39,7 @@ export function isPrivateIpv4(ip: unknown): ip is string {
         || (octets[0] === 192 && octets[1] === 168);
 }
 
-export function isGenericProfileLabel(
-    value: unknown,
-    field: 'vendor' | 'device_type' | 'hostname' | 'os'
-): boolean {
-    if (typeof value !== 'string' || value.trim() === '') return true;
-    const normalized = value.trim().toLowerCase();
-    if (normalized === '-' || normalized === 'n/a' || normalized === 'none') return true;
-    if (normalized === 'unknown' || normalized.startsWith('unknown ')) return true;
-    if (normalized === 'generic' || normalized.startsWith('generic ')) return true;
-    if (field === 'vendor' && normalized.startsWith('private device')) return true;
-    if (field === 'hostname' && normalized === 'device') return true;
-    if (field === 'device_type' && (normalized === 'device' || normalized === 'client device')) return true;
-    return false;
-}
+export { isGenericProfileLabel } from './databaseUtils';
 
 export function isIpInSameSubnet(ip: string, gatewayIp: string): boolean {
     if (!ip || !gatewayIp) return true;
