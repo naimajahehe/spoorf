@@ -25,7 +25,10 @@ export const EnvSchema = z.object({
     CORS_ORIGIN: z.string().optional(),
     ALLOWED_HOSTS: z.string().optional(),
     SPOORF_CLOUD_URL: HttpUrlSchema.default('https://api.spoorf.app/v1'),
-    SPOORF_ALLOW_DEMO_LICENSE: z.preprocess(v => v === 'true', z.boolean().default(false))
+    SPOORF_ALLOW_DEMO_LICENSE: z.preprocess(v => v === 'true', z.boolean().default(false)),
+    // Batas waktu (ms) untuk auth cloud. Default 5000 (bukan 800 yang lama & agresif)
+    // agar login sah lewat koneksi lambat tak keburu di-abort saat fallback demo nonaktif.
+    SPOORF_CLOUD_AUTH_TIMEOUT_MS: z.coerce.number().int().positive().default(5000)
 });
 
 export type EnvConfig = z.infer<typeof EnvSchema>;

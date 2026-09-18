@@ -59,4 +59,17 @@ export async function runEnvTests() {
 
         console.log('  ✓ Fail-Fast: Corrupt ports, invalid URLs, and unknown environments halt startup immediately');
     }
+
+    // 4. Cloud auth timeout: tunable with a sane default (replaces the aggressive hardcoded 800ms
+    //    that failed legitimate logins over slower links while demo fallback is disabled).
+    {
+        assert.strictEqual(EnvSchema.parse({}).SPOORF_CLOUD_AUTH_TIMEOUT_MS, 5000);
+        assert.strictEqual(
+            EnvSchema.parse({ SPOORF_CLOUD_AUTH_TIMEOUT_MS: '3000' }).SPOORF_CLOUD_AUTH_TIMEOUT_MS,
+            3000
+        );
+        assert.strictEqual(EnvSchema.safeParse({ SPOORF_CLOUD_AUTH_TIMEOUT_MS: '-1' }).success, false);
+        assert.strictEqual(EnvSchema.safeParse({ SPOORF_CLOUD_AUTH_TIMEOUT_MS: 'abc' }).success, false);
+        console.log('  ✓ EnvSchema: Cloud auth timeout tunable (default 5000ms), rejects invalid values');
+    }
 }

@@ -211,7 +211,7 @@ export class LicenseManager extends EventEmitter implements ILicenseManager {
                     platform: process.platform,
                     app_version: '2.21.0'
                 }),
-                signal: AbortSignal.timeout(800)
+                signal: AbortSignal.timeout(env.SPOORF_CLOUD_AUTH_TIMEOUT_MS)
             });
 
             if (res.ok) {
