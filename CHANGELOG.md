@@ -2,6 +2,15 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.63] - 2026-09-19
+
+### Perbaikan Bug HIGH: Over-Fusion Profil akibat Sinyal DHCP Generik (`backend-node`)
+- **Akar masalah (terbukti dari data live)**: `dhcp_fingerprint` "Android OS Signature (android-dhcp-16)" dan `dhcp_vendor_class` "android-dhcp-16" adalah sinyal OS-generik yang dibagi ~25 perangkat berbeda di jaringan, namun `calculateProfileMatchScore` memberinya +30 dan +15. Dikombinasikan dengan continuity (+15) → skor 60 (ambang fusing) TANPA kecocokan hostname sama sekali.
+- **Dampak nyata**: profil "A55-milik-Hanif" keliru menyerap OPPO-Reno13-F, Infinix-NOTE-50-Pro/40, dan A26-milik-Nade; A26 (perangkat berbeda) nyata di-ARP-cut 54 tick monitor (collateral blocking perangkat innocent).
+- **Perbaikan (`calculateProfileMatchScore`)**: DISKUALIFIKASI (skor 0) bila perangkat scan mengumumkan hostname yang JELAS BERBEDA dari hostname PERSONAL sebuah profil (dan bukan alias-nya). Dua perangkat dengan hostname berbeda bukan satu perangkat yang merotasi MAC. DUID Tier-1 (otoritatif) tetap mem-bypass guard ini.
+- **Tidak melemahkan kasus sah**: bila hostname COCOK (pelacakan model generik Galaxy-A14) atau DUID cocok, skor tetap seperti semula. Terverifikasi 118/118 test lulus (termasuk seluruh test skoring lama).
+- Test baru: `unit_profileOverfusion.test.ts` (4 test).
+
 ## [v2.41.62] - 2026-09-18
 
 ### Restorasi Kestabilan Penuh v2.41.36 pada Auto-Reblock, Auto-Throttle, & Reconciliation (`backend-node`)

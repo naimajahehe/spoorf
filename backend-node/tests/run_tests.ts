@@ -20,6 +20,7 @@ import { runArsenalGateTests } from './unit_arsenalGate.test';
 import { runErrorHandlerTests } from './unit_errorHandler.test';
 import { runSessionReaperTests } from './unit_sessionReaper.test';
 import { runIdentityReblockTests } from './unit_identityReblock.test';
+import { runProfileOverfusionTests } from './unit_profileOverfusion.test';
 
 async function main() {
     console.log('=====================================================');
@@ -205,6 +206,14 @@ async function main() {
         passed += 6;
     } catch (err: any) {
         console.error('❌ Identity Re-Block Guard Test Failed:', err);
+        failed++;
+    }
+
+    try {
+        await runProfileOverfusionTests();
+        passed += 4;
+    } catch (err: any) {
+        console.error('❌ Profile Over-Fusion Guard Test Failed:', err);
         failed++;
     }
 

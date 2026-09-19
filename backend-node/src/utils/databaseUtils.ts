@@ -101,6 +101,7 @@ export function isUsableClientId(cid: string | undefined | null): boolean {
 
 /** Scoring reason emitted for a stable DHCP client-id (DUID) instant match. */
 export const DUID_INSTANT_MATCH_REASON = 'duid_hardware_instant_match (+100)';
+export const HOSTNAME_MISMATCH_DISQUALIFY_REASON = 'hostname_mismatch_vs_personalized_profile (disqualified)';
 
 /** True when the profile match was decided by an authoritative DUID (client-id) match. */
 export function isDuidExactMatch(reasons: readonly string[]): boolean {
@@ -173,6 +174,16 @@ export function calculateProfileMatchScore(
     const sHost = (scanned.hostname || '').trim().toLowerCase();
     const pHost = (profile.hostname || '').trim().toLowerCase();
     const pAlias = (profile.alias || '').trim().toLowerCase();
+
+    // DISQUALIFIER: a scanned device that announces a hostname clearly DIFFERENT from a profile's
+    // PERSONALIZED hostname (and not equal to its alias) is a different physical device — not the
+    // same device rotating its MAC. Without this guard, any two phones sharing a generic OS-level
+    // DHCP signature (e.g. "android-dhcp-16", shared by ~25 devices) + timing continuity reach the
+    // fusing threshold (30+15+15=60) with ZERO hostname agreement, falsely fusing (and ARP-cutting)
+    // unrelated devices. DUID Tier-1 fast-track above is authoritative and bypasses this.
+    if (sHost && pHost && !isGenericFactoryHostname(pHost) && sHost !== pHost && sHost !== pAlias) {
+        return { score: 0, reasons: [HOSTNAME_MISMATCH_DISQUALIFY_REASON] };
+    }
 
     // 1. Hostname Evaluation (Maks 45 Poin)
     if (sHost && (sHost === pHost || sHost === pAlias)) {
