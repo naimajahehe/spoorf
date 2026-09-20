@@ -21,6 +21,7 @@ from .core.interceptor import SpoorfCertEngine, L7FlowManager
 from .core.bettercap import BettercapDNSEngine, BettercapPacketDissector, FastSYNScanner
 from .core.shield import shield_engine
 from .core.gaming import gaming_engine
+from .config import settings
 from .utils.logger import logger
 
 
@@ -141,7 +142,7 @@ class EngineContainer:
         )
 
         self.telemetry_sampler = NetworkTelemetrySampler()
-        self.executor = ThreadPoolExecutor(max_workers=5)
+        self.executor = ThreadPoolExecutor(max_workers=settings.MAX_WORKERS)
         self.liveness_daemon = LivenessWatchdogDaemon(
             event_callback=lambda evt: self.connection_manager.broadcast(evt)
         )

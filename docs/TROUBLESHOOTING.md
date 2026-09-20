@@ -49,7 +49,7 @@ taskkill /F /PID <PID>
 - **Database terkunci (`SQLITE_BUSY`):**
   - Pastikan tidak ada dua instance backend berjalan bersamaan pada file DB yang sama (Electron memakai `single instance lock`). WAL + `busy_timeout=5000ms` sudah diaktifkan.
 - **Reset data:** hentikan aplikasi lalu hapus `backend-node/data/sentinel.db*` (termasuk file `-wal`/`-shm`), atau panggil `DELETE /api/devices/reset`.
-- **401 Unauthorized saat memanggil API:** IPC token aktif (`SENTINEL_API_TOKEN`) — sertakan header `x-sentinel-token`, atau jalankan tanpa token di mode dev (lihat DEPLOYMENT §4.1).
+- **401 Unauthorized saat memanggil API:** Control-plane Python (:8001) mengaktifkan fail-closed auth by default. Sertakan header `x-sentinel-token: <token>` jika `SENTINEL_API_TOKEN` diset, atau bila di mode pengembangan lokal tanpa token, set `SENTINEL_ALLOW_INSECURE_DEV=1` di `.env` sebagai escape-hatch (lihat DEPLOYMENT §4.1).
 
 ---
 

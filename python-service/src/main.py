@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import sys
 
+from src.config import settings
+from src.utils.logger import logger
 from src.utils.preflight import preflight, EXIT_OK, EXIT_ERROR
 
 if sys.platform == 'win32':
@@ -10,16 +12,19 @@ if sys.platform == 'win32':
     except Exception:
         pass
 
-HOST = "127.0.0.1"
-PORT = 8001
+HOST = settings.HOST
+PORT = settings.PORT
 
 if __name__ == "__main__":
     # Pre-bind guard: cegah crash-loop akibat tabrakan port (WinError 10048).
     guard = preflight(HOST, PORT)
     if guard.action in (EXIT_OK, EXIT_ERROR):
-        print(f"[Preflight] {guard.message}", file=sys.stderr, flush=True)
+        if guard.action == EXIT_OK:
+            logger.info(f"[Preflight] {guard.message}")
+        else:
+            logger.error(f"[Preflight] {guard.message}")
         sys.exit(guard.exit_code)
 
     import uvicorn
-    print(f"[INFO] Launching NetCut Sentinel FastAPI Microservice on http://{HOST}:{PORT} ...")
+    logger.info(f"Launching NetCut Sentinel FastAPI Microservice on http://{HOST}:{PORT} ...")
     uvicorn.run("src.server:app", host=HOST, port=PORT, log_level="info", access_log=False)

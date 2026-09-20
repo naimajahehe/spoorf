@@ -1,10 +1,12 @@
-import sys
 import multiprocessing
+import sys
 
+from src.config import settings
+from src.utils.logger import logger
 from src.utils.preflight import preflight, EXIT_OK, EXIT_ERROR
 
-HOST = "127.0.0.1"
-PORT = 8001
+HOST = settings.HOST
+PORT = settings.PORT
 
 
 def main() -> int:
@@ -15,11 +17,15 @@ def main() -> int:
     # keluar cepat tanpa menyalakan side effect saat port sudah dipegang engine lain.
     guard = preflight(HOST, PORT)
     if guard.action in (EXIT_OK, EXIT_ERROR):
-        print(f"[Preflight] {guard.message}", file=sys.stderr, flush=True)
+        if guard.action == EXIT_OK:
+            logger.info(f"[Preflight] {guard.message}")
+        else:
+            logger.error(f"[Preflight] {guard.message}")
         return guard.exit_code
 
     import uvicorn
     from src.server import app
+    logger.info(f"Launching NetCut Sentinel FastAPI Microservice on http://{HOST}:{PORT} ...")
     uvicorn.run(app, host=HOST, port=PORT, log_level="info", access_log=False)
     return 0
 

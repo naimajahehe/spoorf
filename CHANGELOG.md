@@ -2,6 +2,37 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.67] - 2026-09-20
+
+### Item 7, Item 8, Item 9 — Centralized Config Engine, Universal Fail-Closed Auth Hardening, & Crash-Proof Structured JSON Logging (`python-service`)
+- **Item 7: Centralized Configuration Engine (`src/config.py`)**:
+  - Mengimplementasikan `EngineSettings(BaseModel)` berbasis Pydantic v2 dan `python-dotenv` sebagai single source of truth konfigurasi microservice.
+  - Memusatkan seluruh 7 pembacaan `os.getenv` yang tersebar, menghapus konfigurasi mati/unwired (`ARP_TIMEOUT`, `SPOOF_INTERVAL`).
+  - Mengeliminasi magic number `max_workers=5` di `src/container.py` dengan menghubungkannya ke `settings.MAX_WORKERS`.
+  - Mengeliminasi hardcoded `HOST="127.0.0.1"` dan `PORT=8001` di `src/main.py` dan `python-service/main.py`, memungkinkan override fleksibel via `ENGINE_HOST` dan `ENGINE_PORT`.
+  - Menyelaraskan versi aplikasi engine di `FastAPI(...)` dan `pyproject.toml` ke `v2.41.66`.
+  - Menyediakan facade backward compatibility di `src/utils/config.py` yang me-reexport `config = settings` tanpa breaking change pada impor lawas.
+- **Item 8: Universal Fail-Closed Auth Hardening (`src/config.py`, `src/server.py`, `src/api/routes/websocket.py`)**:
+  - Mengimplementasikan fungsi verifikasi otentikasi tunggal timing-safe `verify_api_token(provided_token)` berbasis `hmac.compare_digest`.
+  - Menerapkan arsitektur keamanan *Fail-Closed by Default*: engine pada port loopback menolak request unauthenticated ke endpoint selain `/health` dan `OPTIONS`.
+  - Mode produksi / frozen executable (`sys.frozen` atau `SENTINEL_ENV=production`) memberlakukan proteksi fail-closed mutlak demi melindungi raw socket Npcap dari proses lokal lain.
+  - Menyediakan dev escape-hatch terkelola via `SENTINEL_ALLOW_INSECURE_DEV=1` untuk menjaga keandalan DX saat standalone manual development.
+  - Menghubungkan guard yang sama secara konsisten pada HTTP middleware (`api_token_guard`) dan WebSocket handshake (`/ws/events`).
+- **Item 9: Crash-Proof Structured JSON Logging & Eliminasi Raw `print()`**:
+  - Menghapus 100% pemanggilan raw `print()` di `src/main.py` dan `python-service/main.py`, menggantikannya dengan `logger.info()` dan `logger.error()`.
+  - Mengimplementasikan `StructuredJSONFormatter` di `src/utils/logger.py` yang otomatis mengekstrak metadata kontekstual (`extra={...}`) ke dalam field `context` JSON.
+  - Menerapkan pengaman anti-crash `json.dumps(payload, default=str)` agar objek non-serializable (Scapy packets, raw byte buffers) tidak pernah memicu crash saat logging.
+  - Mengimplementasikan proteksi idempoten pada `setup_logger()` (`if not logger.handlers:`) untuk mencegah duplikasi log handler saat multiple re-imports.
+  - Menyediakan kontrol format logging dinamis via `LOG_FORMAT=text|json`.
+- **Automated TDD Verification (18 Unit Test Baru)**:
+  - `tests/test_config.py` (6 tests): Validasi default settings, env overrides, normalisasi log level/format, dan facade backward compatibility.
+  - `tests/test_structured_logging.py` (5 tests): Validasi format JSON, extra context, exception serialization, default=str safety, dan idempotency handler.
+  - `tests/test_auth_guard.py` (7 tests): Validasi token timing safety, fail-closed production, fail-closed default dev, dev escape hatch, dan public route exemption.
+- **Hasil Verifikasi Otomatis (100% Hijau)**:
+  - **Python Microservice**: **410 / 410 unit tests lulus** (0 gagal).
+  - **Node.js Orchestrator**: **118 / 118 unit tests lulus** (0 gagal).
+  - **Total**: **528 tests lulus** tanpa regresi sama sekali.
+
 ## [v2.41.66] - 2026-09-20
 
 ### P1-4, P1-5, P3-6 — Arsitektur Modular: Dekomposisi `server.py`, Dependency Injection (`Depends`), & Modern Lifespan Manager (`python-service`)

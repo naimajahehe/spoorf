@@ -143,6 +143,7 @@ from .core.shield import shield_engine
 from .core.spoofer import ARPSpoofer
 from .exceptions.custom import SessionNotFoundError, SpoofError
 from .lifespan import lifespan
+from .config import settings, verify_api_token
 from .utils.logger import logger
 
 # Redam peringatan kompatibilitas internal Scapy & Cryptography
@@ -159,37 +160,33 @@ logging.getLogger("scapy.runtime").setLevel(logging.ERROR)
 app = FastAPI(
     title="NetCut Sentinel Network Engine",
     description="Modular High-Performance Layer 2 Network Discovery, ARP Spoofing, L7 Interception & Bettercap Security Suite Engine",
-    version="2.3.0",
+    version=settings.APP_VERSION,
     lifespan=lifespan,
 )
 
 # CORS terkunci
-_py_cors_env = os.getenv("PY_CORS_ORIGINS", "").strip()
-_py_cors_origins = [o.strip() for o in _py_cors_env.split(",") if o.strip()] if _py_cors_env else []
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_py_cors_origins,
+    allow_origins=settings.cors_origins,
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# KEAMANAN (P1): Token bearer lokal opsional
+# KEAMANAN (P1): Universal Fail-Closed Token Guard
 _PUBLIC_PATHS = {"/health"}
 
 
 @app.middleware("http")
 async def api_token_guard(request: Request, call_next):
-    expected = os.getenv("SENTINEL_API_TOKEN")
-    if expected:
-        if request.url.path not in _PUBLIC_PATHS and request.method != "OPTIONS":
-            provided = request.headers.get("x-sentinel-token")
-            if not provided or not hmac.compare_digest(provided, expected):
-                return JSONResponse(
-                    status_code=401,
-                    content={"success": False, "error": "Unauthorized: missing or invalid API token."}
-                )
+    if request.url.path not in _PUBLIC_PATHS and request.method != "OPTIONS":
+        provided = request.headers.get("x-sentinel-token")
+        ok, reason = verify_api_token(provided, settings)
+        if not ok:
+            return JSONResponse(
+                status_code=401,
+                content={"success": False, "error": reason or "Unauthorized: missing or invalid API token."}
+            )
     return await call_next(request)
 
 

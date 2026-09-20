@@ -1,11 +1,6 @@
-import os
-from dotenv import load_dotenv
+"""Legacy configuration facade re-exporting centralized EngineSettings for backward compatibility."""
 
-load_dotenv()
+from ..config import EngineSettings, settings, verify_api_token  # noqa: F401
 
-class Config:
-    LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
-    ARP_TIMEOUT = int(os.getenv('ARP_TIMEOUT', '3'))
-    SPOOF_INTERVAL = int(os.getenv('SPOOF_INTERVAL', '1'))  # ubah default jadi 1 detik
-
-config = Config()
+# Backward-compatible alias preserving exact legacy interface
+config = settings

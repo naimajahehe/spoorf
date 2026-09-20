@@ -15,7 +15,7 @@ Dokumen ini bersifat **arsitektural/aspiratif**. Tabel berikut memisahkan apa ya
 | :--- | :---: | :--- |
 | **Exact-match Origin/Host anti drive-by** | ✅ Implemented (P1) | `backend-node/src/security.ts` — `isAllowedOrigin` parse URL & cocokkan `hostname` eksak (menutup bug prefix `http://localhost.evil.com`). |
 | **Validasi parameter Gateway + eksekusi tanpa shell** | ✅ Implemented (P1) | `spoofer.py::start` & `_ensure_host_gateway_locked`, `shield.py` — `is_valid_private_ip`/`is_valid_mac` + `subprocess` arg-list (bukan `shell=True`). |
-| **Ephemeral IPC Bearer Token (§2.4 / §3)** | ✅ Implemented (P1) | Di-generate `crypto.randomBytes(32)` di Electron `main.ts`; enforced di Node (`apiTokenGuard`, WS `io.use`) & Python (`api_token_guard` middleware + guard WS). Aktif saat `SENTINEL_API_TOKEN` diset. |
+| **Ephemeral IPC Bearer Token (§2.4 / §3)** | ✅ Implemented (P1) | Di-generate `crypto.randomBytes(32)` di Electron `main.ts`; enforced di Node (`apiTokenGuard`, WS `io.use`) & Python (`api_token_guard` middleware + guard WS). Fail-closed by default di Python (:8001); dev escape-hatch via `SENTINEL_ALLOW_INSECURE_DEV=1`. |
 | **Bind loopback (127.0.0.1) Node & Python** | ✅ Implemented | `app.ts` (HOST 127.0.0.1), `main.py` (uvicorn 127.0.0.1:8001). |
 | **SQL Injection prevention (parameterized)** | ✅ Implemented | `database.ts` — 100% prepared statement `better-sqlite3` (`?`). |
 | **Gateway/Self immunity (anti self-cut)** | ✅ Implemented | Invariants di `spoofer.py::start` + guard `deviceManager.ts`. |
