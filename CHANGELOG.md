@@ -2,6 +2,20 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.73] - 2026-09-20
+
+### Node.js DiagnosticsChannel TracingChannel Polyfill & Electron Runtime Fix
+- **Polyfill Kompatibilitas Node < 18.19 untuk Pino v10 (`TypeError: diagChan.tracingChannel is not a function`)**:
+  - Menyelesaikan akar masalah incompatibilitas antara Node.js v18.18.2 bawaan Electron 28 dengan Pino v10.3.1.
+  - Menambahkan modul `src/polyfills.ts` pada `desktop-electron` dan `backend-node` untuk menyediakan fallback implementation `tracingChannel` jika fungsi bawaan belum tersedia pada runtime.
+  - Memastikan channel mengembalikan `{ hasSubscribers: false, traceSync: (fn, ...) => fn.apply(...) }` sehingga serialisasi JSON Pino v10 berjalan dengan performa maksimal tanpa melempar exception.
+  - Mengimpor `src/polyfills.ts` di baris pertama `desktop-electron/src/main.ts`, `backend-node/src/app.ts`, dan `backend-node/src/utils/logger.ts`.
+- **Pengujian & Verifikasi**:
+  - Menambahkan test suite `backend-node/tests/unit_polyfills.test.ts` (119 Node tests lulus).
+  - Melakukan simulasi pemuatan di lingkungan bundle `win-unpacked/resources/app` dengan `tracingChannel` terhapus dan terbukti berjalan 100% normal.
+- **Repackaging Setup NSIS**:
+  - Mengompilasi ulang installer: `desktop-electron/dist-installer/Spoorf Sentinel Setup 2.21.0.exe` (103.8 MB).
+
 ## [v2.41.72] - 2026-09-20
 
 ### Desktop Electron Dependency Synchronization & NSIS Setup Packaging

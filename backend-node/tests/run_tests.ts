@@ -21,6 +21,7 @@ import { runErrorHandlerTests } from './unit_errorHandler.test';
 import { runSessionReaperTests } from './unit_sessionReaper.test';
 import { runIdentityReblockTests } from './unit_identityReblock.test';
 import { runProfileOverfusionTests } from './unit_profileOverfusion.test';
+import { runPolyfillsTests } from './unit_polyfills.test';
 
 async function main() {
     console.log('=====================================================');
@@ -214,6 +215,14 @@ async function main() {
         passed += 4;
     } catch (err: any) {
         console.error('❌ Profile Over-Fusion Guard Test Failed:', err);
+        failed++;
+    }
+
+    try {
+        await runPolyfillsTests();
+        passed += 1;
+    } catch (err: any) {
+        console.error('❌ Polyfills Test Failed:', err);
         failed++;
     }
 
