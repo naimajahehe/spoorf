@@ -405,6 +405,38 @@ export async function runApiRoutesTests() {
         console.log('  ✓ Contract: Socket.IO forwards profile refresh events and legacy aliases');
     }
 
+    // Contract: Socket.IO reactively broadcasts wifiStatus to all clients on telemetry transition or pythonReachable.
+    {
+        class FakeDeviceManager extends EventEmitter {
+            async getWifiInfo() {
+                return { connected: true, ssid: 'Office-Wifi', signal: '85%', interface_type: 'wifi', has_ipv6: false };
+            }
+        }
+        const manager = new FakeDeviceManager();
+        const httpServer = createServer();
+        const websocket = new WebSocketManager(httpServer, manager as any);
+        const broadcasts: Array<{ event: string; data: any }> = [];
+        (websocket as any).io.emit = (event: string, data: any) => {
+            broadcasts.push({ event, data });
+            return true;
+        };
+
+        // 1. Initial telemetry arrives: broadcasts wifiStatus with connected state
+        manager.emit('telemetry', { connected: true, ssid: 'Home-Fiber', signal: '90%', interface_type: 'wifi', has_ipv6: false });
+        // 2. Duplicate telemetry arrives: deduped, does not broadcast duplicate wifiStatus
+        manager.emit('telemetry', { connected: true, ssid: 'Home-Fiber', signal: '90%', interface_type: 'wifi', has_ipv6: false });
+        // 3. Network changes: broadcasts updated wifiStatus
+        manager.emit('telemetry', { connected: true, ssid: 'Coffee-Shop', signal: '70%', interface_type: 'wifi', has_ipv6: false });
+
+        const wifiEvents = broadcasts.filter(b => b.event === 'wifiStatus');
+        assert.strictEqual(wifiEvents.length, 2, 'Must broadcast wifiStatus only on state transition');
+        assert.strictEqual(wifiEvents[0].data.ssid, 'Home-Fiber');
+        assert.strictEqual(wifiEvents[1].data.ssid, 'Coffee-Shop');
+
+        await new Promise<void>(resolve => (websocket as any).io.close(() => resolve()));
+        console.log('  ✓ Contract: Socket.IO reactively broadcasts wifiStatus on state/SSID change');
+    }
+
     // Contract: SIGINT and SIGTERM share one idempotent shutdown handler.
     {
         const { registerGracefulShutdown } = require('../src/shutdown');

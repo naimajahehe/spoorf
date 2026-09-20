@@ -340,6 +340,7 @@ function App() {
     const handleRefreshApIsolation = useCallback(async () => {
         setIsRefreshingApIsolation(true);
         try {
+            await checkWifi();
             const res = await apiClient.getApIsolation();
             if (res && res.data) {
                 setApIsolation(res.data);
@@ -347,7 +348,7 @@ function App() {
         } finally {
             setIsRefreshingApIsolation(false);
         }
-    }, []);
+    }, [checkWifi]);
 
     const handleToggleMute = () => {
         setIsMuted(prev => {

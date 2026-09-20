@@ -281,6 +281,7 @@ export class DeviceManager extends EventEmitter implements IDeviceManager {
 
         // SP-2: Python (re)connect = engine fresh tanpa sesi spoof.
         this.python.on('pythonReachable', () => {
+            this.emit('pythonReachable');
             this.reconcileBlocksWithPython().catch(err => this.log.warn({ err }, `Notice reconcile on reconnect: ${err?.message || err}`));
         });
 

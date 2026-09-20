@@ -228,6 +228,7 @@ export class PythonBridge extends EventEmitter implements IPythonBridge {
         this.consecutiveHealthFailures = 0;
         if (this.ready) return;
         this.ready = true;
+        this.latestWifiInfo = null;
         this.log.info({ baseUrl: this.baseUrl }, `Python FastAPI microservice kembali terjangkau di ${this.baseUrl}`);
         if (!this.ws) {
             this.connectWebSocket();
@@ -721,7 +722,9 @@ export class PythonBridge extends EventEmitter implements IPythonBridge {
     }
 
     async getWifiInfo(): Promise<{ connected: boolean; ssid: string; signal: string; state: string; interface_type?: string; has_ipv6?: boolean }> {
-        if (this.latestWifiInfo) return this.latestWifiInfo;
+        if (this.latestWifiInfo && this.latestWifiInfo.connected && this.latestWifiInfo.ssid) {
+            return this.latestWifiInfo;
+        }
         try {
             const res = await this.fetchWithTimeout(`${this.baseUrl}/api/wifi`);
             if (!res.ok) throw new Error('Failed to get wifi info');

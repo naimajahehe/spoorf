@@ -77,9 +77,46 @@ export class WebSocketManager {
             this.io.emit('deviceDisconnected', device);
         });
 
+        let lastBroadcastWifiKey = '';
+
+        const broadcastWifiStatusIfChanged = (wifi: any) => {
+            if (!wifi) return;
+            const isConn = Boolean(wifi.connected);
+            const ssid = wifi.ssid || '';
+            const ifType = wifi.interface_type || 'wifi';
+            const hasIpv6 = Boolean(wifi.has_ipv6);
+            const signal = wifi.signal || '';
+            const key = `${isConn}:${ssid}:${ifType}:${hasIpv6}:${signal}`;
+            if (key !== lastBroadcastWifiKey) {
+                lastBroadcastWifiKey = key;
+                const wifiPayload = {
+                    connected: isConn,
+                    ssid,
+                    signal,
+                    interface_type: ifType,
+                    has_ipv6: hasIpv6,
+                    state: isConn ? 'connected' : 'disconnected'
+                };
+                this.io.emit('wifiStatus', wifiPayload);
+            }
+        };
+
         this.deviceManager.on('telemetry', (telemetry) => {
             // On-demand telemetry: stream hanya dipancarkan ke client di room 'telemetry_subscribers'
             this.io.to('telemetry_subscribers').emit('telemetryStream', telemetry);
+            // Broadcast status Wi-Fi ke seluruh klien jika ada perubahan (mis. baru boot, ganti SSID)
+            if (telemetry) {
+                broadcastWifiStatusIfChanged(telemetry);
+            }
+        });
+
+        this.deviceManager.on('pythonReachable', async () => {
+            try {
+                const wifi = await this.deviceManager.getWifiInfo();
+                if (wifi) {
+                    broadcastWifiStatusIfChanged(wifi);
+                }
+            } catch {}
         });
 
         this.deviceManager.on('autoReblocked', (device: any) => {
@@ -87,8 +124,14 @@ export class WebSocketManager {
             this.io.emit('autoReblocked', device);
         });
 
-        this.deviceManager.on('networkChanged', (data) => {
+        this.deviceManager.on('networkChanged', async (data) => {
             this.io.emit('networkChanged', data);
+            try {
+                const wifi = await this.deviceManager.getWifiInfo();
+                if (wifi) {
+                    broadcastWifiStatusIfChanged(wifi);
+                }
+            } catch {}
         });
 
         this.deviceManager.on('rogueDhcpAlert', (data) => {

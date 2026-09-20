@@ -2,6 +2,27 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.76] - 2026-09-20
+
+### Eliminasi Race Condition Startup & Reaktif Broadcast WebSocket Wi-Fi (`wifiStatus`)
+- **Akar Masalah "Tidak Ada Jaringan" (False-Positive) pada Header UI Electron**:
+  - Engine Python (`spoorf-engine.exe`) membutuhkan waktu ~1.5–2 detik untuk inisialisasi modul jaringan Scapy dan driver Npcap.
+  - Backend Node.js dan UI React terinisialisasi lebih cepat (<0.5 detik) dan langsung melakukan handshake Socket.IO serta pemanggilan `refreshAuthoritativeState`.
+  - Pada query awal `/api/wifi`, Python belum merespons (`ECONNREFUSED`), sehingga snapshot Wi-Fi awal dikembalikan sebagai `{ connected: false, ssid: '' }`.
+  - Sebelumnya, event `wifiStatus` hanya dipancarkan satu kali saat koneksi Socket.IO dibuka (`handleConnection`), dan tidak pernah dipancarkan ulang ke seluruh klien saat Python telah terhubung atau saat link-state Wi-Fi berubah.
+- **Perbaikan Reaktifitas WebSocket & Invalidasi Cache (`backend-node`)**:
+  - `WebSocketManager`: Menambahkan fungsi `broadcastWifiStatusIfChanged(wifi)` dengan deduplikasi state pintar (`connected`, `ssid`, `interface_type`, `has_ipv6`, `signal`).
+  - Memancarkan `wifiStatus` ke seluruh klien terhubung saat event `telemetry` (1Hz), event `pythonReachable` (Python kembali terjangkau/selesai boot), dan `networkChanged` (adapter beralih jaringan).
+  - `PythonBridge`: Mengosongkan cache usang `this.latestWifiInfo = null` seketika saat `markReachable()` terpicu, dan memperbarui `getWifiInfo()` agar selalu memvalidasi ulang status jika cache sebelumnya tidak terhubung.
+  - `DeviceManager`: Meneruskan event `pythonReachable` dari bridge ke subscriber hilir.
+- **Proteksi Status Transisi & Resolusi Graceful (`frontend-react`)**:
+  - `useWebSocket.ts`: Mempertahankan status `'detecting'` pada `applyWifiSnapshot` jika payload awal mengembalikan koneksi kosong/belum siap saat awal boot, mencegah flicker false-positive "Tidak Ada Jaringan".
+  - Menambahkan graceful fallback timeout 5 detik pada koneksi pertama: jika sistem memang benar-benar offline (tanpa koneksi sama sekali), status secara mulus bertransisi ke `'disconnected'`.
+  - Mengikat pemanggilan `checkWifi()` ke tombol refresh isolasi AP pada header.
+- **Hasil Pengujian & Kompilasi Ulang Installer**:
+  - Seluruh 546 unit test lulus 100% (422 Python + 118 Node + 6 Electron).
+  - Berhasil mengompilasi frontend React (Vite) dan mengemas ulang installer NSIS: `desktop-electron/dist-installer/Spoorf Sentinel Setup 2.21.0.exe`.
+
 ## [v2.41.75] - 2026-09-20
 
 ### Native Runtime Alignment: Pino 9 Native Compatibility & Polyfill Elimination

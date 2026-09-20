@@ -212,13 +212,21 @@ export function useWebSocket() {
         const isConn = Boolean(wifi.connected);
         const ssid = wifi.ssid || '';
         const hasIpv6 = Boolean(wifi.has_ipv6);
-        setWifiInfo({
-            connected: isConn,
-            ssid,
-            signal: wifi.signal || '',
-            interface_type: wifi.interface_type || 'wifi',
-            has_ipv6: hasIpv6,
-            state: wifi.state || (isConn ? 'connected' : 'disconnected')
+        setWifiInfo(prev => {
+            let nextState = wifi.state || (isConn ? 'connected' : 'disconnected');
+            // Guard: jika snapshot menyatakan tidak terhubung tanpa SSID saat baru start,
+            // dan sebelumnya berstatus 'detecting', pertahankan 'detecting' agar tidak langsung flicker "Tidak Ada Jaringan".
+            if (!isConn && !ssid && prev?.state === 'detecting') {
+                nextState = 'detecting';
+            }
+            return {
+                connected: isConn,
+                ssid: ssid || (nextState === 'detecting' ? (prev?.ssid || '') : ''),
+                signal: wifi.signal || prev?.signal || '',
+                interface_type: wifi.interface_type || prev?.interface_type || 'wifi',
+                has_ipv6: hasIpv6,
+                state: nextState
+            };
         });
         if (isConn && ssid) {
             try { localStorage.setItem('sentinel_last_ssid', ssid); } catch {}
@@ -393,6 +401,17 @@ export function useWebSocket() {
         const newSocket = io(WS_URL, apiToken ? { auth: { token: apiToken } } : undefined);
         socketRef.current = newSocket;
         setSocket(newSocket);
+
+        // Fallback: jika setelah 5 detik sistem masih dalam status 'detecting' dan belum terhubung,
+        // selesaikan status menjadi 'disconnected' (mencegah spinner tanpa akhir jika memang offline).
+        const detectingTimeout = setTimeout(() => {
+            setWifiInfo(prev => {
+                if (prev?.state === 'detecting' && !prev.connected) {
+                    return { ...prev, state: 'disconnected' };
+                }
+                return prev;
+            });
+        }, 5000);
 
         newSocket.on('connect', () => {
             console.log('WebSocket connected to NetCut Sentinel Backend');
@@ -955,6 +974,7 @@ export function useWebSocket() {
         });
 
         return () => {
+            clearTimeout(detectingTimeout);
             refreshAbortControllerRef.current?.abort();
             refreshAbortControllerRef.current = null;
             refreshSequencerRef.current.startGeneration();
