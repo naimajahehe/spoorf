@@ -4,10 +4,15 @@ import asyncio
 import inspect
 import sys
 from functools import wraps
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from fastapi import Request
 from fastapi.params import Depends
+
+if TYPE_CHECKING:
+    RequestDep = Optional[Request]
+else:
+    RequestDep = Request
 
 
 def auto_inject(func):
@@ -61,7 +66,7 @@ def get_server_attr(name: str, fallback: Any = None) -> Any:
     return fallback
 
 
-def get_container(request: Request = None):
+def get_container(request: RequestDep = None):
     """Ambil EngineContainer dari app.state atau fallback ke container default."""
     if request is not None and hasattr(request, "app") and hasattr(request.app.state, "container"):
         container = request.app.state.container
@@ -72,7 +77,7 @@ def get_container(request: Request = None):
     return get_default_container()
 
 
-def get_spoofer(request: Request = None):
+def get_spoofer(request: RequestDep = None):
     if request is not None and hasattr(request, "app") and hasattr(request.app.state, "spoofer"):
         val = request.app.state.spoofer
         if val is not None:
@@ -83,7 +88,7 @@ def get_spoofer(request: Request = None):
     return get_container(request).spoofer
 
 
-def get_scanner(request: Request = None):
+def get_scanner(request: RequestDep = None):
     if request is not None and hasattr(request, "app") and hasattr(request.app.state, "scanner"):
         val = request.app.state.scanner
         if val is not None:
@@ -94,7 +99,7 @@ def get_scanner(request: Request = None):
     return get_container(request).scanner
 
 
-def get_redirect_manager(request: Request = None):
+def get_redirect_manager(request: RequestDep = None):
     if request is not None and hasattr(request, "app") and hasattr(request.app.state, "redirect_manager"):
         val = request.app.state.redirect_manager
         if val is not None:
@@ -105,7 +110,7 @@ def get_redirect_manager(request: Request = None):
     return get_container(request).redirect_manager
 
 
-def get_transparent_gateway(request: Request = None):
+def get_transparent_gateway(request: RequestDep = None):
     if request is not None and hasattr(request, "app") and hasattr(request.app.state, "transparent_gateway"):
         val = request.app.state.transparent_gateway
         if val is not None:
@@ -116,7 +121,7 @@ def get_transparent_gateway(request: Request = None):
     return get_container(request).transparent_gateway
 
 
-def get_connection_manager(request: Request = None):
+def get_connection_manager(request: RequestDep = None):
     if request is not None and hasattr(request, "app") and hasattr(request.app.state, "connection_manager"):
         val = request.app.state.connection_manager
         if val is not None:
@@ -127,7 +132,7 @@ def get_connection_manager(request: Request = None):
     return get_container(request).connection_manager
 
 
-def get_telemetry_sampler(request: Request = None):
+def get_telemetry_sampler(request: RequestDep = None):
     if request is not None and hasattr(request, "app") and hasattr(request.app.state, "telemetry_sampler"):
         val = request.app.state.telemetry_sampler
         if val is not None:
@@ -138,7 +143,7 @@ def get_telemetry_sampler(request: Request = None):
     return get_container(request).telemetry_sampler
 
 
-def get_cert_engine(request: Request = None):
+def get_cert_engine(request: RequestDep = None):
     if request is not None and hasattr(request, "app") and hasattr(request.app.state, "cert_engine"):
         val = request.app.state.cert_engine
         if val is not None:
@@ -149,7 +154,7 @@ def get_cert_engine(request: Request = None):
     return get_container(request).cert_engine
 
 
-def get_flow_manager(request: Request = None):
+def get_flow_manager(request: RequestDep = None):
     if request is not None and hasattr(request, "app") and hasattr(request.app.state, "flow_manager"):
         val = request.app.state.flow_manager
         if val is not None:
@@ -160,7 +165,7 @@ def get_flow_manager(request: Request = None):
     return get_container(request).flow_manager
 
 
-def get_bettercap_dns(request: Request = None):
+def get_bettercap_dns(request: RequestDep = None):
     if request is not None and hasattr(request, "app") and hasattr(request.app.state, "bettercap_dns"):
         val = request.app.state.bettercap_dns
         if val is not None:
@@ -171,7 +176,7 @@ def get_bettercap_dns(request: Request = None):
     return get_container(request).bettercap_dns
 
 
-def get_bettercap_dissector(request: Request = None):
+def get_bettercap_dissector(request: RequestDep = None):
     if request is not None and hasattr(request, "app") and hasattr(request.app.state, "bettercap_dissector"):
         val = request.app.state.bettercap_dissector
         if val is not None:
@@ -182,7 +187,7 @@ def get_bettercap_dissector(request: Request = None):
     return get_container(request).bettercap_dissector
 
 
-def get_bettercap_syn_scanner(request: Request = None):
+def get_bettercap_syn_scanner(request: RequestDep = None):
     if request is not None and hasattr(request, "app") and hasattr(request.app.state, "bettercap_syn_scanner"):
         val = request.app.state.bettercap_syn_scanner
         if val is not None:
@@ -193,7 +198,7 @@ def get_bettercap_syn_scanner(request: Request = None):
     return get_container(request).bettercap_syn_scanner
 
 
-def get_shield_engine(request: Request = None):
+def get_shield_engine(request: RequestDep = None):
     if request is not None and hasattr(request, "app") and hasattr(request.app.state, "shield_engine"):
         val = request.app.state.shield_engine
         if val is not None:
@@ -204,7 +209,7 @@ def get_shield_engine(request: Request = None):
     return get_container(request).shield_engine
 
 
-def get_gaming_engine(request: Request = None):
+def get_gaming_engine(request: RequestDep = None):
     if request is not None and hasattr(request, "app") and hasattr(request.app.state, "gaming_engine"):
         val = request.app.state.gaming_engine
         if val is not None:
@@ -215,7 +220,7 @@ def get_gaming_engine(request: Request = None):
     return get_container(request).gaming_engine
 
 
-def get_liveness_daemon(request: Request = None):
+def get_liveness_daemon(request: RequestDep = None):
     if request is not None and hasattr(request, "app") and hasattr(request.app.state, "liveness_daemon"):
         val = request.app.state.liveness_daemon
         if val is not None:
@@ -226,7 +231,7 @@ def get_liveness_daemon(request: Request = None):
     return get_container(request).liveness_daemon
 
 
-def get_executor(request: Request = None):
+def get_executor(request: RequestDep = None):
     if request is not None and hasattr(request, "app") and hasattr(request.app.state, "executor"):
         val = request.app.state.executor
         if val is not None:

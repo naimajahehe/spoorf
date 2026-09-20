@@ -35,6 +35,8 @@ from .liveness import (
 )
 from .ap_isolation import (
     detect_ap_isolation,
+    probe_multicast_bssid_reflection,
+    probe_l3_hairpinning,
     test_multicast_bssid_reflection,
     test_l3_hairpinning
 )
@@ -51,5 +53,7 @@ __all__ = [
     'send_ipv6_router_solicitation', 'verify_ipv6_alive',
     'is_valid_ipv6', 'categorize_ipv6',
     'pulse_host', 'pulse_batch', 'LivenessWatchdogDaemon',
-    'detect_ap_isolation', 'test_multicast_bssid_reflection', 'test_l3_hairpinning'
+    'detect_ap_isolation',
+    'probe_multicast_bssid_reflection', 'probe_l3_hairpinning',
+    'test_multicast_bssid_reflection', 'test_l3_hairpinning'
 ]

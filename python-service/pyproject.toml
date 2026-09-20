@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "netcut-sentinel-engine"
-version = "2.41.66"
+version = "2.41.68"
 description = "High-Performance Layer 2 Network Discovery, ARP/NDP Manipulation & Telemetry Engine"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -45,6 +45,9 @@ select = [
 ignore = [
     "E501",  # Line length handled by formatter
     "B008",  # Allow function calls in FastAPI argument defaults (Field/Depends/Query)
+]
+unfixable = [
+    "F401",  # Protect module patch-seams and legacy re-exports from destructive auto-removal
 ]
 
 [tool.ruff.lint.per-file-ignores]

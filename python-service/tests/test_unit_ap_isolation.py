@@ -1,13 +1,26 @@
-﻿import unittest
+import unittest
 from unittest.mock import patch, MagicMock
 from src.core.discovery.ap_isolation import (
     detect_ap_isolation,
-    test_multicast_bssid_reflection,
-    test_l3_hairpinning
+    probe_multicast_bssid_reflection,
+    probe_l3_hairpinning,
+    test_multicast_bssid_reflection as legacy_multicast_probe,
+    test_l3_hairpinning as legacy_l3_probe
 )
 
 class TestUnitApIsolation(unittest.TestCase):
     """Test suite unit untuk AP Isolation Detector."""
+
+    def test_probe_backward_compatibility_aliases(self):
+        """Pastikan alias legacy tetap merujuk ke fungsi probe yang sama."""
+        self.assertIs(legacy_multicast_probe, probe_multicast_bssid_reflection)
+        self.assertIs(legacy_l3_probe, probe_l3_hairpinning)
+
+    def test_probe_l3_hairpinning_invalid_inputs_returns_false(self):
+        """Uji probe_l3_hairpinning langsung menolak IP atau MAC invalid."""
+        self.assertFalse(probe_l3_hairpinning("invalid-ip", "00:11:22:33:44:55"))
+        self.assertFalse(probe_l3_hairpinning("192.168.1.50", "invalid-mac"))
+        self.assertFalse(probe_l3_hairpinning("8.8.8.8", "00:11:22:33:44:55"))
 
     @patch('src.core.discovery.ap_isolation.socket.socket')
     def test_multicast_reflection_joins_group(self, mock_socket_cls):
@@ -20,7 +33,7 @@ class TestUnitApIsolation(unittest.TestCase):
         rx.recvfrom.side_effect = syssock.timeout()
         mock_socket_cls.side_effect = [rx, tx]
 
-        test_multicast_bssid_reflection(timeout=0.05)
+        probe_multicast_bssid_reflection(timeout=0.05)
 
         joined = any(
             len(c.args) >= 2 and c.args[1] == syssock.IP_ADD_MEMBERSHIP
@@ -49,7 +62,7 @@ class TestUnitApIsolation(unittest.TestCase):
     @patch('src.core.discovery.ap_isolation.get_current_gateway', return_value='192.168.1.1')
     @patch('src.core.discovery.ap_isolation.get_network_info', return_value={'ip': '192.168.1.100', 'network': '192.168.1.0/24'})
     @patch('src.core.discovery.ap_isolation.get_self_mac', return_value='a8:3b:76:0c:dc:55')
-    @patch('src.core.discovery.ap_isolation.test_multicast_bssid_reflection', return_value=False)
+    @patch('src.core.discovery.ap_isolation.probe_multicast_bssid_reflection', return_value=False)
     def test_isolated_network_lone_client_guard(self, mock_mcast, mock_self, mock_net, mock_gw):
         """Uji kondisi zero-peer dengan multicast diblokir (tanpa kandidat history): capped di 70%."""
         discovered = {
@@ -65,8 +78,8 @@ class TestUnitApIsolation(unittest.TestCase):
     @patch('src.core.discovery.ap_isolation.get_current_gateway', return_value='192.168.1.1')
     @patch('src.core.discovery.ap_isolation.get_network_info', return_value={'ip': '192.168.1.100', 'network': '192.168.1.0/24'})
     @patch('src.core.discovery.ap_isolation.get_self_mac', return_value='a8:3b:76:0c:dc:55')
-    @patch('src.core.discovery.ap_isolation.test_multicast_bssid_reflection', return_value=False)
-    @patch('src.core.discovery.ap_isolation.test_l3_hairpinning', return_value=True)
+    @patch('src.core.discovery.ap_isolation.probe_multicast_bssid_reflection', return_value=False)
+    @patch('src.core.discovery.ap_isolation.probe_l3_hairpinning', return_value=True)
     def test_isolated_network_confirmed_via_l3_hairpinning(self, mock_l3, mock_mcast, mock_self, mock_net, mock_gw):
         """Uji kondisi terkonfirmasi 100% via L3 Hairpinning pada kandidat DHCP/History."""
         discovered = {

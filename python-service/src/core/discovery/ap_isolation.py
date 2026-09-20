@@ -14,7 +14,7 @@ from scapy.all import Ether, IP, UDP, ICMP, srp, conf
 from ..network import get_network_info, get_current_gateway, get_self_mac, is_valid_private_ip, is_valid_mac
 from ...utils.logger import logger
 
-def test_multicast_bssid_reflection(timeout: float = 0.25) -> bool:
+def probe_multicast_bssid_reflection(timeout: float = 0.25) -> bool:
     """
     Uji apakah AP memancarkan kembali (reflect) frame multicast ke seluruh BSSID di udara.
     PENTING: IP_MULTICAST_LOOP disetel ke 0 agar TIDAK dipantulkan oleh kernel internal OS sendiri.
@@ -74,7 +74,7 @@ def test_multicast_bssid_reflection(timeout: float = 0.25) -> bool:
             except Exception:
                 pass
 
-def test_l3_hairpinning(candidate_ip: str, gateway_mac: str, timeout: float = 0.3) -> bool:
+def probe_l3_hairpinning(candidate_ip: str, gateway_mac: str, timeout: float = 0.3) -> bool:
     """
     Uji apakah Gateway melakukan Layer 3 Hairpinning / Routing ke target yang terisolasi L2.
     Mengirim paket UDP/ICMP yang dibungkus dengan Ethernet dst = gateway_mac.
@@ -94,6 +94,10 @@ def test_l3_hairpinning(candidate_ip: str, gateway_mac: str, timeout: float = 0.
     except Exception as e:
         logger.debug(f"L3 Hairpinning probe error for {candidate_ip}: {e}")
         return False
+
+# Backward-compatible aliases
+test_multicast_bssid_reflection = probe_multicast_bssid_reflection
+test_l3_hairpinning = probe_l3_hairpinning
 
 def detect_ap_isolation(
     discovered_hosts: Dict[str, str],
@@ -151,7 +155,7 @@ def detect_ap_isolation(
     score = 40  # Base score for zero-peer ARP yield
 
     # 3. Uji Pantulan Multicast BSSID dengan IP_MULTICAST_LOOP = 0
-    echo_received = test_multicast_bssid_reflection(timeout=0.25)
+    echo_received = probe_multicast_bssid_reflection(timeout=0.25)
     indicators["multicast_echo_blocked"] = not echo_received
 
     if not echo_received:
@@ -177,7 +181,7 @@ def detect_ap_isolation(
     gateway_mac = discovered_hosts.get(gateway_ip) or ""
     if active_candidates and gateway_mac:
         for c_ip in list(active_candidates.keys())[:3]:
-            if test_l3_hairpinning(c_ip, gateway_mac, timeout=0.25):
+            if probe_l3_hairpinning(c_ip, gateway_mac, timeout=0.25):
                 indicators["l3_hairpinning_confirmed"] = True
                 score = 100  # L3 hidup via gateway, L2 diblokir total -> 100% Confirmed AP Isolation
                 break

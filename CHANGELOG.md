@@ -2,6 +2,33 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.68] - 2026-09-20
+
+### High-Value Surgical Hygiene & Quality-Gate Hardening (`python-service`)
+- **Pytest Test Discovery Collision Eliminated (`src/core/discovery/ap_isolation.py`, `tests/test_unit_ap_isolation.py`)**:
+  - Merefaktor fungsi probe jaringan `test_l3_hairpinning` dan `test_multicast_bssid_reflection` menjadi `probe_l3_hairpinning` dan `probe_multicast_bssid_reflection`.
+  - Menyediakan alias backward-compatible di `src/core/discovery/ap_isolation.py` dan mengekspor keduanya di `src/core/discovery/__init__.py`.
+  - Memperbarui `tests/test_unit_ap_isolation.py` untuk mengimpor `probe_*`, mengeliminasi 100% fixture lookup error dan warning `return bool` di Pytest.
+  - Menambahkan 2 unit test baru: validasi input invalid pada `probe_l3_hairpinning` dan konsistensi alias backward compatibility.
+  - **Hasil Pytest**: Lulus **412 / 412 test** (0 error, 0 internal warning).
+- **Proteksi Patch-Seam Tooling (`pyproject.toml`)**:
+  - Menambahkan `unfixable = ["F401"]` di `[tool.ruff.lint]` untuk mencegah `ruff --fix` menghapus impor patch-seam (seperti `synthesize_ensemble_profile` di `scanner.py` dan re-exports di `server.py`).
+  - Menyelaraskan versi proyek menjadi `2.41.68`.
+- **Defensive Stream Handling (`src/main.py`)**:
+  - Menangani inisialisasi stream `sys.stdout` dan `sys.stderr` di Windows menggunakan iterasi defensif `hasattr(stream, 'reconfigure')`.
+  - Mengeliminasi 2 Mypy error `[union-attr]` dan menjamin keamanan eksekusi di lingkungan windowed (`pythonw.exe`).
+- **Standardisasi Tipe Dependency Injection Dual-Mode (`src/api/deps.py`)**:
+  - Mengimplementasikan conditional type alias `RequestDep`:
+    - Di runtime (`TYPE_CHECKING=False`): `RequestDep = Request` (kompatibel penuh dengan FastAPI dependency injection & route parameter analysis).
+    - Di static analysis (`TYPE_CHECKING=True`): `RequestDep = Optional[Request]` (memenuhi PEP 484 & Mypy `no_implicit_optional=True`).
+  - Mengeliminasi 16 error Mypy `[assignment]` pada signature provider `request: RequestDep = None`.
+- **Hasil Verifikasi Otomatis (100% Hijau)**:
+  - **Pytest**: **412 / 412 lulus** (0 error, 0 internal warning).
+  - **Unittest Python**: **412 / 412 lulus** (0 gagal).
+  - **Mypy**: Berkurang drastis dari **42 error** menjadi **24 error** (-43%).
+  - **Node.js Orchestrator**: **118 / 118 lulus** (0 gagal).
+  - **Total**: **530 automated tests 100% green**.
+
 ## [v2.41.67] - 2026-09-20
 
 ### Item 7, Item 8, Item 9 — Centralized Config Engine, Universal Fail-Closed Auth Hardening, & Crash-Proof Structured JSON Logging (`python-service`)

@@ -6,11 +6,12 @@ from src.utils.logger import logger
 from src.utils.preflight import preflight, EXIT_OK, EXIT_ERROR
 
 if sys.platform == 'win32':
-    try:
-        sys.stdout.reconfigure(encoding='utf-8')
-        sys.stderr.reconfigure(encoding='utf-8')
-    except Exception:
-        pass
+    for stream in (sys.stdout, sys.stderr):
+        if stream is not None and hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding='utf-8')
+            except Exception:
+                pass
 
 HOST = settings.HOST
 PORT = settings.PORT
