@@ -11,7 +11,7 @@ Mengorkestrasikan sesi redirect per perangkat target:
 
 import threading
 import time
-from typing import Dict, Any, List, Literal, Optional, TypedDict
+from typing import Any, Dict, List, Literal, Optional, TypedDict, cast
 from ..spoofer import ARPSpoofer
 from ..network import (
     get_network_info,
@@ -58,7 +58,7 @@ class RedirectManager:
         self.spoofer = spoofer
         self.portal_server: Optional[CaptivePortalServer] = None
         self._sessions: Dict[str, Dict[str, Any]] = {}
-        self._partial_sessions: Dict[str, Dict[str, Any]] = {}
+        self._partial_sessions: Dict[str, Any] = {}
         self._lock = threading.Lock()
         # Lock SIKLUS-HIDUP: menserialisasi start/stop end-to-end. `self._lock` (data) sengaja
         # DILEPAS selama join teardown (BUG-16) — itu membuka jendela di mana start & stop saling
@@ -160,8 +160,8 @@ class RedirectManager:
                     raise
 
                 cleanup_session = None
-                partial = self._partial_sessions.get(victim_ip)
-                if partial and partial.get("kind") != "replacement_recovery":
+                partial_cand = self._partial_sessions.get(victim_ip)
+                if partial_cand and partial_cand.get("kind") != "replacement_recovery":
                     try:
                         self._stop_partial_session_unlocked(victim_ip)
                     except SpoofError as cleanup_error:
@@ -631,7 +631,7 @@ class RedirectManager:
             return
 
         if session.get("kind") == "replacement_recovery":
-            self._abandon_recovery_unlocked(victim_ip, session)
+            self._abandon_recovery_unlocked(victim_ip, cast(ReplacementRecovery, session))
             self._partial_sessions.pop(victim_ip, None)
             return
 
@@ -646,7 +646,7 @@ class RedirectManager:
         errors = []
         for key in ("cleanup_session", "restore_session"):
             retained = recovery.get(key)
-            if not retained:
+            if not isinstance(retained, dict):
                 continue
             retained["stop_portal_when_clean"] = False
             try:

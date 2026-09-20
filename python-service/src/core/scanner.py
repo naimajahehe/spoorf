@@ -65,7 +65,7 @@ from ..utils.logger import logger
 class NetworkScanner:
     """Orkestrator pemindaian jaringan terpadu (Hybrid Multi-Vector Discovery)."""
 
-    _DEVICE_HISTORY: Dict[str, Dict[str, str]] = {}
+    _DEVICE_HISTORY: Dict[str, Dict[str, Any]] = {}
     _HISTORY_LOCK = threading.Lock()
     _LATEST_AP_ISOLATION: Dict[str, Any] = {
         "is_isolated": False,

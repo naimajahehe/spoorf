@@ -59,9 +59,9 @@ def pulse_host(
     norm_mac = target_mac.lower().replace('-', ':')
     self_mac = (get_self_mac() or '').lower().replace('-', ':')
     if not self_mac or not is_valid_mac(self_mac):
-        self_mac = getattr(conf.iface, 'mac', None)
-    if self_mac:
-        self_mac = self_mac.lower().replace('-', ':')
+        raw_iface_mac = getattr(conf.iface, 'mac', None)
+        if raw_iface_mac:
+            self_mac = str(raw_iface_mac).lower().replace('-', ':')
 
     # Resolve local host IP for clean, non-poisoning ARP queries (RFC 5227 probe fallback)
     my_ip = ""

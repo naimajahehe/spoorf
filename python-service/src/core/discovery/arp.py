@@ -37,9 +37,9 @@ def probe_sleeping_host_via_unicast_arp(
         self_ip = str(network_info.get('ip') or '').strip()
         self_mac = (get_self_mac() or '').lower().replace('-', ':')
         if not self_mac or not is_valid_mac(self_mac):
-            self_mac = getattr(conf.iface, 'mac', None)
-        if self_mac:
-            self_mac = self_mac.lower().replace('-', ':')
+            raw_iface_mac = getattr(conf.iface, 'mac', None)
+            if raw_iface_mac:
+                self_mac = str(raw_iface_mac).lower().replace('-', ':')
         if not is_valid_private_ip(self_ip) or not is_valid_mac(self_mac):
             return
 
@@ -188,7 +188,7 @@ def collect_from_arp_broadcast(discovered: Dict[str, str], timeout: float = 1.0)
     try:
         import ipaddress
         net_info = get_network_info()
-        network_cidr = net_info.get('network')
+        network_cidr = str(net_info.get('network') or '')
         if not is_valid_private_network(network_cidr):
             return
 

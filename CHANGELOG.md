@@ -2,6 +2,30 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.71] - 2026-09-20
+
+### Surgical Code Hygiene, Mypy 100% Type Cleanliness & Tooling Alignment (`python-service`)
+- **Eliminasi 100% Mypy Static Type Errors (0 Error di 65 Berkas Sumber)**:
+  - **`src/core/spoofer.py`**: Memindahkan alias `get_all_sessions = get_sessions` ke dalam tubuh kelas `ARPSpoofer` (mengeliminasi atribut dinamis liar pada static analysis).
+  - **`src/core/fingerprint/probe.py`**: Menyesuaikan parameter `deep_scan_ports(ip, ports: Optional[List[int]] = None)` dengan aturan PEP 484 (tanpa *implicit optional*).
+  - **`src/core/fingerprint/ensemble.py`**: Menyelaraskan parameter `strength: EvidenceStrength` dengan tipe Literal dari dataclass `ProfileEvidence`.
+  - **`src/core/gaming.py`**: Memberikan anotasi elemen pada buffer antrean `collections.deque[float]`.
+  - **`src/core/scanner.py`**: Memperbarui `_DEVICE_HISTORY: Dict[str, Dict[str, Any]]` agar timestamp bertipe `float` diterima secara sah.
+  - **`src/core/discovery/multicast.py`**: Memberikan anotasi eksplisit `per_run: Dict[str, Dict[str, Any]]`.
+  - **`src/container.py`**: Mengganti unannotated lambda pada callback WebSocket future dengan helper callback yang memiliki anotasi tipe.
+  - **`src/core/discovery/dhcp.py`**: Menangani koersi `int(msg_type_code)`, dukungan `Union[bytes, bytearray]` pada `_decode_fqdn`, dan tuple dinamis `candidates: Tuple[Any, ...]`.
+  - **`src/core/discovery/arp.py` & `liveness.py`**: Menjamin koersi string `self_mac` dan `network_cidr` saat fallback dari interface configuration.
+  - **`src/core/discovery/profile_observation.py`**: Memastikan pengecekan `ts_raw is None` sebelum konversi `float()` dan koersi string MAC.
+  - **`src/core/redirector/manager.py`**: Menangani invariansi `TypedDict ReplacementRecovery` via type casting dan guard `isinstance(retained, dict)`.
+- **Penyelarasan Tooling Metadata (`pyproject.toml`)**:
+  - Menyelaraskan `version = "2.41.70"` di `pyproject.toml` dengan status rilis sistem.
+- **Hasil Pengujian Komprehensif (544 Tests 100% Green)**:
+  - **Mypy**: `Success: no issues found in 65 source files` (**0 error**).
+  - **Pytest**: Lulus **420 / 420 test** (0 gagal) dalam 21.26 detik.
+  - **Node.js**: Lulus **118 / 118 test** (0 gagal).
+  - **Electron**: Lulus **6 / 6 test** (0 gagal).
+  - **Total**: **544 automated tests 100% passing**.
+
 ## [v2.41.70] - 2026-09-20
 
 ### Server Facade Cleanup & Domain Router Direct Import Migration (`python-service`)

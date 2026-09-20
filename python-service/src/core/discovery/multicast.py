@@ -223,7 +223,7 @@ def collect_identity_multicast(timeout: float = 0.8) -> Dict[str, Any]:
     }
     errors = []
     partial_failures = []
-    per_run = {"ssdp": {}, "mdns": {}, "llmnr": {}}
+    per_run: Dict[str, Dict[str, Any]] = {"ssdp": {}, "mdns": {}, "llmnr": {}}
     receive_window = min(max(0.01, float(timeout)), 10.0)
 
     for family in (socket.AF_INET, socket.AF_INET6):

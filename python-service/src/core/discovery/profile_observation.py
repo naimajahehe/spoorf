@@ -72,8 +72,11 @@ def _fresh_dhcp_snapshot(
         if not isinstance(entry, dict):
             continue
         norm_mac = _normalize_mac(entry.get("mac") or mac)
+        ts_raw = entry.get("last_seen_ts")
+        if ts_raw is None:
+            continue
         try:
-            age = now - float(entry.get("last_seen_ts"))
+            age = now - float(ts_raw)
         except (TypeError, ValueError):
             continue
         if 0 <= age <= EVIDENCE_MAX_AGE_SECONDS and is_valid_mac(norm_mac):
@@ -216,7 +219,7 @@ def _normalize_targets(
         if not isinstance(raw_target, dict):
             raise ProfileRefreshValidationError("Target tidak valid")
         ip = str(raw_target.get("ip") or "").strip()
-        mac = _normalize_mac(raw_target.get("mac"))
+        mac = _normalize_mac(str(raw_target.get("mac") or ""))
         requested_ipv6 = raw_target.get("ipv6_addresses") or []
 
         if not is_valid_private_ip(ip):

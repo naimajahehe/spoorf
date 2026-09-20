@@ -5,7 +5,7 @@ Explainable multi-sensor device profile synthesis.
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 
-from .evidence import ProfileEvidence
+from .evidence import EvidenceStrength, ProfileEvidence
 from .os_detect import detect_os
 from .oui_registry import get_oui_record
 from .profile_rules import (
@@ -75,7 +75,7 @@ def _add_evidence(
     group: str,
     field: str,
     value: Any,
-    strength: str,
+    strength: EvidenceStrength,
     observed_at: str,
 ) -> None:
     rendered = _text(value)

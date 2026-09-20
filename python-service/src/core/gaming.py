@@ -61,8 +61,8 @@ class GamingEngine:
         self._latest_ping: float = 18.0
         self._latest_jitter: float = 1.2
         self._packet_loss: float = 0.0
-        self._ping_history = collections.deque(maxlen=30)
-        self._loss_window = collections.deque(maxlen=20)
+        self._ping_history: collections.deque[float] = collections.deque(maxlen=30)
+        self._loss_window: collections.deque[float] = collections.deque(maxlen=20)
         
         self._stop_event = threading.Event()
         self._watchdog_thread: Optional[threading.Thread] = None

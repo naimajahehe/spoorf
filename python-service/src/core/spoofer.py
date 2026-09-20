@@ -808,4 +808,5 @@ class ARPSpoofer:
                 for session in self._sessions.values()
             )
 
-ARPSpoofer.get_all_sessions = ARPSpoofer.get_sessions
+    get_all_sessions = get_sessions
+

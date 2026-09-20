@@ -64,7 +64,10 @@ class ConnectionManager:
         for connection in conns:
             try:
                 fut = asyncio.run_coroutine_threadsafe(connection.send_json(message), loop)
-                fut.add_done_callback(lambda f, conn=connection: self._safe_send_done(f, conn))
+                target_conn = connection
+                def _on_send_done(f: Any) -> None:
+                    self._safe_send_done(f, target_conn)
+                fut.add_done_callback(_on_send_done)
             except Exception as e:
                 logger.debug(f"WS broadcast notice: {e}")
                 self.disconnect(connection)

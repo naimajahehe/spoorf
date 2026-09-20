@@ -4,7 +4,7 @@ Probing: ICMP Ping, TCP Port Scan, HTTP Web Title Banner Grabber
 
 import socket
 import re
-from typing import Dict, Any, List
+from typing import Any, Dict, List, Optional
 from scapy.all import IP, ICMP, sr1
 from ...utils.logger import logger
 
@@ -116,7 +116,7 @@ def _scan_single_port(ip: str, port: int, timeout: float = 0.08) -> tuple:
     except (socket.error, OSError):
         return (port, False)
 
-def deep_scan_ports(ip: str, ports: List[int] = None) -> Dict[str, Any]:
+def deep_scan_ports(ip: str, ports: Optional[List[int]] = None) -> Dict[str, Any]:
     """Multi-threaded deep port scanner untuk target IP tertentu."""
     import concurrent.futures
     if not ports:

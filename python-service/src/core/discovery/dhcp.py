@@ -7,7 +7,7 @@ Mengekstrak Hostname, Vendor Class, OS Fingerprint (PRL), Client ID, dan FQDN.
 
 import threading
 import time
-from typing import Dict, Any, Optional, Callable
+from typing import Any, Callable, Dict, Optional, Tuple, Union
 from scapy.all import (
     sniff,
     conf,
@@ -56,7 +56,7 @@ def _serialize_duid(raw_duid) -> str:
     return str(raw_duid).strip()
 
 
-def _decode_fqdn(raw_fqdn: bytes) -> str:
+def _decode_fqdn(raw_fqdn: Union[bytes, bytearray]) -> str:
     """Decode Option 81 Client FQDN (RFC 4702).
     Format wire:
     Byte 0: Flags (Bit 2: E bit; 1 = canonical DNS wire format)
@@ -309,7 +309,8 @@ def _handle_dhcp6_packet(pkt) -> None:
         if msg_type_code is None:
             msg_type_code = getattr(pkt, 'msgtype', 1)
 
-        msg_type_name = DHCP6_MSG_TYPES.get(msg_type_code, f"TYPE_{msg_type_code}")
+        msg_type_int = int(msg_type_code) if msg_type_code is not None else 1
+        msg_type_name = DHCP6_MSG_TYPES.get(msg_type_int, f"TYPE_{msg_type_int}")
 
         # Option 1: Client ID (DUID)
         client_id = ""
@@ -458,8 +459,9 @@ def _handle_dhcp_packet(pkt) -> None:
         options = dict([o for o in pkt[DHCP].options if isinstance(o, tuple) and len(o) == 2])
 
         # Option 53: DHCP Message Type
-        msg_type_code = options.get('message-type')
-        msg_type_name = DHCP_MSG_TYPES.get(msg_type_code, f"TYPE_{msg_type_code}")
+        raw_msg_code = options.get('message-type')
+        msg_type_code = int(raw_msg_code) if raw_msg_code is not None else None
+        msg_type_name = DHCP_MSG_TYPES.get(msg_type_code, f"TYPE_{msg_type_code}") if msg_type_code is not None else "UNKNOWN"
 
         # Option 12: Hostname
         raw_host = options.get('hostname')
@@ -613,6 +615,7 @@ def _handle_dhcp_packet(pkt) -> None:
         # JANGAN jadikan IP sah karena Option 50 hanyalah permohonan sepihak klien (Ghost IP).
         ip = ""
         if msg_type_code not in (4, 6):
+            candidates: Tuple[Any, ...] = ()
             if msg_type_code in (2, 5):  # DHCPOFFER, DHCPACK (dari DHCP Server)
                 candidates = (bootp.yiaddr, bootp.ciaddr)
             elif msg_type_code in (7, 8):  # DHCPRELEASE, DHCPINFORM
