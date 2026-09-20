@@ -2,6 +2,20 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.75] - 2026-09-20
+
+### Native Runtime Alignment: Pino 9 Native Compatibility & Polyfill Elimination
+- **Eliminasi 100% Polyfill & Monkey Patching**:
+  - Menghapus seluruh file tambalan `polyfills.ts` (`backend-node/src/polyfills.ts` dan `desktop-electron/src/polyfills.ts`).
+  - Menghapus impor polyfill pada `backend-node/src/app.ts`, `backend-node/src/utils/logger.ts`, dan `desktop-electron/src/main.ts`.
+- **Penyelarasan Dependensi ke Versi Native (`pino@9.14.0` & `pino-http@10.5.0`)**:
+  - Menyelaraskan dependensi `pino` ke `^9.6.0` (terinstal `9.14.0`) dan `pino-http` ke `^10.4.0` (terinstal `10.5.0`) pada `backend-node/package.json` dan `desktop-electron/package.json`.
+  - Pino 9 secara native menyertakan guard `if (typeof diagChan.tracingChannel === 'function')`, sehingga 100% kompatibel dengan Node 18.18 bawaan Electron 28 maupun Node 20/22 tanpa modifikasi apa pun.
+  - Menjaga seluruh fungsionalitas logging, format JSON, serialisasi error, penyamaran PII (redaction), dan integrasi OpenTelemetry bekerja identik dengan performa optimal.
+- **Hasil Pengujian & Kompilasi Ulang Installer**:
+  - Seluruh 544 automated unit test lulus 100% (420 Python + 118 Node + 6 Electron).
+  - Berhasil mengompilasi dan mengemas ulang installer setup: `desktop-electron/dist-installer/Spoorf Sentinel Setup 2.21.0.exe` (103.9 MB).
+
 ## [v2.41.74] - 2026-09-20
 
 ### Perbaikan Bug: WebSocket Broadcast Salah-Memutus Koneksi (late-binding closure, ruff B023) (`python-service`)

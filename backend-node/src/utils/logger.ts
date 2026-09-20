@@ -1,4 +1,3 @@
-import '../polyfills';
 import pino, { Logger, LoggerOptions } from 'pino';
 import { trace, isSpanContextValid } from '@opentelemetry/api';
 import { env } from '../config/env';

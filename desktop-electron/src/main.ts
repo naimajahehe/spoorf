@@ -1,4 +1,3 @@
-import './polyfills';
 import { app, BrowserWindow, ipcMain, Menu, Tray, dialog, shell, nativeTheme, Notification } from 'electron';
 import path from 'path';
 import fs from 'fs';
