@@ -6,7 +6,7 @@ Covers: Happy Path, Negative Tests, and Edge Cases
 import unittest
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from fastapi import HTTPException
 from pydantic import ValidationError
 from src.exceptions.custom import SpoofError
@@ -14,37 +14,35 @@ from src.core.discovery.profile_observation import (
     ProfileCollectorUnavailableError,
     ProfileRefreshValidationError,
 )
-import src.core.spoofer_v6 as spoofer_v6
+from src.api.routes.system import health_check, get_status
+from src.api.routes.telemetry import get_telemetry
+from src.api.routes.discovery import (
+    get_wifi_status,
+    scan_network,
+    trigger_dhcp_wakeup,
+    profile_refresh,
+    quick_reauth_profiling,
+)
+from src.api.routes.spoof import (
+    start_spoof,
+    update_spoof_limit,
+    stop_spoof,
+    stop_all_spoof,
+)
+from src.api.routes.bettercap import run_bettercap_syn_scan
+from src.api.schemas import (
+    SpoofStartRequest,
+    SpoofLimitRequest,
+    SpoofStopRequest,
+    SynScanRequest,
+    ProfileRefreshRequest,
+    ProfileRefreshTarget,
+    QuickReauthRequest,
+    QuickReauthTarget,
+)
+from src.container import get_default_container
 
-# The server owns singleton spoofers, whose normal constructors inspect adapters.
-# Keep the production route tests hermetic before importing those singletons.
-with patch.object(spoofer_v6.NDPSpoofer, 'refresh_interface'), \
-     patch('src.core.spoofer.ARPSpoofer.refresh_interface'):
-    from src.server import (
-        health_check,
-        get_wifi_status,
-        get_telemetry,
-        get_status,
-        start_spoof,
-        update_spoof_limit,
-        stop_spoof,
-        stop_all_spoof,
-        run_bettercap_syn_scan,
-        scan_network,
-        trigger_dhcp_wakeup,
-        profile_refresh,
-        quick_reauth_profiling,
-        shutdown_event,
-        SpoofStartRequest,
-        SpoofLimitRequest,
-        SpoofStopRequest,
-        SynScanRequest,
-        ProfileRefreshRequest,
-        ProfileRefreshTarget,
-        QuickReauthRequest,
-        QuickReauthTarget,
-        spoofer,
-    )
+spoofer = get_default_container().spoofer
 
 class TestServerAPI(unittest.TestCase):
 
@@ -152,21 +150,23 @@ class TestServerAPI(unittest.TestCase):
         self.assertTrue(response.get('success'))
         self.assertTrue(response.get('already_stopped'))
 
-    @patch('src.server.spoofer.stop', side_effect=SpoofError('restore packets failed'))
-    def test_stop_spoof_restore_failure_remains_an_http_error(self, _mock_stop):
+    def test_stop_spoof_restore_failure_remains_an_http_error(self):
         """Boundary: retained restore-failed sessions must not be reported as stopped."""
         req_stop = SpoofStopRequest(session_id="restore_failed_session")
+        mock_spoofer = MagicMock()
+        mock_spoofer.stop.side_effect = SpoofError('restore packets failed')
 
         with self.assertRaises(HTTPException) as ctx:
-            stop_spoof(req_stop)
+            stop_spoof(req_stop, spoofer=mock_spoofer)
 
         self.assertEqual(ctx.exception.status_code, 500)
 
-    @patch('src.server.spoofer.stop_all', side_effect=SpoofError('member restore failed'))
-    def test_stop_all_spoof_failure_remains_an_http_error(self, _mock_stop_all):
+    def test_stop_all_spoof_failure_remains_an_http_error(self):
         """Boundary: aggregate stop-all failure must never return a success payload."""
+        mock_spoofer = MagicMock()
+        mock_spoofer.stop_all.side_effect = SpoofError('member restore failed')
         with self.assertRaises(HTTPException) as ctx:
-            stop_all_spoof()
+            stop_all_spoof(spoofer=mock_spoofer)
 
         self.assertEqual(ctx.exception.status_code, 500)
 
@@ -181,18 +181,16 @@ class TestServerAPI(unittest.TestCase):
                     raise RuntimeError(f'{name} failed')
             return run
 
-        with patch('src.server.shield_engine.disable', side_effect=cleanup('shield', True)), \
-             patch('src.server.gaming_engine.toggle', side_effect=cleanup('gaming')), \
-             patch('src.server.liveness_daemon.stop', side_effect=cleanup('liveness', True)), \
-             patch('src.server.NetworkScanner.stop_dhcp_sniffer', side_effect=cleanup('dhcp')), \
-             patch('src.server.redirect_manager.stop_all', side_effect=cleanup('redirect')), \
-             patch('src.server.transparent_gateway.stop_all', side_effect=cleanup('gateway', True)), \
-             patch('src.server.spoofer.stop_all', side_effect=cleanup('spoofer')), \
-             patch('src.server.executor.shutdown', side_effect=cleanup('executor')):
-            try:
-                shutdown_event()
-            except RuntimeError:
-                pass
+        container = get_default_container()
+        with patch.object(container.shield_engine, 'disable', side_effect=cleanup('shield', True)), \
+             patch.object(container.gaming_engine, 'toggle', side_effect=cleanup('gaming')), \
+             patch.object(container.liveness_daemon, 'stop', side_effect=cleanup('liveness', True)), \
+             patch('src.container.NetworkScanner.stop_dhcp_sniffer', side_effect=cleanup('dhcp')), \
+             patch.object(container.redirect_manager, 'stop_all', side_effect=cleanup('redirect')), \
+             patch.object(container.transparent_gateway, 'stop_all', side_effect=cleanup('gateway', True)), \
+             patch.object(container.spoofer, 'stop_all', side_effect=cleanup('spoofer')), \
+             patch.object(container.executor, 'shutdown', side_effect=cleanup('executor')):
+            container.teardown()
 
         self.assertEqual(
             calls,
@@ -208,18 +206,16 @@ class TestServerAPI(unittest.TestCase):
     def test_dhcp_wakeup_rejects_public_topology_before_sending(self):
         """Method 1 must fail closed before opening multicast sockets."""
         with patch(
-            'src.server.get_network_info',
+            'src.api.routes.discovery.get_network_info',
             return_value={
                 'ip': '203.0.113.10',
                 'network': '203.0.113.0/24',
                 'gateway': '203.0.113.1',
             },
-            create=True,
         ), patch(
-            'src.server.get_current_gateway',
+            'src.api.routes.discovery.get_current_gateway',
             return_value='203.0.113.1',
-            create=True,
-        ), patch('src.server.send_multicast_wakeup') as mock_wakeup:
+        ), patch('src.api.routes.discovery.send_multicast_wakeup') as mock_wakeup:
             with self.assertRaises(HTTPException) as ctx:
                 asyncio.run(trigger_dhcp_wakeup())
 
@@ -229,19 +225,17 @@ class TestServerAPI(unittest.TestCase):
     def test_dhcp_wakeup_rejects_zero_successful_datagrams(self):
         """An HTTP success must mean at least one discovery datagram was sent."""
         with patch(
-            'src.server.get_network_info',
+            'src.api.routes.discovery.get_network_info',
             return_value={
                 'ip': '192.168.1.100',
                 'network': '192.168.1.0/24',
                 'gateway': '192.168.1.1',
             },
-            create=True,
         ), patch(
-            'src.server.get_current_gateway',
+            'src.api.routes.discovery.get_current_gateway',
             return_value='192.168.1.1',
-            create=True,
         ), patch(
-            'src.server.send_multicast_wakeup',
+            'src.api.routes.discovery.send_multicast_wakeup',
             return_value={
                 'attempted': 6,
                 'succeeded': 0,
@@ -300,28 +294,25 @@ class TestServerAPI(unittest.TestCase):
         }
 
         with patch(
-            'src.server.get_network_info',
+            'src.api.routes.discovery.get_network_info',
             return_value={
                 'ip': '192.168.1.100',
                 'network': '192.168.1.0/24',
                 'gateway': '192.168.1.1',
             },
-            create=True,
         ), patch(
-            'src.server.get_current_gateway',
+            'src.api.routes.discovery.get_current_gateway',
             return_value='192.168.1.1',
-            create=True,
         ), patch(
-            'src.server.get_self_mac',
+            'src.api.routes.discovery.get_self_mac',
             return_value='00:11:22:33:44:55',
-            create=True,
         ), patch(
-            'src.server.dhcp_cache.get_unique_snapshot',
+            'src.api.routes.discovery.dhcp_cache.get_unique_snapshot',
             side_effect=[before, after],
         ), patch(
-            'src.server.send_multicast_wakeup',
+            'src.api.routes.discovery.send_multicast_wakeup',
             return_value=delivery,
-        ), patch('src.server.asyncio.sleep', new=AsyncMock()) as mock_sleep:
+        ), patch('src.api.routes.discovery.asyncio.sleep', new=AsyncMock()) as mock_sleep:
             response = asyncio.run(trigger_dhcp_wakeup())
 
         self.assertTrue(response['success'])
@@ -338,7 +329,7 @@ class TestServerAPI(unittest.TestCase):
                 mac="00:11:22:33:44:55",
             )
         ])
-        with patch("src.server.collect_profile_refresh") as collect:
+        with patch("src.api.routes.discovery.collect_profile_refresh") as collect:
             with self.assertRaises(HTTPException) as ctx:
                 asyncio.run(profile_refresh(request))
 
@@ -362,7 +353,7 @@ class TestServerAPI(unittest.TestCase):
             "partial_failures": [],
         }
         with patch(
-            "src.server.collect_profile_refresh",
+            "src.api.routes.discovery.collect_profile_refresh",
             return_value=safe_result,
         ) as collect:
             response = asyncio.run(profile_refresh(request))
@@ -391,7 +382,7 @@ class TestServerAPI(unittest.TestCase):
         ]
         for error, expected_status in cases:
             with self.subTest(expected_status=expected_status), patch(
-                "src.server.collect_profile_refresh",
+                "src.api.routes.discovery.collect_profile_refresh",
                 side_effect=error,
             ):
                 with self.assertRaises(HTTPException) as ctx:
@@ -409,7 +400,7 @@ class TestServerAPI(unittest.TestCase):
         ])
         safe_result = {"visible_count": 1, "high_confidence_count": 0}
         with patch(
-            "src.server.collect_profile_refresh",
+            "src.api.routes.discovery.collect_profile_refresh",
             return_value=safe_result,
         ) as collect, patch.object(spoofer, "start") as start_spoof:
             response = asyncio.run(quick_reauth_profiling(request))
@@ -446,19 +437,21 @@ class TestServerAPI(unittest.TestCase):
     def test_scan_endpoint_can_suppress_multicast_wakeup(self):
         """The optional scan flag must be forwarded to NetworkScanner."""
         request = SimpleNamespace(skip_multicast_wakeup=True)
-        with patch('src.server.scanner.scan_full', return_value=[]) as mock_scan:
-            response = asyncio.run(scan_network(request))
+        mock_scanner = MagicMock()
+        mock_scanner.scan_full.return_value = []
+        response = asyncio.run(scan_network(request, scanner=mock_scanner))
 
         self.assertTrue(response['success'])
-        mock_scan.assert_called_once_with(include_multicast_wakeup=False)
+        mock_scanner.scan_full.assert_called_once_with(include_multicast_wakeup=False)
 
     def test_scan_endpoint_default_keeps_multicast_wakeup(self):
         """Existing no-body scan callers retain the legacy default behavior."""
-        with patch('src.server.scanner.scan_full', return_value=[]) as mock_scan:
-            response = asyncio.run(scan_network())
+        mock_scanner = MagicMock()
+        mock_scanner.scan_full.return_value = []
+        response = asyncio.run(scan_network(scanner=mock_scanner))
 
         self.assertTrue(response['success'])
-        mock_scan.assert_called_once_with(include_multicast_wakeup=True)
+        mock_scanner.scan_full.assert_called_once_with(include_multicast_wakeup=True)
 
     # ===== 4. Edge Cases =====
     @patch('src.core.spoofer.sendp')

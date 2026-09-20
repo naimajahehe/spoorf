@@ -19,9 +19,9 @@ from ...core.discovery.profile_observation import (
 )
 from ...core.fingerprint.probe import deep_scan_ports
 from ...core.network import (
-    get_current_gateway as default_get_current_gateway,
-    get_network_info as default_get_network_info,
-    get_self_mac as default_get_self_mac,
+    get_current_gateway,
+    get_network_info,
+    get_self_mac,
     is_valid_mac,
     is_valid_private_ip,
     is_valid_private_network,
@@ -32,7 +32,6 @@ from ..deps import (
     get_executor,
     get_liveness_daemon,
     get_scanner,
-    get_server_attr,
 )
 from ..schemas import (
     DeepPortScanRequest,
@@ -101,11 +100,10 @@ async def _run_profile_refresh(
 ) -> Dict[str, Any]:
     payloads = _profile_target_payloads(targets)
     running_loop = asyncio.get_running_loop()
-    collect_fn = get_server_attr("collect_profile_refresh", collect_profile_refresh)
     try:
         return await running_loop.run_in_executor(
             executor,
-            collect_fn,
+            collect_profile_refresh,
             payloads,
             float(observation_seconds),
         )
@@ -230,16 +228,10 @@ async def deep_scan_device_ports(
 async def trigger_dhcp_wakeup(executor=Depends(get_executor)):
     """Refresh discovery dan observasi DHCP alami untuk Optimasi Teknik 3B."""
     logger.info("📥 [HTTP API] Request Discovery Refresh & DHCP Observation diterima")
-    get_net_info_fn = get_server_attr("get_network_info", default_get_network_info)
-    get_cur_gw_fn = get_server_attr("get_current_gateway", default_get_current_gateway)
-    get_self_mac_fn = get_server_attr("get_self_mac", default_get_self_mac)
-    wakeup_fn = get_server_attr("send_multicast_wakeup", send_multicast_wakeup)
-    sleep_fn = get_server_attr("asyncio.sleep", asyncio.sleep)
-
-    network_info = get_net_info_fn()
+    network_info = get_network_info()
     controller_ip = str(network_info.get("ip") or "").strip()
     network_cidr = str(network_info.get("network") or "").strip()
-    gateway_ip = str(get_cur_gw_fn() or "").strip()
+    gateway_ip = str(get_current_gateway() or "").strip()
 
     if (
         not is_valid_private_ip(controller_ip)
@@ -269,17 +261,16 @@ async def trigger_dhcp_wakeup(executor=Depends(get_executor)):
 
     running_loop = asyncio.get_running_loop()
     try:
-        controller_mac = get_self_mac_fn() or ""
-        active_dhcp_cache = get_server_attr("dhcp_cache", dhcp_cache)
+        controller_mac = get_self_mac() or ""
         before = _filter_dhcp_observation_snapshot(
-            active_dhcp_cache.get_unique_snapshot(),
+            dhcp_cache.get_unique_snapshot(),
             controller_ip,
             gateway_ip,
             controller_mac,
         )
         delivery = await running_loop.run_in_executor(
             executor,
-            wakeup_fn,
+            send_multicast_wakeup,
         )
         if delivery.get("succeeded", 0) <= 0:
             raise HTTPException(
@@ -287,9 +278,9 @@ async def trigger_dhcp_wakeup(executor=Depends(get_executor)):
                 detail="Tidak ada datagram discovery yang berhasil dikirim",
             )
 
-        await sleep_fn(4.0)
+        await asyncio.sleep(4.0)
         after = _filter_dhcp_observation_snapshot(
-            active_dhcp_cache.get_unique_snapshot(),
+            dhcp_cache.get_unique_snapshot(),
             controller_ip,
             gateway_ip,
             controller_mac,
@@ -355,8 +346,7 @@ async def quick_reauth_profiling(
 @auto_inject
 def get_dhcp_profiling_stats():
     """Mengambil status snapshot profiling DHCP real-time."""
-    active_dhcp_cache = get_server_attr("dhcp_cache", dhcp_cache)
-    snapshot = active_dhcp_cache.get_snapshot()
+    snapshot = dhcp_cache.get_snapshot()
     return {
         "success": True,
         "data": {
