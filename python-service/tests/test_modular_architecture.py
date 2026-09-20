@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from fastapi import Depends, Request
+
 from src.api.deps import auto_inject, get_container, get_spoofer
 from src.api.routes import (
     ALL_ROUTERS,

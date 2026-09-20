@@ -3,44 +3,46 @@ API & Route Tests for FastAPI Microservice (src.server)
 Covers: Happy Path, Negative Tests, and Edge Cases
 """
 
-import unittest
 import asyncio
+import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
+
 from fastapi import HTTPException
 from pydantic import ValidationError
-from src.exceptions.custom import SpoofError
-from src.core.discovery.profile_observation import (
-    ProfileCollectorUnavailableError,
-    ProfileRefreshValidationError,
-)
-from src.api.routes.system import health_check, get_status
-from src.api.routes.telemetry import get_telemetry
+
+from src.api.routes.bettercap import run_bettercap_syn_scan
 from src.api.routes.discovery import (
     get_wifi_status,
-    scan_network,
-    trigger_dhcp_wakeup,
     profile_refresh,
     quick_reauth_profiling,
+    scan_network,
+    trigger_dhcp_wakeup,
 )
 from src.api.routes.spoof import (
     start_spoof,
-    update_spoof_limit,
-    stop_spoof,
     stop_all_spoof,
+    stop_spoof,
+    update_spoof_limit,
 )
-from src.api.routes.bettercap import run_bettercap_syn_scan
+from src.api.routes.system import get_status, health_check
+from src.api.routes.telemetry import get_telemetry
 from src.api.schemas import (
-    SpoofStartRequest,
-    SpoofLimitRequest,
-    SpoofStopRequest,
-    SynScanRequest,
     ProfileRefreshRequest,
     ProfileRefreshTarget,
     QuickReauthRequest,
     QuickReauthTarget,
+    SpoofLimitRequest,
+    SpoofStartRequest,
+    SpoofStopRequest,
+    SynScanRequest,
 )
 from src.container import get_default_container
+from src.core.discovery.profile_observation import (
+    ProfileCollectorUnavailableError,
+    ProfileRefreshValidationError,
+)
+from src.exceptions.custom import SpoofError
 
 spoofer = get_default_container().spoofer
 
