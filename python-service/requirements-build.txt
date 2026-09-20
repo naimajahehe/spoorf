@@ -1,0 +1,5 @@
+# NetCut Sentinel (Spoorf) — Build & Packaging Dependencies
+# Digunakan untuk kompilasi executable mandiri (build_engine.py).
+# Installasi: pip install -r requirements-build.txt
+
+pyinstaller==6.22.2

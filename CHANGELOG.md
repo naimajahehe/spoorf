@@ -2,6 +2,26 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.65] - 2026-09-20
+
+### P1 — Higiene & Quality Gates: Pemisahan Dependensi Runtime vs Build/Test & Lockfile Kriptografis (`python-service`)
+- **Pemisahan Tingkat Dependensi (Dependency Tiering)**:
+  - Mengisolasi dependensi runtime murni di `python-service/requirements.txt` (8 paket: `scapy`, `netifaces`, `python-dotenv`, `fastapi`, `uvicorn`, `pydantic`, `psutil`, `cryptography`).
+  - Mengeliminasi `pyinstaller==6.22.2` dari dependensi runtime, menghapus overhead transitive build tooling (`altgraph`, `pefile`, `pywin32-ctypes`, `pyinstaller-hooks-contrib`) dari instalasi container/server production.
+  - Membuat `python-service/requirements-build.txt` untuk perkakas kompilasi executable mandiri (`pyinstaller==6.22.2`).
+  - Memperbarui `python-service/pyproject.toml` dengan pemisahan deklaratif PEP 621: `[project.dependencies]` (hanya 8 paket runtime) serta `[project.optional-dependencies]` (`build` untuk pyinstaller, `dev` untuk ruff, mypy, pytest).
+- **Lockfile Reproducible & Tamper-Evident Berbasis Hash**:
+  - Menghasilkan `python-service/requirements.lock` menggunakan `uv pip compile --generate-hashes --python-version 3.11`.
+  - Mengunci seluruh pohon dependensi transitif dengan hash kriptografis SHA-256 multi-platform, memitigasi risiko *supply-chain attack* dan *dependency confusion*.
+- **Pre-flight Guard Kompilasi (`build_engine.py`)**:
+  - Menambahkan verifikasi `try: import PyInstaller ... except ImportError:` pada `build_engine.py` sebelum mengeksekusi subproses, memberikan instruksi jelas untuk menjalankan `pip install -r requirements-build.txt` jika dependensi build belum terpasang.
+- **Automated Regression Guard (TDD)**:
+  - Menambahkan test suite `python-service/tests/test_dependencies.py` (6 unit test) yang memvalidasi isolasi runtime, integritas lockfile ber-hash SHA-256, serta guard `build_engine.py`.
+- **Hasil Verifikasi Otomatis (100% Hijau)**:
+  - **Python Microservice**: **386 / 386 unit tests lulus** (0 gagal).
+  - **Node.js Orchestrator**: **118 / 118 unit tests lulus** (0 gagal).
+  - **Total**: **504 tests lulus** secara menyeluruh.
+
 ## [v2.41.64] - 2026-09-20
 
 ### P1 — Higiene & Quality Gates: Eliminasi 34 Bare Except & Standardisasi Tooling Modern (`python-service`)

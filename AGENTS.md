@@ -46,10 +46,10 @@ When modifying or refactoring code in this repository, you **MUST NEVER VIOLATE*
 
 ## 3. Automated Test Verification
 
-Always run the automated test suites before finishing any task (semua hijau: **380 Python + 118 Node = 498 tests**):
+Always run the automated test suites before finishing any task (semua hijau: **386 Python + 118 Node = 504 tests**):
 
 ```powershell
-# 1. Run Python Service Unit & API Tests (380 tests)
+# 1. Run Python Service Unit & API Tests (386 tests)
 cd d:/spoorf/python-service
 .\venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py" -v
 
@@ -83,7 +83,7 @@ d:/spoorf/
 │   │   │   ├── discovery/     # L2/L3 discovery (arp.py, multicast.py, dhcp.py)
 │   │   │   └── fingerprint/   # vendors.py, netbios.py, probe.py, os_detect.py
 │   │   └── server.py          # FastAPI routes & WebSocket event manager
-│   └── tests/                 # 40 automated unittest files
+│   └── tests/                 # 41 automated unittest files
 ├── backend-node/              # Express API & Socket.IO Orchestrator (:5000)
 │   ├── src/
 │   │   ├── services/          # database.ts, deviceManager.ts, pythonBridge.ts

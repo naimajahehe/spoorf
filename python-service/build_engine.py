@@ -4,6 +4,14 @@ import subprocess
 import shutil
 
 def build():
+    try:
+        import PyInstaller  # noqa: F401
+    except ImportError:
+        print("\n[ERROR] [Build Engine] PyInstaller is not installed in the active environment.")
+        print("To install build dependencies, run:")
+        print("  pip install -r requirements-build.txt\n")
+        sys.exit(1)
+
     print("[Build Engine] Building spoorf-engine.exe via PyInstaller...")
     script_dir = os.path.dirname(os.path.abspath(__file__))
     os.chdir(script_dir)
