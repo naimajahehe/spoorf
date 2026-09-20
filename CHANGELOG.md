@@ -2,6 +2,14 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.74] - 2026-09-20
+
+### Perbaikan Bug: WebSocket Broadcast Salah-Memutus Koneksi (late-binding closure, ruff B023) (`python-service`)
+- **Akar masalah**: di `ConnectionManager.broadcast`, done-callback per-koneksi menutup atas variabel loop `target_conn` (by reference). Karena `broadcast()` selalu dipanggil dari thread worker sementara callback future berjalan belakangan di thread event-loop (setelah loop `for` selesai), setiap callback membaca koneksi TERAKHIR.
+- **Dampak**: saat `send_json` gagal, `disconnect()` memutus koneksi yang SALAH (yang terakhir/sehat), bukan yang benar-benar mati — mem-drop klien WS hidup diam-diam sambil mempertahankan yang mati. Termanifestasi saat ≥2 klien WS bersamaan + kirim gagal (mis. race reconnect Node).
+- **Perbaikan**: ikat nilai koneksi via default-arg `def _on_send_done(f, conn=connection)` sehingga tiap callback menangkap koneksinya sendiri (perilaku benar seperti pola lambda default-arg semula). Ruff B023 kini bersih.
+- **Terverifikasi TDD**: test regresi `test_connection_manager.py` (2 test) mensimulasikan loop sibuk (send tertunda) → membuktikan koneksi gagal yang di-disconnect, bukan yang terakhir. Suite penuh 422 lulus, mypy 0 issue.
+
 ## [v2.41.73] - 2026-09-20
 
 ### Node.js DiagnosticsChannel TracingChannel Polyfill & Electron Runtime Fix

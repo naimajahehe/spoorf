@@ -64,9 +64,12 @@ class ConnectionManager:
         for connection in conns:
             try:
                 fut = asyncio.run_coroutine_threadsafe(connection.send_json(message), loop)
-                target_conn = connection
-                def _on_send_done(f: Any) -> None:
-                    self._safe_send_done(f, target_conn)
+                # Bind `conn` via a default argument so each callback captures ITS OWN
+                # connection value. A closure over the loop variable would be read at
+                # call time (after the loop finishes, on the loop thread) and resolve to
+                # the LAST connection -> disconnecting the wrong socket on a failed send.
+                def _on_send_done(f: Any, conn: WebSocket = connection) -> None:
+                    self._safe_send_done(f, conn)
                 fut.add_done_callback(_on_send_done)
             except Exception as e:
                 logger.debug(f"WS broadcast notice: {e}")
