@@ -2,6 +2,28 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.70] - 2026-09-20
+
+### Server Facade Cleanup & Domain Router Direct Import Migration (`python-service`)
+- **Eliminasi Backward Compatibility Facade di `src/server.py`**:
+  - Memangkas `src/server.py` dari 437 baris menjadi 139 baris (pengurangan ~300 baris / 68% penurunan ukuran file).
+  - Menghapus 50+ handler imports, 25 schema imports, core helper/class imports, 13 module-level singletons, serta duplikasi `shutdown_event()`.
+  - `src/server.py` kini murni berfungsi sebagai ASGI entrypoint, middleware configuration, lifespan wiring, dan router mounting point.
+  - Daftar ekspor `__all__` disederhanakan menjadi `["app", "container", "request_tracing_middleware", "api_token_guard", "sanitized_http_exception_handler"]`.
+- **Penghapusan Reflection Seams (`get_server_attr`) di `src/api/deps.py` & `src/api/routes/discovery.py`**:
+  - Menghapus fungsi helper refleksi `get_server_attr()` dan pengecekan fallback `sys.modules.get("src.server")` dari seluruh 13 dependency providers di `src/api/deps.py`.
+  - Mengarahkan provider `get_*` untuk membaca langsung dari `container` secara konsisten via `Depends(get_container)`.
+  - Menghapus `get_server_attr()` dan alias `default_get_*` dari `src/api/routes/discovery.py`, beralih ke direct imports dari `src.core.network` dan `src.core.discovery`.
+- **Migrasi Unit Test ke Domain Routers**:
+  - `tests/test_api_server.py`: Memigrasikan seluruh impor dari `src.server` ke `src.api.routes.<domain>`, `src.api.schemas`, dan `src.container`. Memperbarui target mock patch langsung ke domain router target.
+  - `tests/test_unit_core_fixes.py`: Memigrasikan impor `ConnectionManager` langsung dari `src.container`.
+  - `tests/test_modular_architecture.py`: Membersihkan sisa impor `spoofer` yang tidak digunakan.
+- **Hasil Pengujian**:
+  - **Pytest**: Lulus **420 / 420 test** (0 gagal).
+  - **Node.js**: Lulus **118 / 118 test** (0 gagal).
+  - **Electron**: Lulus **6 / 6 test** (0 gagal).
+  - **Total**: **544 automated tests 100% green**.
+
 ## [v2.41.69] - 2026-09-20
 
 ### Enterprise Logging Architecture & Distributed Tracing Modernization (`python-service`)
