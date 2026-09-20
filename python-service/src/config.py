@@ -16,10 +16,17 @@ from typing import List, Optional, Tuple
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field, field_validator
 
-# Muat file .env dari direktori python-service jika ada, atau traversal default
+# Muat file .env dari python-service, backend-node, atau root repo
 _local_env = Path(__file__).resolve().parent.parent / ".env"
+_backend_env = Path(__file__).resolve().parent.parent.parent / "backend-node" / ".env"
+_root_env = Path(__file__).resolve().parent.parent.parent / ".env"
+
 if _local_env.exists():
     load_dotenv(dotenv_path=_local_env)
+elif _backend_env.exists():
+    load_dotenv(dotenv_path=_backend_env)
+elif _root_env.exists():
+    load_dotenv(dotenv_path=_root_env)
 else:
     load_dotenv()
 
@@ -101,16 +108,20 @@ class EngineSettings(BaseModel):
         token = os.getenv("SENTINEL_API_TOKEN")
         cleaned_token = token.strip() if token and token.strip() else None
 
+        env_val = os.getenv("SENTINEL_ENV", os.getenv("NODE_ENV", "development"))
+        is_prod = getattr(sys, "frozen", False) or env_val.lower() == "production"
+        dev_default = not is_prod
+
         return cls(
             HOST=os.getenv("ENGINE_HOST", os.getenv("HOST", "127.0.0.1")),
             PORT=get_int("ENGINE_PORT", get_int("PORT", 8001)),
             APP_VERSION=os.getenv("APP_VERSION", "2.41.66"),
-            ENVIRONMENT=os.getenv("SENTINEL_ENV", os.getenv("NODE_ENV", "development")),
+            ENVIRONMENT=env_val,
             LOG_LEVEL=os.getenv("LOG_LEVEL", "INFO"),
             LOG_FORMAT=os.getenv("LOG_FORMAT", "text"),
             MAX_WORKERS=get_int("MAX_WORKERS", 5),
             SENTINEL_API_TOKEN=cleaned_token,
-            SENTINEL_ALLOW_INSECURE_DEV=get_bool("SENTINEL_ALLOW_INSECURE_DEV", False),
+            SENTINEL_ALLOW_INSECURE_DEV=get_bool("SENTINEL_ALLOW_INSECURE_DEV", dev_default),
             PY_CORS_ORIGINS=os.getenv("PY_CORS_ORIGINS", ""),
             ARP_TIMEOUT=get_int("ARP_TIMEOUT", 3),
             SPOOF_INTERVAL=get_int("SPOOF_INTERVAL", 1),
