@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 Unit tests for Core Engine & Reliability Fixes:
 1. ConnectionManager WebSocket future exception handling & dead socket pruning.
@@ -12,7 +12,7 @@ import unittest
 from concurrent.futures import Future
 from unittest.mock import MagicMock, patch
 
-from src.server import ConnectionManager
+from src.container import ConnectionManager
 from src.core.redirector.dns_spoofer import resolve_cached_domain, _DNS_RESOLVE_CACHE, _DNS_RESOLVE_CACHE_LOCK
 from src.core.redirector.transparent_gateway import TransparentGatewayManager, GatewayDNSSniffer
 from src.exceptions.custom import SpoofError
