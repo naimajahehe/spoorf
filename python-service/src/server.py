@@ -247,7 +247,7 @@ def network_watchdog_thread():
         last_interface = info.get('interface', '')
         last_gateway = scanner.get_current_gateway()
         last_gateway_mac = get_mac_from_arp(last_gateway) if last_gateway else ""
-    except:
+    except Exception:
         pass
 
     logger.info("🐕 Network Telemetry Streamer started (streaming 1s)...")
@@ -263,7 +263,7 @@ def network_watchdog_thread():
                 "event": "telemetry",
                 "data": current_telemetry
             })
-        except:
+        except Exception:
             pass
 
         # Periksa pergantian gateway / interface setiap 10 detik
@@ -289,7 +289,7 @@ def network_watchdog_thread():
                         last_interface = info.get('interface', '')
                         last_gateway = scanner.get_current_gateway()
                         last_gateway_mac = get_mac_from_arp(last_gateway) if last_gateway else ""
-                    except:
+                    except Exception:
                         pass
 
                     manager.broadcast({

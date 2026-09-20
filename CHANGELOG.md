@@ -2,6 +2,28 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.64] - 2026-09-20
+
+### P1 — Higiene & Quality Gates: Eliminasi 34 Bare Except & Standardisasi Tooling Modern (`python-service`)
+- **Pembersihan Defensif 34 `bare except:` pada 13 File**:
+  - Mengubah seluruh baris `except:` tanpa tipe menjadi `except Exception:` atau exception spesifik (`(socket.error, OSError)`, `(ipaddress.AddressValueError, ValueError)`, `(ValueError, TypeError)`, `(IndexError, AttributeError, ValueError)`).
+  - Mencegah penyerapan sinyal sistem `BaseException` (`KeyboardInterrupt`, `SystemExit`, `GeneratorExit`, `asyncio.CancelledError`) yang sebelumnya menyebabkan thread background menelan Ctrl-C/SIGTERM dan memicu zombie process pada Windows.
+  - Memperbaiki bug tersembunyi pada `collect_ssdp_sensors` dan `collect_mdns_sensors` di mana `KeyboardInterrupt` tertelan oleh `except: break` di dalam loop socket `recvfrom`.
+- **Regression Guard Otomatis (AST Linter)**:
+  - Menambahkan test suite baru `python-service/tests/test_code_hygiene.py` yang mem-parse pohon sintaks AST seluruh file `.py` di `src/` dan memverifikasi bahwa tidak ada handler `ast.ExceptHandler` yang memiliki `node.type is None`.
+- **Standardisasi Tooling Modern (`pyproject.toml`)**:
+  - Menambahkan file `pyproject.toml` (PEP 518/621) dengan konfigurasi:
+    - **Ruff**: Target Python 3.11, rules `E`, `W`, `F`, `I`, `UP`, `B` (Bugbear, mendeteksi B001 bare except otomatis), mengabaikan `B008` (kompatibel FastAPI `Field`/`Depends`).
+    - **Mypy**: Gradual typing configuration dengan ignore missing imports untuk `scapy.*` dan `netifaces.*`.
+    - **Pytest**: Konfigurasi runner modern yang membungkus 380 unit test `unittest.TestCase` secara backward-compatible.
+  - Menambahkan file `requirements-dev.txt` untuk dependensi pengembangan lokal dan CI gate.
+- **Pembersihan Header**:
+  - Menghilangkan UTF-8 BOM (`\xef\xbb\xbf`) pada `src/core/discovery/ap_isolation.py`.
+- **Hasil Verifikasi Otomatis (100% Hijau)**:
+  - **Python Microservice**: **380 / 380 unit tests lulus** (0 gagal).
+  - **Node.js Orchestrator**: **118 / 118 unit tests lulus** (0 gagal).
+  - **Total**: **498 tests lulus** secara menyeluruh.
+
 ## [v2.41.63] - 2026-09-19
 
 ### Perbaikan Bug HIGH: Over-Fusion Profil akibat Sinyal DHCP Generik (`backend-node`)

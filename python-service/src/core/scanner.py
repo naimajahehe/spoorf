@@ -263,7 +263,7 @@ class NetworkScanner:
                     if s.connect_ex((ip, port)) == 0:
                         vital_ports[port] = str(port)
                     s.close()
-                except:
+                except (socket.error, OSError):
                     pass
             open_ports = vital_ports
 

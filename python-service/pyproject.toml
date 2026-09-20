@@ -1,0 +1,71 @@
+[build-system]
+requires = ["setuptools>=65.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "netcut-sentinel-engine"
+version = "2.3.0"
+description = "High-Performance Layer 2 Network Discovery, ARP/NDP Manipulation & Telemetry Engine"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "scapy==2.5.0",
+    "netifaces==0.11.0",
+    "python-dotenv==1.0.0",
+    "fastapi==0.141.1",
+    "uvicorn==0.52.4",
+    "pydantic==2.13.4",
+    "psutil==7.2.2",
+    "cryptography==50.0.1",
+    "pyinstaller==6.22.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.3.0",
+    "mypy>=1.9.0",
+    "pytest>=7.4.0",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade (Python 3.11 modern idioms)
+    "B",   # flake8-bugbear (includes B001 bare except check)
+]
+ignore = [
+    "E501",  # Line length handled by formatter
+    "B008",  # Allow function calls in FastAPI argument defaults (Field/Depends/Query)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E", "F401"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = false
+warn_unused_configs = true
+ignore_missing_imports = true
+check_untyped_defs = true
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+
+[[tool.mypy.overrides]]
+module = [
+    "scapy.*",
+    "netifaces.*",
+]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-v --tb=short"

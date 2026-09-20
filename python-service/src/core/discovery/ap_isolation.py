@@ -1,4 +1,4 @@
-﻿"""
+"""
 AP Isolation (Wireless Client Isolation) Detector
 ==================================================
 Mendeteksi apakah router / Access Point (AP) menerapkan isolasi klien Layer 2

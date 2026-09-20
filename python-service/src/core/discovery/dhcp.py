@@ -493,7 +493,7 @@ def _handle_dhcp_packet(pkt) -> None:
                     s_cand = socket.inet_ntoa(raw_server_id)
                     if is_valid_private_ip(s_cand):
                         server_id = s_cand
-            except:
+            except Exception:
                 server_id = ""
 
         # Option 55: Parameter Request List (OS Fingerprint Matrix)
@@ -585,7 +585,7 @@ def _handle_dhcp_packet(pkt) -> None:
                     lease_str = "Permanent / Infinite Lease"
                 elif lease_sec > 0:
                     lease_str = f"{lease_sec}s ({round(lease_sec / 3600, 1)}h)"
-            except:
+            except Exception:
                 lease_str = ""
 
         # Option 3: Router / Default Gateway
@@ -604,7 +604,7 @@ def _handle_dhcp_packet(pkt) -> None:
                     candidate = socket.inet_ntoa(raw_router)
                     if is_valid_private_ip(candidate):
                         router_ip = candidate
-            except:
+            except Exception:
                 router_ip = ""
 
         # Alamat IP: prioritaskan IP otoritatif server (yiaddr) atau klien aktif (ciaddr).
@@ -761,7 +761,7 @@ def stop_dhcp_sniffer() -> None:
         s.settimeout(0.1)
         s.sendto(b'\x00', ('127.0.0.1', 67))
         s.close()
-    except:
+    except Exception:
         pass
 
     if _dhcp_sniffer_thread and _dhcp_sniffer_thread.is_alive():

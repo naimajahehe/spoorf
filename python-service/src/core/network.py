@@ -42,7 +42,7 @@ def is_valid_private_ip(ip: str) -> bool:
     try:
         obj = ipaddress.IPv4Address(ip.strip())
         return any(obj in net for net in _RFC1918_NETWORKS)
-    except:
+    except (ipaddress.AddressValueError, ValueError):
         return False
 
 def is_valid_private_network(cidr: str) -> bool:
@@ -88,7 +88,7 @@ def get_self_mac() -> str:
         raw_mac = getattr(conf.iface, 'mac', None)
         if raw_mac:
             return raw_mac.lower().replace('-', ':')
-    except:
+    except Exception:
         pass
     return "00:00:00:00:00:00"
 
@@ -124,7 +124,7 @@ def get_current_gateway() -> str:
         default_gw = gws.get('default', {}).get(netifaces.AF_INET)
         if default_gw and is_valid_private_ip(default_gw[0]):
             return default_gw[0]
-    except:
+    except Exception:
         pass
 
     try:
@@ -143,7 +143,7 @@ def get_current_gateway() -> str:
                         is_valid_private_ip(parts[2])
                     ):
                         return parts[2]
-    except:
+    except Exception:
         pass
 
     return ""
@@ -466,7 +466,7 @@ def is_network_changed(prev_gateway: str, prev_interface: str, prev_gateway_mac:
     try:
         info = get_network_info()
         curr_interface = info.get('interface', '')
-    except:
+    except Exception:
         curr_interface = ''
     if not curr_interface:
         return False

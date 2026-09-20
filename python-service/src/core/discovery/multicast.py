@@ -371,9 +371,9 @@ def collect_ssdp_sensors(timeout: float = 0.4) -> Dict[str, Dict[str, str]]:
                     locations_to_fetch[ip] = loc_match.group(1).strip()
             except socket.timeout:
                 break
-            except:
+            except Exception:
                 break
-    except:
+    except Exception:
         locations_to_fetch = {}
     finally:
         if s:
@@ -425,9 +425,9 @@ def collect_mdns_sensors(timeout: float = 0.4) -> Dict[str, Dict[str, str]]:
                 _MDNS_DISCOVERED[ip] = {'model': model}
             except socket.timeout:
                 break
-            except:
+            except Exception:
                 break
-    except:
+    except Exception:
         pass
     finally:
         if s:

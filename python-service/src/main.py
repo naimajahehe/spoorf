@@ -7,7 +7,7 @@ if sys.platform == 'win32':
     try:
         sys.stdout.reconfigure(encoding='utf-8')
         sys.stderr.reconfigure(encoding='utf-8')
-    except:
+    except Exception:
         pass
 
 HOST = "127.0.0.1"

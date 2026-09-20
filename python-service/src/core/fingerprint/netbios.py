@@ -68,7 +68,7 @@ def query_mdns(ip: str, timeout: float = 0.25) -> str:
             # the argument as a CHARACTER SET ({'.','l','o','c','a'}) and eat trailing letters
             # (e.g. "Nicola.local." -> "Ni").
             return str(name).removesuffix('.local.').removesuffix('.')
-    except:
+    except Exception:
         pass
     return ""
 

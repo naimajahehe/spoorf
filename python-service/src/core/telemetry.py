@@ -37,7 +37,7 @@ class NetworkTelemetrySampler:
             wifi = pernic.get('Wi-Fi')
             if wifi is not None:
                 return wifi
-        except:
+        except Exception:
             pass
         return psutil.net_io_counters()
 
@@ -57,7 +57,7 @@ class NetworkTelemetrySampler:
             self.last_bytes_sent = counters.bytes_sent
             self.last_iface = iface
             self.last_time = time.time()
-        except:
+        except Exception:
             pass
 
     def sample(self) -> Dict[str, Any]:
@@ -92,7 +92,7 @@ class NetworkTelemetrySampler:
             self.last_bytes_recv = nic_stat.bytes_recv
             self.last_bytes_sent = nic_stat.bytes_sent
             self.last_iface = current_iface
-        except:
+        except Exception:
             pass
 
         # 3. Real Ping Latency ke Gateway (Di-sample tiap 3.5s untuk mencegah router queue overload)
@@ -108,7 +108,7 @@ class NetworkTelemetrySampler:
                         self.cached_latency_ms = p.get('rtt', 12)
                     else:
                         self.cached_latency_ms = 14
-                except:
+                except Exception:
                     pass
             latency_ms = self.cached_latency_ms
 

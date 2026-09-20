@@ -74,7 +74,7 @@ def is_randomized_mac(mac: str) -> bool:
     try:
         second_char = mac.replace('-', ':').split(':')[0][1].upper()
         return second_char in ('2', '6', 'A', 'E')
-    except:
+    except (IndexError, AttributeError, ValueError):
         return False
 
 

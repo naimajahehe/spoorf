@@ -54,7 +54,7 @@ def categorize_ipv6(addr: str) -> str:
         if ip_obj in ipaddress.IPv6Network('2000::/3') or ip_obj.is_global:
             return 'global'
         return 'other'
-    except:
+    except (ipaddress.AddressValueError, ValueError):
         return 'unknown'
 
 

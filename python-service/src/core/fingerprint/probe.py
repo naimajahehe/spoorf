@@ -57,7 +57,7 @@ def scan_ports(ip: str) -> Dict[int, str]:
                 result = s.connect_ex((ip, port))
                 if result == 0:
                     open_ports[port] = _SERVICES.get(port, str(port))
-        except:
+        except (socket.error, OSError):
             pass
     return open_ports
 
@@ -93,7 +93,7 @@ def get_http_info(ip: str, open_ports: List[int]) -> Dict[str, str]:
             title = re.sub(r'\s+', ' ', title_match.group(1)).strip()
 
         return {'web_title': title[:60], 'web_server': server[:40]}
-    except:
+    except (socket.error, OSError):
         pass
     return {'web_title': '', 'web_server': ''}
 
@@ -113,7 +113,7 @@ def _scan_single_port(ip: str, port: int, timeout: float = 0.08) -> tuple:
             s.settimeout(timeout)
             res = s.connect_ex((ip, port))
             return (port, res == 0)
-    except:
+    except (socket.error, OSError):
         return (port, False)
 
 def deep_scan_ports(ip: str, ports: List[int] = None) -> Dict[str, Any]:
@@ -129,7 +129,7 @@ def deep_scan_ports(ip: str, ports: List[int] = None) -> Dict[str, Any]:
                 p_int = int(p)
                 if 1 <= p_int <= 65535:
                     valid.append(p_int)
-            except:
+            except (ValueError, TypeError):
                 pass
         scan_list = sorted(list(set(valid)))[:1000]
         if not scan_list:
@@ -144,7 +144,7 @@ def deep_scan_ports(ip: str, ports: List[int] = None) -> Dict[str, Any]:
                 port, is_open = future.result()
                 if is_open:
                     open_ports_dict[port] = _SERVICES.get(port, str(port))
-            except:
+            except Exception:
                 pass
 
     open_port_list = sorted(list(open_ports_dict.keys()))

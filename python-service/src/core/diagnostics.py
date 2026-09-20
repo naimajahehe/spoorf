@@ -187,7 +187,7 @@ def check_network_adapter_and_gateway() -> Dict[str, Any]:
                 s.connect((gateway, 80))
                 gw_reachable = True
                 gw_latency_ms = round((time.perf_counter() - t0) * 1000, 2)
-        except:
+        except (socket.error, OSError):
             # Jika port 80 tertutup, coba ping socket UDP
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
@@ -195,7 +195,7 @@ def check_network_adapter_and_gateway() -> Dict[str, Any]:
                     s.connect((gateway, 53))
                     gw_reachable = True
                     gw_latency_ms = round((time.perf_counter() - t0) * 1000, 2)
-            except:
+            except (socket.error, OSError):
                 gw_reachable = False
 
     is_valid_ip = is_valid_private_ip(ip)

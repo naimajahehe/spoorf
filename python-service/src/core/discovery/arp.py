@@ -124,7 +124,7 @@ def collect_from_arp_cache(
             if info.get('network'):
                 import ipaddress
                 curr_net = ipaddress.IPv4Network(info['network'], strict=False)
-        except:
+        except Exception:
             pass
 
         if sys.platform == 'win32':
@@ -201,7 +201,7 @@ def collect_from_arp_broadcast(discovered: Dict[str, str], timeout: float = 1.0)
                 my_ip = net_info.get('ip', '')
                 if my_ip and is_valid_private_ip(my_ip):
                     network_cidr = f"{my_ip.rsplit('.', 1)[0]}.0/24"
-        except:
+        except Exception:
             pass
 
         arp_req = Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(pdst=network_cidr)
