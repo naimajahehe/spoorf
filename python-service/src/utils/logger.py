@@ -7,13 +7,17 @@ Supports dual-mode output:
 
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 import sys
 from datetime import datetime, timezone
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from ..config import settings
+
+# Context variable for distributed request tracing (e.g. from x-request-id)
+request_id_ctx: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("request_id", default=None)
 
 # Atribut internal standar logging.LogRecord yang tidak boleh diekstrak sebagai extra context
 _RESERVED_ATTRS = frozenset({
@@ -37,7 +41,17 @@ class StructuredJSONFormatter(logging.Formatter):
             "level": record.levelname,
             "logger": record.name,
             "message": record.getMessage(),
+            "source": {
+                "file": record.filename,
+                "line": record.lineno,
+                "function": record.funcName,
+            },
         }
+
+        # Automatically bind correlation ID from contextvars if present
+        req_id = request_id_ctx.get()
+        if req_id:
+            payload["request_id"] = req_id
 
         # Ekstrak extra kwargs yang disematkan caller (mis: victim_ip, session_id, action)
         extras = {k: v for k, v in record.__dict__.items() if k not in _RESERVED_ATTRS}
@@ -51,7 +65,7 @@ class StructuredJSONFormatter(logging.Formatter):
 
 
 def setup_logger(name: str = "netcut") -> logging.Logger:
-    """Configures and returns a logger instance with idempotent handler registration."""
+    """Configures and returns the root netcut logger instance with idempotent handler registration."""
     logger = logging.getLogger(name)
     level_name = settings.LOG_LEVEL.upper()
     logger.setLevel(getattr(logging, level_name, logging.INFO))
@@ -74,4 +88,29 @@ def setup_logger(name: str = "netcut") -> logging.Logger:
     return logger
 
 
-logger = setup_logger()
+# Inisialisasi root logger
+_root_logger = setup_logger("netcut")
+
+
+def get_logger(name: Optional[str] = None) -> logging.Logger:
+    """
+    Factory untuk mendapatkan logger terstruktur hierarkis.
+    - get_logger() -> logging.Logger("netcut")
+    - get_logger("spoofer") -> logging.Logger("netcut.spoofer")
+    - get_logger("netcut.spoofer") -> logging.Logger("netcut.spoofer")
+    Child loggers otomatis melakukan propagasi ke root netcut logger tanpa menduplikasi handler.
+    """
+    if not name or name == "netcut":
+        return _root_logger
+
+    if not name.startswith("netcut."):
+        scoped_name = f"netcut.{name}"
+    else:
+        scoped_name = name
+
+    child = logging.getLogger(scoped_name)
+    child.propagate = True
+    return child
+
+
+logger = _root_logger

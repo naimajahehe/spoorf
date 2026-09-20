@@ -2,6 +2,33 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.69] - 2026-09-20
+
+### Enterprise Logging Architecture & Distributed Tracing Modernization (`python-service`)
+- **Source Metadata Injection (`src/utils/logger.py`)**:
+  - `StructuredJSONFormatter` kini menyertakan blok metadata `source`: `{ "file": record.filename, "line": record.lineno, "function": record.funcName }` pada setiap payload JSON.
+- **Distributed Request Tracing via ContextVars (`src/utils/logger.py`, `src/server.py`)**:
+  - Mengimplementasikan `request_id_ctx` berbasis modul standar Python `contextvars`.
+  - Menambahkan `request_tracing_middleware` pada FastAPI di `src/server.py`:
+    - Mengambil header `x-request-id` dari upstream (Node.js orchestrator) atau menghasilkan UUID hex 12-karakter jika tidak ada.
+    - Mengikat ID ke `request_id_ctx` sepanjang siklus hidup coroutine async dan background task.
+    - Menyematkan header respons `x-request-id`.
+    - Mencatat HTTP access log terstruktur lengkap dengan `method`, `path`, `status_code`, dan `duration_ms` (meredam probe rutin `/health` non-error).
+- **Hierarchical Logger Factory (`src/utils/logger.py`)**:
+  - Mengimplementasikan `get_logger(name: Optional[str]) -> logging.Logger`:
+    - Mendukung nama hierarkis terspesialisasi (`get_logger("spoofer")` $\rightarrow$ `netcut.spoofer`).
+    - Otomatis berpropagasi ke root handler `netcut` tanpa risiko duplikasi handler.
+    - Mempertahankan singleton `logger = get_logger("netcut")` untuk 100% backward compatibility pada 65 file pengimpor.
+- **Stack Trace Preservation on Failures (`src/server.py`, `src/container.py`)**:
+  - Menyematkan `exc_info=True` pada `sanitized_http_exception_handler` untuk error 500 dan loop shutdown di `src/container.py` agar traceback tidak lagi hilang.
+- **Automated TDD Verification (`tests/test_enterprise_logging.py`)**:
+  - Menambahkan 8 unit test baru mencakup source metadata, context extras, contextvars request ID, exception tracebacks, hierarchical logger scopes, dan middleware request tracing.
+- **Hasil Pengujian**:
+  - **Pytest**: Lulus **420 / 420 test** (0 error, 0 internal warning).
+  - **Unittest Python**: Lulus **420 / 420 test** (0 gagal).
+  - **Node.js**: Lulus **118 / 118 test** (0 gagal).
+  - **Total**: **538 automated tests 100% green**.
+
 ## [v2.41.68] - 2026-09-20
 
 ### High-Value Surgical Hygiene & Quality-Gate Hardening (`python-service`)

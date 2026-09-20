@@ -273,12 +273,19 @@ class EngineContainer:
             try:
                 cleanup()
             except Exception as error:
-                logger.error(f"Shutdown cleanup failed for {stage_name}: {error}")
+                logger.error(
+                    f"Shutdown cleanup failed for {stage_name}: {error}",
+                    exc_info=True,
+                    extra={"stage": stage_name}
+                )
                 failures.append((stage_name, error))
 
         if failures:
             details = "; ".join(f"{stage_name}: {error}" for stage_name, error in failures)
-            logger.error(f"Shutdown cleanup completed with failures: {details}")
+            logger.error(
+                f"Shutdown cleanup completed with failures: {details}",
+                extra={"failed_stages": [s for s, _ in failures]}
+            )
 
 
 _DEFAULT_CONTAINER: Optional[EngineContainer] = None
