@@ -174,7 +174,7 @@ app.add_middleware(
 )
 
 # KEAMANAN (P1): Universal Fail-Closed Token Guard
-_PUBLIC_PATHS = {"/health"}
+_PUBLIC_PATHS = {"/health", "/api/health"}
 
 
 @app.middleware("http")

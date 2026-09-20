@@ -66,22 +66,23 @@ class TestAuthGuard(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(err)
 
     async def test_http_middleware_health_path_public(self):
-        """Readiness probe /health must always be public without token."""
+        """Readiness probes /health and /api/health must always be public without token."""
         from src.server import api_token_guard
 
         # Configure fail-closed
         test_settings = EngineSettings(SENTINEL_API_TOKEN="strict-token")
 
-        request = MagicMock(spec=Request)
-        request.url.path = "/health"
-        request.method = "GET"
+        for public_path in ("/health", "/api/health"):
+            request = MagicMock(spec=Request)
+            request.url.path = public_path
+            request.method = "GET"
 
-        call_next = AsyncMock(return_value=Response(content="ok", status_code=200))
+            call_next = AsyncMock(return_value=Response(content="ok", status_code=200))
 
-        with patch("src.server.settings", test_settings):
-            response = await api_token_guard(request, call_next)
-            self.assertEqual(response.status_code, 200)
-            call_next.assert_awaited_once_with(request)
+            with patch("src.server.settings", test_settings):
+                response = await api_token_guard(request, call_next)
+                self.assertEqual(response.status_code, 200)
+                call_next.assert_awaited_once_with(request)
 
     async def test_http_middleware_options_public(self):
         """CORS preflight OPTIONS request must always be permitted."""
