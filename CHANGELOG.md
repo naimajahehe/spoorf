@@ -2,6 +2,40 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.66] - 2026-09-20
+
+### P1-4, P1-5, P3-6 — Arsitektur Modular: Dekomposisi `server.py`, Dependency Injection (`Depends`), & Modern Lifespan Manager (`python-service`)
+- **Dekomposisi Monolitik `server.py` (1278 baris ➔ Facade Ringkas 387 baris)**:
+  - Memecah 53 endpoint REST/WebSocket ke dalam 10 file domain router independen di `python-service/src/api/routes/`:
+    - `system.py`: `/health`, `/api/system/diagnostics`, `/api/status`
+    - `discovery.py`: `/api/scan`, `/api/liveness/pulse`, `/api/scan/ports`, `/api/dhcp/wakeup`, `/api/network/profile-refresh`, `/api/network/quick-reauth`, `/api/dhcp/stats`, `/api/network/ap-isolation`, `/api/wifi`
+    - `spoof.py`: `/api/spoof/start`, `/api/spoof/limit`, `/api/spoof/stop`, `/api/spoof/restore`, `/api/spoof/stop_all`
+    - `redirector.py`: `/api/redirect/*` (3 endpoint), `/api/gateway/*` (8 endpoint)
+    - `telemetry.py`: `/api/telemetry`
+    - `interceptor.py`: `/api/interceptor/*` (5 endpoint)
+    - `bettercap.py`: `/api/bettercap/*` (11 endpoint)
+    - `shield.py`: `/api/shield/*` (5 endpoint)
+    - `gaming.py`: `/api/gaming/*` (2 endpoint)
+    - `websocket.py`: `/ws/events` dan `ConnectionManager`
+  - Memusatkan 25 Pydantic schema ke `python-service/src/api/schemas.py`.
+- **Service Container & Dependency Injection (`Depends()`)**:
+  - Mengisolasi instansiasi singleton modul ke dalam `EngineContainer` (`python-service/src/container.py`) yang disimpan pada `app.state`.
+  - Mengimplementasikan dependency providers di `python-service/src/api/deps.py` dengan fallback cerdas ke `request.app.state`.
+  - Membuat decorator pembantu `@auto_inject` yang memecahkan masalah *Depends default value trap* saat fungsi route dipanggil langsung di Python murni oleh unit test tanpa ASGI request.
+  - Menerapkan *Dynamic Delegator Pattern* (`get_server_attr`) yang memastikan mocking/patching via `@patch('src.server.<symbol>')` tetap berfungsi 100% tanpa gangguan *namespace scoping*.
+- **Modernisasi Siklus Hidup ke Lifespan Context Manager (Starlette/FastAPI)**:
+  - Mengeliminasi event handler yang deprecated `@app.on_event("startup")` dan `@app.on_event("shutdown")`.
+  - Menggantikan infinite loop watchdog `while True: time.sleep(1)` dengan `stop_event: threading.Event`, memungkinkan terminasi instan saat shutdown (*zero zombie process*).
+  - Menjamin urutan pembersihan deterministik 8 tahap (`Shield` ➔ `Gaming` ➔ `liveness watchdog` ➔ `DHCP sniffer` ➔ `redirect manager` ➔ `transparent gateway` ➔ `ARP spoofer` ➔ `executor`) sesuai kontrak test suite.
+- **Jaminan 100% Backward Compatibility (7 Core Invariants)**:
+  - `server.py` bertindak sebagai *facade* yang mengekspor ulang seluruh fungsi route, Pydantic schema, dan singletons, sehingga `backend-node` dan seluruh unit test lama berjalan transparan tanpa breaking change.
+- **Automated TDD Verification**:
+  - Menambahkan test suite `python-service/tests/test_modular_architecture.py` (6 unit test) yang memvalidasi registrasi 53 endpoint, keberadaan lifespan, dan resolusi DI.
+- **Hasil Verifikasi Otomatis (100% Hijau)**:
+  - **Python Microservice**: **392 / 392 unit tests lulus** (0 gagal).
+  - **Node.js Orchestrator**: **118 / 118 unit tests lulus** (0 gagal).
+  - **Total**: **510 tests lulus** secara menyeluruh.
+
 ## [v2.41.65] - 2026-09-20
 
 ### P1 — Higiene & Quality Gates: Pemisahan Dependensi Runtime vs Build/Test & Lockfile Kriptografis (`python-service`)
