@@ -21,7 +21,7 @@ from src.api.routes import (
     websocket_router,
 )
 from src.container import EngineContainer, get_default_container
-from src.server import app, container, spoofer
+from src.server import app, container
 
 
 class TestModularArchitecture(unittest.TestCase):
