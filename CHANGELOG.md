@@ -2,6 +2,27 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.72] - 2026-09-20
+
+### Desktop Electron Dependency Synchronization & NSIS Setup Packaging
+- **Sinkronisasi Runtime Dependencies Backend ke `desktop-electron`**:
+  - Menyelesaikan akar masalah popup error Electron `"Cannot find module 'helmet'"` saat menjalankan executable installer terpasang.
+  - Menambahkan dependensi runtime backend yang hilang pada `desktop-electron/package.json`:
+    - `@opentelemetry/api`: `^1.9.1`
+    - `helmet`: `^8.3.0`
+    - `pino`: `^10.3.1`
+    - `pino-http`: `^11.0.0`
+    - `zod`: `^3.25.76`
+  - Menginstal 27 packages pendukung ke dalam `desktop-electron/node_modules`.
+- **Kompilasi dan Repackaging NSIS Installer**:
+  - Melakukan build ulang TypeScript backend & supervisor (`npm run build:ts`).
+  - Menjalankan re-linking native module `better-sqlite3@11.10.0` via `electron-builder install-app-deps`.
+  - Membangun ulang paket installer Windows NSIS: `dist-installer/Spoorf Sentinel Setup 2.21.0.exe` (103.8 MB).
+- **Verifikasi Integritas Bundle**:
+  - Menguji pemuatan modul CJS backend langsung pada lingkungan unpacked (`dist-installer/win-unpacked/resources/app`).
+  - Seluruh modul (`helmet`, `zod`, `pino`, `pino-http`, `@opentelemetry/api`) berhasil di-resolve tanpa error.
+  - Seluruh 544 automated unit tests tetap 100% lulus (420 Python + 118 Node.js + 6 Electron).
+
 ## [v2.41.71] - 2026-09-20
 
 ### Surgical Code Hygiene, Mypy 100% Type Cleanliness & Tooling Alignment (`python-service`)
