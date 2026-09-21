@@ -39,6 +39,9 @@ from .discovery import (
     collect_from_arp_broadcast,
     sweep_subnet_for_arp,
     probe_sleeping_host_via_unicast_arp,
+    pulse_host,
+    is_trust_fresh,
+    verify_candidate_with_pulse_fallback,
     collect_from_ndp_cache,
     send_ipv6_all_nodes_multicast,
     send_ipv6_router_solicitation,
@@ -509,17 +512,31 @@ class NetworkScanner:
         ]
         if unverified:
             logger.info(f"📱 Memverifikasi {len(unverified)} host kandidat (Unicast ARP / Doze Probe)...")
+            # Trust-fresh set: hosts last seen recently. Their fast 350ms probe may miss a
+            # power-save phone (answers ARP at its ~600ms wake interval), so escalate those
+            # to the longer multi-vector pulse before declaring offline. Idle/never-seen IPs
+            # are NOT pulsed -> the scan stays fast for dead addresses.
+            probe_now = time.time()
+            with cls._HISTORY_LOCK:
+                last_seen_by_mac = {
+                    m: e.get('last_seen_ts') for m, e in cls._DEVICE_HISTORY.items()
+                }
             num_probe_workers = min(15, len(unverified))
             probe_executor = concurrent.futures.ThreadPoolExecutor(max_workers=num_probe_workers)
             try:
                 futures = [
                     probe_executor.submit(
-                        probe_sleeping_host_via_unicast_arp,
-                        target_ip, target_mac, discovered, 0.35
+                        verify_candidate_with_pulse_fallback,
+                        target_ip, target_mac, gateway_ip, discovered,
+                        is_trust_fresh(last_seen_by_mac.get(target_mac.lower().replace('-', ':')), probe_now),
+                        pulse_fn=pulse_host,
+                        arp_probe_fn=probe_sleeping_host_via_unicast_arp,
                     )
                     for target_ip, target_mac in unverified
                 ]
-                concurrent.futures.wait(futures, timeout=1.5)
+                # Wait budget widened to fit the fallback pulse (350ms probe + ~1.2s pulse)
+                # for the trust-fresh subset; non-fresh candidates still return fast.
+                concurrent.futures.wait(futures, timeout=2.2)
             finally:
                 probe_executor.shutdown(wait=False, cancel_futures=True)
 

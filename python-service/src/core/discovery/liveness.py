@@ -20,7 +20,7 @@ from typing import Dict, Any, List, Optional, Callable
 from scapy.all import Ether, ARP, srp, conf
 from ..network import get_self_mac, get_network_info, is_valid_mac, is_valid_private_ip
 from .ipv6_ndp import verify_ipv6_alive
-from .arp import get_mac_from_arp
+from .arp import get_mac_from_arp, probe_sleeping_host_via_unicast_arp
 from ...utils.logger import logger
 
 # Global persistent thread pool untuk pulse probing (menghindari blocking shutdown wait=True)
@@ -361,3 +361,65 @@ class LivenessWatchdogDaemon:
         # Buang penghitung untuk perangkat yang tak lagi dilacak (mis. IP berganti) agar tak bocor.
         for stale in [k for k in self._consecutive_misses if k not in seen_ips]:
             self._consecutive_misses.pop(stale, None)
+
+
+# =============================================================================
+# POWER-SAVE PULSE FALLBACK (option #1)
+# =============================================================================
+# A Wi-Fi client in power-save answers ARP only at its wake interval (~600ms),
+# which the scan's cheap 350ms candidate probe misses -> the phone flaps
+# online/offline while physically connected. For a host that was RECENTLY online
+# (trust-fresh) we escalate to the longer multi-vector pulse before declaring it
+# offline. Idle / never-seen IPs are NOT pulsed, so the scan stays fast for them.
+
+TRUST_FRESH_ONLINE_WINDOW_S = 300  # seen within this window == "recently online"
+
+
+def is_trust_fresh(last_seen_ts: Optional[float], now: float,
+                   window: float = TRUST_FRESH_ONLINE_WINDOW_S) -> bool:
+    """True if the host was last seen within `window` seconds of `now`."""
+    if last_seen_ts is None:
+        return False
+    try:
+        return (now - float(last_seen_ts)) <= window
+    except (TypeError, ValueError):
+        return False
+
+
+def verify_candidate_with_pulse_fallback(
+    target_ip: str,
+    target_mac: str,
+    gateway_ip: Optional[str],
+    discovered: Dict[str, str],
+    recently_online: bool,
+    *,
+    pulse_fn: Callable[..., Dict[str, Any]] = pulse_host,
+    arp_probe_fn: Callable[..., None] = probe_sleeping_host_via_unicast_arp,
+    arp_timeout: float = 0.35,
+    pulse_timeout: float = 1.2,
+) -> None:
+    """Cheap 350ms ARP probe first; if it misses a RECENTLY-ONLINE (trust-fresh)
+    host, fall back to the longer multi-vector pulse (which catches the ~600ms
+    power-save wake response) before giving up. On success the host is added to
+    `discovered` keyed by IP, exactly like the fast probe. Idle / not-trust-fresh
+    IPs are never pulsed, so the scan is not slowed for dead addresses."""
+    try:
+        arp_probe_fn(target_ip, target_mac, discovered, arp_timeout)
+    except Exception:
+        pass
+    if target_ip in discovered:
+        return  # caught by the cheap probe
+    if not recently_online:
+        return  # not trust-fresh -> don't pay for the expensive pulse
+    try:
+        res = pulse_fn(
+            target_ip=target_ip,
+            target_mac=target_mac,
+            gateway_ip=gateway_ip,
+            timeout=pulse_timeout,
+        )
+    except Exception as e:
+        logger.debug(f"Pulse-fallback notice for {target_ip}: {e}")
+        return
+    if res and res.get('is_alive'):
+        discovered[target_ip] = res.get('resolved_mac') or target_mac

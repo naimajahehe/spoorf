@@ -31,6 +31,8 @@ from .ipv6_ndp import (
 from .liveness import (
     pulse_host,
     pulse_batch,
+    is_trust_fresh,
+    verify_candidate_with_pulse_fallback,
     LivenessWatchdogDaemon
 )
 from .ap_isolation import (
@@ -52,7 +54,8 @@ __all__ = [
     'collect_from_ndp_cache', 'send_ipv6_all_nodes_multicast',
     'send_ipv6_router_solicitation', 'verify_ipv6_alive',
     'is_valid_ipv6', 'categorize_ipv6',
-    'pulse_host', 'pulse_batch', 'LivenessWatchdogDaemon',
+    'pulse_host', 'pulse_batch', 'is_trust_fresh',
+    'verify_candidate_with_pulse_fallback', 'LivenessWatchdogDaemon',
     'detect_ap_isolation',
     'probe_multicast_bssid_reflection', 'probe_l3_hairpinning',
     'test_multicast_bssid_reflection', 'test_l3_hairpinning'

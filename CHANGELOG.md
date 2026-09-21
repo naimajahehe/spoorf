@@ -2,6 +2,14 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.77] - 2026-09-21
+
+### Perbaikan: Deteksi Liveness Power-Save (Pulse-Fallback) untuk HP yang Flap Online/Offline (`python-service`)
+- **Akar masalah (terbukti live)**: HP Wi-Fi dalam power-save (mis. A55-milik-Hanif) menjawab ARP hanya di interval bangun ~600ms, sedangkan probe kandidat scan memakai timeout **350ms** → meleset → divonis offline → perangkat flap online/offline padahal masih terhubung (A55 tertangkap flap 7× dalam ~11 menit; MAC & IP sama). Pulse aktif 3s membuktikan is_alive=true, RTT 587ms.
+- **Perbaikan (opsi #1, adaptif)**: `verify_candidate_with_pulse_fallback()` — probe 350ms murah dulu; bila meleset pada host yang **baru saja online** (trust-fresh, `is_trust_fresh` window 300s), eskalasi ke pulse multi-vektor (~1.2s) yang menangkap respons ~600ms sebelum memvonis offline. IP idle/tak-dikenal **tidak** di-pulse → scan tetap cepat untuk alamat mati. Wait fase probe dilebarkan 1.5s→2.2s untuk memuat pulse pada subset trust-fresh.
+- **Dampak**: menurunkan flap online/offline A55 **dan** churn `online-flip` banyak HP power-save lain (monitor mencatat online-flip=422/300 tick dari akar yang sama). Memakai `pulse_host` yang sudah teruji; tak menyentuh spoofer/hot-path enforcement.
+- **TDD**: `tests/test_pulse_fallback.py` (8 test) — trust-fresh dozing → online via pulse; IP mati → offline cepat tanpa pulse; probe cepat menang → tak pulse; exception pulse ditelan. Suite penuh 430 lulus, mypy 0 issue.
+
 ## [v2.41.76] - 2026-09-20
 
 ### Eliminasi Race Condition Startup & Reaktif Broadcast WebSocket Wi-Fi (`wifiStatus`)
