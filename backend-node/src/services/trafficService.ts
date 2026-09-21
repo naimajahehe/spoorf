@@ -712,4 +712,104 @@ export class TrafficService extends EventEmitter implements ITrafficService {
         }
         return device;
     }
+
+    async reconcileActiveEnforcementsToFree(): Promise<{
+        unblocked: string[];
+        throttlesReset: string[];
+        redirectsReset: string[];
+    }> {
+        return this.runExclusive(() => this._reconcileActiveEnforcementsToFreeImpl());
+    }
+
+    private async _reconcileActiveEnforcementsToFreeImpl(): Promise<{
+        unblocked: string[];
+        throttlesReset: string[];
+        redirectsReset: string[];
+    }> {
+        const result = {
+            unblocked: [] as string[],
+            throttlesReset: [] as string[],
+            redirectsReset: [] as string[]
+        };
+
+        if (!this.registry) {
+            return result;
+        }
+
+        const allDevices = this.registry.getAllDevices();
+
+        // 1. Reset throttles (PWM speed limit < 100) ke 100% untuk perangkat yang TIDAK diblokir
+        for (const dev of allDevices) {
+            if (dev.is_gateway || dev.is_self) continue; // Invariant 1 & 2
+            if (!dev.is_blocked && dev.speed_limit !== undefined && dev.speed_limit < 100) {
+                try {
+                    if (dev.session_id) {
+                        await this.python.stopSpoof(dev.session_id);
+                        dev.session_id = undefined;
+                    }
+                    dev.speed_limit = 100;
+                    await this.db.setDeviceSpeedLimit(dev.mac, 100, this.currentNetworkId).catch(err => this.log.debug({ err: err?.message }, 'Device not yet in DB for speed limit'));
+                    this.registry.setDevice(deviceMemKey(dev), dev);
+                    this.emitUpdate(dev);
+                    result.throttlesReset.push(dev.ip || dev.mac);
+                } catch (err: any) {
+                    this.log.warn({ dev: dev.ip, err: err?.message }, 'Failed to reset throttle on downgrade reconciliation');
+                }
+            }
+        }
+
+        // 2. Reset redirects (Smart Transparent Gateway / DNS sinkhole)
+        for (const dev of allDevices) {
+            if (dev.is_gateway || dev.is_self) continue; // Invariant 1 & 2
+            if (dev.is_redirected) {
+                try {
+                    if (dev.ip) {
+                        await this.python.stopRedirect(dev.ip);
+                    }
+                    if (dev.session_id) {
+                        await this.python.stopSpoof(dev.session_id).catch(() => {});
+                        dev.session_id = undefined;
+                    }
+                    dev.is_redirected = false;
+                    dev.redirect_url = undefined;
+                    await this.db.setDeviceBlocked(dev.mac, false, undefined, this.currentNetworkId).catch(err => this.log.debug({ err: err?.message }, 'Device not yet in DB for redirect unblock'));
+                    this.registry.setDevice(deviceMemKey(dev), dev);
+                    this.emitUpdate(dev);
+                    result.redirectsReset.push(dev.ip || dev.mac);
+                } catch (err: any) {
+                    this.log.warn({ dev: dev.ip, err: err?.message }, 'Failed to stop redirect on downgrade reconciliation');
+                }
+            }
+        }
+
+        // 3. Batasi kuota pemutusan sesuai Free tier (maksimal 5 cuts)
+        const MAX_FREE_CUTS = 5;
+        const blockedDevices = allDevices.filter(d => Boolean(d.is_blocked) && !d.is_gateway && !d.is_self);
+
+        if (blockedDevices.length > MAX_FREE_CUTS) {
+            const excessToUnblock = blockedDevices.slice(MAX_FREE_CUTS);
+            for (const dev of excessToUnblock) {
+                try {
+                    if (dev.session_id) {
+                        await this.python.stopSpoof(dev.session_id);
+                    }
+                    dev.is_blocked = false;
+                    dev.session_id = undefined;
+                    dev.speed_limit = 100;
+                    await this.db.setDeviceBlocked(dev.mac, false, undefined, this.currentNetworkId).catch(err => this.log.debug({ err: err?.message }, 'Device not yet in DB for unblock'));
+                    await this.db.setDeviceSpeedLimit(dev.mac, 100, this.currentNetworkId).catch(err => this.log.debug({ err: err?.message }, 'Device not yet in DB for speed limit'));
+                    this.registry.setDevice(deviceMemKey(dev), dev);
+                    this.emitUpdate(dev);
+                    result.unblocked.push(dev.ip || dev.mac);
+                    // Pacing 50ms untuk mencegah ARP storm pada router/AP
+                    await new Promise(r => setTimeout(r, 50));
+                } catch (err: any) {
+                    this.log.warn({ dev: dev.ip, err: err?.message }, 'Failed to unblock excess cut on downgrade reconciliation');
+                }
+            }
+        }
+
+        this.log.info({ result }, `Active enforcement reconciliation completed: ${result.throttlesReset.length} throttles reset, ${result.redirectsReset.length} redirects reset, ${result.unblocked.length} excess cuts released`);
+        return result;
+    }
 }

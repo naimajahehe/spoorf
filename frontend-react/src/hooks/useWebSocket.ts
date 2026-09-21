@@ -175,6 +175,8 @@ export function useWebSocket() {
     const [autoScanEnabled, setAutoScanEnabled] = useState<boolean>(() => {
         try { return localStorage.getItem('sentinel_autoscan') !== '0'; } catch { return true; }
     });
+    const [sessionRevokedNotice, setSessionRevokedNotice] = useState<{ reason: string; revokedAt: string } | null>(null);
+    const clearSessionRevokedNotice = useCallback(() => setSessionRevokedNotice(null), []);
 
     // ===== Live Activity Feed (event kronologis manusiawi untuk halaman Aktivitas) =====
     const [activityLog, setActivityLog] = useState<ActivityEvent[]>([]);
@@ -433,6 +435,11 @@ export function useWebSocket() {
                 recordLiveStateChange(['auth']);
                 setAuthStatus(data);
             }
+        });
+
+        newSocket.on('sessionRevoked', (data: { reason: string; revokedAt: string }) => {
+            recordLiveStateChange(['auth']);
+            setSessionRevokedNotice(data);
         });
 
         newSocket.on('disconnect', () => {
@@ -1604,6 +1611,8 @@ export function useWebSocket() {
         authLogin,
         authLogout,
         activateLicenseKey,
+        sessionRevokedNotice,
+        clearSessionRevokedNotice,
         shieldStatus,
         shieldThreats,
         shieldThreatAlert,

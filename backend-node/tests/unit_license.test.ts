@@ -49,6 +49,10 @@ class MockPythonBridge extends PythonBridge {
         }
         return res;
     }
+
+    async stopRedirect(_victimIp: string): Promise<void> {}
+    async scan(): Promise<any[]> { return []; }
+    async getStatus(): Promise<any> { return { ready: true, sessions: {} }; }
 }
 
 export async function runLicenseUnitTests() {
@@ -196,6 +200,7 @@ export async function runLicenseUnitTests() {
     assert.strictEqual(restoredStatus.isAuthenticated, true);
     assert.strictEqual(restoredStatus.license.tier, 'pro');
     assert.strictEqual(restoredStatus.isOfflineGracePeriod, true);
+    newLicenseManager.shutdown();
     console.log('  ✓ Offline Resilience: Pro license and 7-day grace period restored from SQLite cache');
 
     // Test 10: License Key Activation (PRO-SENTINEL-2026)
@@ -244,9 +249,399 @@ export async function runLicenseUnitTests() {
         console.log('  ✓ Production Offline Guard: Melempar 503 CLOUD_UNAVAILABLE saat koneksi gagal');
     }
 
+    // Test 13: Background Heartbeat Sliding Window (HTTP 200)
+    {
+        const hbDb = new DatabaseService(':memory:');
+        await hbDb.init();
+        const hbLm = new LicenseManager(hbDb, 'http://127.0.0.1:4000/v1');
+        await hbLm.init();
+
+        process.env.SPOORF_ALLOW_DEMO_LICENSE = 'true';
+        await hbLm.login({ email: 'pro_operator@sentinel.lan', password: 'secret' });
+        assert.strictEqual(hbLm.getStatus().license.tier, 'pro');
+
+        const origFetch = global.fetch;
+        const extendedGrace = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString();
+        const rotatedToken = 'spoorf_jwt_rotated_mock_token';
+
+        (global as any).fetch = async (url: string, opts: any) => {
+            if (url.includes('/auth/heartbeat')) {
+                assert.match(opts.headers.Authorization, /^Bearer /);
+                return {
+                    ok: true,
+                    status: 200,
+                    json: async () => ({
+                        status: 'success',
+                        token: rotatedToken,
+                        isRevoked: false,
+                        grace_period_until: extendedGrace
+                    })
+                };
+            }
+            return origFetch(url, opts);
+        };
+
+        try {
+            await hbLm.heartbeat();
+            const statusAfterHb = hbLm.getStatus();
+            assert.strictEqual(statusAfterHb.license.grace_period_until, extendedGrace);
+
+            const cached = await hbDb.getLicenseCache();
+            assert.strictEqual(cached?.token, rotatedToken);
+            assert.strictEqual(cached?.grace_period_until, extendedGrace);
+            console.log('  ✓ Heartbeat Sliding Window: Grace period successfully slid forward and token rotated in SQLite');
+        } finally {
+            global.fetch = origFetch;
+            hbLm.shutdown();
+            await hbDb.close();
+        }
+    }
+
+    // Test 14: Remote Session Revocation (Kick Mechanism - HTTP 401 SESSION_REVOKED)
+    {
+        const kickDb = new DatabaseService(':memory:');
+        await kickDb.init();
+        const kickLm = new LicenseManager(kickDb, 'http://127.0.0.1:4000/v1');
+        await kickLm.init();
+
+        process.env.SPOORF_ALLOW_DEMO_LICENSE = 'true';
+        await kickLm.login({ email: 'pro_kicked@sentinel.lan', password: 'secret' });
+        assert.strictEqual(kickLm.getStatus().license.tier, 'pro');
+
+        let revokedEventPayload: any = null;
+        let downgradedEventPayload: any = null;
+        kickLm.on('sessionRevoked', (p) => { revokedEventPayload = p; });
+        kickLm.on('downgraded', (p) => { downgradedEventPayload = p; });
+
+        const origFetch = global.fetch;
+        (global as any).fetch = async (url: string, opts: any) => {
+            if (url.includes('/auth/heartbeat')) {
+                return {
+                    ok: false,
+                    status: 401,
+                    json: async () => ({
+                        success: false,
+                        error: {
+                            code: 'SESSION_REVOKED',
+                            message: 'Sesi Anda telah dicabut karena batas login bersamaan terlampaui.',
+                            details: { isRevoked: true }
+                        }
+                    })
+                };
+            }
+            return origFetch(url, opts);
+        };
+
+        try {
+            await kickLm.heartbeat();
+            const statusAfterKick = kickLm.getStatus();
+            assert.strictEqual(statusAfterKick.isAuthenticated, false);
+            assert.strictEqual(statusAfterKick.license.tier, 'free');
+            assert.strictEqual(statusAfterKick.user, null);
+
+            const cached = await kickDb.getLicenseCache();
+            assert.strictEqual(cached, null);
+
+            assert.ok(revokedEventPayload, 'sessionRevoked event must be emitted');
+            assert.strictEqual(revokedEventPayload.tier, 'free');
+            assert.strictEqual(revokedEventPayload.previousTier, 'pro');
+            assert.match(revokedEventPayload.reason, /telah dicabut/);
+
+            assert.ok(downgradedEventPayload, 'downgraded event must be emitted');
+            console.log('  ✓ Remote Kick: SESSION_REVOKED instantaneously downgrades to Free, clears cache, and emits sessionRevoked');
+        } finally {
+            global.fetch = origFetch;
+            kickLm.shutdown();
+            await kickDb.close();
+        }
+    }
+
+    // Test 15: Offline Resilience Invariant (Network failure within grace period does NOT downgrade)
+    {
+        const offlineDb = new DatabaseService(':memory:');
+        await offlineDb.init();
+        const offlineLm = new LicenseManager(offlineDb, 'http://127.0.0.1:4000/v1');
+        await offlineLm.init();
+
+        process.env.SPOORF_ALLOW_DEMO_LICENSE = 'true';
+        await offlineLm.login({ email: 'pro_field_worker@sentinel.lan', password: 'secret' });
+        assert.strictEqual(offlineLm.getStatus().license.tier, 'pro');
+
+        const origFetch = global.fetch;
+        (global as any).fetch = async () => {
+            throw new Error('fetch failed: ENOTFOUND api.spoorf.app');
+        };
+
+        try {
+            await offlineLm.heartbeat();
+
+            const status = offlineLm.getStatus();
+            assert.strictEqual(status.isAuthenticated, true);
+            assert.strictEqual(status.license.tier, 'pro');
+            assert.strictEqual(status.isOfflineGracePeriod, true);
+            console.log('  ✓ Offline Resilience Invariant: Network outage does NOT downgrade while within 7-day grace period');
+        } finally {
+            global.fetch = origFetch;
+            offlineLm.shutdown();
+            await offlineDb.close();
+        }
+    }
+
+    // Test 16: Offline Grace Exhaustion (Network failure AFTER grace period expires downgrades to Free)
+    {
+        const expDb = new DatabaseService(':memory:');
+        await expDb.init();
+        const expLm = new LicenseManager(expDb, 'http://127.0.0.1:4000/v1');
+        await expLm.init();
+
+        process.env.SPOORF_ALLOW_DEMO_LICENSE = 'true';
+        await expLm.login({ email: 'pro_expired@sentinel.lan', password: 'secret' });
+
+        (expLm as any).currentLicense.grace_period_until = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+
+        const origFetch = global.fetch;
+        (global as any).fetch = async () => {
+            throw new Error('fetch failed: ENOTFOUND api.spoorf.app');
+        };
+
+        try {
+            await expLm.heartbeat();
+            const status = expLm.getStatus();
+            assert.strictEqual(status.isAuthenticated, false);
+            assert.strictEqual(status.license.tier, 'free');
+            console.log('  ✓ Offline Grace Exhaustion: Reverts to Free when grace period has truly expired');
+        } finally {
+            global.fetch = origFetch;
+            expLm.shutdown();
+            await expDb.close();
+        }
+    }
+
+    // Test 17: Active Enforcement Downgrade Reconciliation (Throttles reset, redirects stopped, cuts capped at 5)
+    {
+        const reconDb = new DatabaseService(':memory:');
+        await reconDb.init();
+        const reconLm = new LicenseManager(reconDb);
+        await reconLm.init();
+
+        process.env.SPOORF_ALLOW_DEMO_LICENSE = 'true';
+        await reconLm.login({ email: 'pro_recon@sentinel.lan', password: 'secret' });
+
+        const mockPy = new MockPythonBridge();
+        const dm = new DeviceManager(mockPy, reconDb, reconLm);
+
+        const gw: Device = {
+            ip: '192.168.1.1',
+            mac: '00:11:22:33:44:01',
+            hostname: 'Router-GW',
+            vendor: 'TP-Link',
+            is_gateway: true,
+            is_online: true,
+            is_blocked: false,
+            open_ports: [],
+            services: [],
+            device_type: 'Router',
+            os: 'Linux',
+            rtt_ms: 2
+        };
+        const host: Device = {
+            ip: '192.168.1.50',
+            mac: '00:11:22:33:44:50',
+            hostname: 'This-PC',
+            vendor: 'Lenovo',
+            is_gateway: false,
+            is_self: true,
+            is_online: true,
+            is_blocked: false,
+            open_ports: [],
+            services: [],
+            device_type: 'PC',
+            os: 'Windows',
+            rtt_ms: 1
+        };
+        (dm as any).devices.set(gw.ip, gw);
+        (dm as any).devices.set(host.ip, host);
+
+        for (let i = 1; i <= 7; i++) {
+            const sid = `sess_10${i}`;
+            const dev: Device = {
+                ip: `192.168.1.10${i}`,
+                mac: `00:11:22:33:44:a${i}`,
+                hostname: `Target-${i}`,
+                vendor: 'Vendor',
+                is_gateway: false,
+                is_self: false,
+                is_online: true,
+                is_blocked: true,
+                session_id: sid,
+                speed_limit: 0, // Cut-off targets have speed_limit 0
+                open_ports: [],
+                services: [],
+                device_type: 'Mobile',
+                os: 'Android',
+                rtt_ms: 10
+            };
+            (dm as any).devices.set(dev.ip, dev);
+            mockPy.mockStartedSpoofs.push(sid);
+        }
+
+        // Add 1 throttled device that is NOT blocked
+        const throttledDev: Device = {
+            ip: '192.168.1.115',
+            mac: '00:11:22:33:44:b5',
+            hostname: 'Throttled-Target',
+            vendor: 'Vendor',
+            is_gateway: false,
+            is_self: false,
+            is_online: true,
+            is_blocked: false,
+            session_id: 'sess_115',
+            speed_limit: 35,
+            open_ports: [],
+            services: [],
+            device_type: 'Mobile',
+            os: 'Android',
+            rtt_ms: 10
+        };
+        (dm as any).devices.set(throttledDev.ip, throttledDev);
+        mockPy.mockStartedSpoofs.push(throttledDev.session_id!);
+        mockPy.mockThrottled.set(throttledDev.session_id!, 35);
+
+        const redirDev: Device = {
+            ip: '192.168.1.120',
+            mac: '00:11:22:33:44:c0',
+            hostname: 'Redirect-Target',
+            vendor: 'Vendor',
+            is_gateway: false,
+            is_self: false,
+            is_online: true,
+            is_blocked: false,
+            is_redirected: true,
+            redirect_url: 'http://block.lan',
+            open_ports: [],
+            services: [],
+            device_type: 'Mobile',
+            os: 'Android',
+            rtt_ms: 10
+        };
+        (dm as any).devices.set(redirDev.ip, redirDev);
+
+        assert.strictEqual(Array.from((dm as any).devices.values()).filter((d: any) => d.is_blocked).length, 7);
+
+        const reconRes = await dm.reconcileActiveEnforcementsToFree();
+
+        // 1. Throttles must be reset to 100 for non-blocked devices only
+        const targetThrottled = (dm as any).devices.get('192.168.1.115');
+        assert.strictEqual(targetThrottled.speed_limit, 100, 'Throttled target speed_limit must be reset to 100');
+        assert.ok(reconRes.throttlesReset.includes('192.168.1.115'));
+
+        // Retained blocked devices must NOT be in throttlesReset and must keep speed_limit 0
+        const retainedTarget = (dm as any).devices.get('192.168.1.101');
+        assert.strictEqual(retainedTarget.is_blocked, true);
+        assert.strictEqual(retainedTarget.speed_limit, 0, 'Retained blocked device must keep speed_limit 0 (cut-off)');
+        assert.strictEqual(reconRes.throttlesReset.includes('192.168.1.101'), false);
+
+        const redirAfter = (dm as any).devices.get('192.168.1.120');
+        assert.strictEqual(redirAfter.is_redirected, false, 'Redirect must be stopped');
+        assert.strictEqual(redirAfter.redirect_url, undefined);
+        assert.ok(reconRes.redirectsReset.includes('192.168.1.120'));
+
+        const remainingBlocked = Array.from((dm as any).devices.values()).filter((d: any) => d.is_blocked);
+        assert.strictEqual(remainingBlocked.length, 5, 'Blocked count must be capped at Free limit (5)');
+        assert.strictEqual(reconRes.unblocked.length, 2, 'Exactly 2 excess devices must be unblocked');
+
+        assert.strictEqual(gw.is_blocked, false);
+        assert.strictEqual(host.is_blocked, false);
+
+        console.log('  ✓ Active Enforcement Reconciler: Throttles reset, redirects stopped, and cuts capped at 5 without touching gateway, host, or corrupting blocked targets');
+
+        reconLm.shutdown();
+        await reconDb.close();
+    }
+
+    // Test 18: Explicit Logout Emits 'downgraded'
+    {
+        const logoutDb = new DatabaseService(':memory:');
+        await logoutDb.init();
+        const logoutLm = new LicenseManager(logoutDb);
+        await logoutLm.init();
+
+        process.env.SPOORF_ALLOW_DEMO_LICENSE = 'true';
+        await logoutLm.login({ email: 'pro_logout@sentinel.lan', password: 'secret' });
+        assert.strictEqual(logoutLm.getStatus().license.tier, 'pro');
+
+        let downgradedFired = false;
+        logoutLm.on('downgraded', (payload) => {
+            if (payload?.tier === 'free' && payload?.previousTier === 'pro') {
+                downgradedFired = true;
+            }
+        });
+
+        await logoutLm.logout();
+        assert.strictEqual(downgradedFired, true, 'Logout from Pro must emit downgraded event');
+        assert.strictEqual(logoutLm.getStatus().license.tier, 'free');
+        console.log('  ✓ Logout Downgrade Event: Explicit logout from Pro emits downgraded event for system reconciliation');
+
+        logoutLm.shutdown();
+        await logoutDb.close();
+    }
+
+    // Test 19: Late Heartbeat Fetch Response Does Not Resurrect Logged-Out Token
+    {
+        const raceDb = new DatabaseService(':memory:');
+        await raceDb.init();
+        const raceLm = new LicenseManager(raceDb, 'http://127.0.0.1:4000/v1');
+        await raceLm.init();
+
+        process.env.SPOORF_ALLOW_DEMO_LICENSE = 'true';
+        await raceLm.login({ email: 'pro_race@sentinel.lan', password: 'secret' });
+        assert.strictEqual(raceLm.getStatus().license.tier, 'pro');
+
+        const origFetch = global.fetch;
+        let resolveFetch: (val: any) => void;
+        const fetchPromise = new Promise((resolve) => {
+            resolveFetch = resolve;
+        });
+
+        (global as any).fetch = () => fetchPromise;
+
+        try {
+            // Start heartbeat in background
+            const hbPromise = raceLm.heartbeat();
+
+            // While fetch is pending, user logs out
+            await raceLm.logout();
+            assert.strictEqual(raceLm.getStatus().isAuthenticated, false);
+
+            // Now resolve the late fetch with HTTP 200 and a token
+            resolveFetch!({
+                ok: true,
+                status: 200,
+                json: async () => ({
+                    status: 'success',
+                    token: 'resurrected_token_should_be_ignored',
+                    grace_period_until: new Date(Date.now() + 7 * 86400000).toISOString()
+                })
+            });
+
+            await hbPromise;
+
+            // Assert token was NOT resurrected
+            const finalStatus = raceLm.getStatus();
+            assert.strictEqual(finalStatus.isAuthenticated, false);
+            assert.strictEqual(finalStatus.license.tier, 'free');
+            assert.strictEqual((raceLm as any).currentToken, null);
+            console.log('  ✓ Race Condition Safety: Late heartbeat response after logout does not resurrect session token');
+        } finally {
+            global.fetch = origFetch;
+            raceLm.shutdown();
+            await raceDb.close();
+        }
+    }
+
+    licenseManager.shutdown();
     await db.close();
 
-    // Pulihkan flag demo agar tidak bocor ke test lain.
     if (prevDemoFlag === undefined) {
         delete process.env.SPOORF_ALLOW_DEMO_LICENSE;
     } else {

@@ -155,6 +155,8 @@ function App() {
         authLogin,
         authLogout,
         activateLicenseKey,
+        sessionRevokedNotice,
+        clearSessionRevokedNotice,
         shieldStatus,
         shieldThreats,
         shieldThreatAlert,
@@ -898,6 +900,22 @@ function App() {
         }, 5000);
         return () => clearTimeout(timer);
     }, [error, clearError]);
+
+    // Surface session revoked notice as high-priority Toast Notification
+    useEffect(() => {
+        if (!sessionRevokedNotice) return;
+
+        const toastId = `revoked-${Date.now()}`;
+        const revokedToast: ActiveToastItem = {
+            id: toastId,
+            type: 'error',
+            message: sessionRevokedNotice.reason || 'Sesi Anda telah dicabut karena login di perangkat lain. Aplikasi beralih ke paket Free.',
+            title: 'Sesi Dicabut (Remote Kick)',
+            timestamp: Date.now()
+        };
+        setActiveToasts(prev => [revokedToast, ...prev].slice(0, 3));
+        clearSessionRevokedNotice();
+    }, [sessionRevokedNotice, clearSessionRevokedNotice]);
 
     // Handle Disconnected Device Toast Notifications (Suppressed if muted, recorded to history)
     useEffect(() => {

@@ -274,6 +274,18 @@ export class DeviceManager extends EventEmitter implements IDeviceManager {
         this.discoveryService = discoveryService || new DiscoveryService(this.python, this.db, registry, this.trafficService, this.gamingService);
         this.reconciliationService = reconciliationService || new ReconciliationService(this.python, this.db, registry, this.trafficService, this.gamingService, this.discoveryService);
 
+        // Rekonsiliasi otomatis jika lisensi di-downgrade (misal remote kick)
+        if (this.license && typeof (this.license as any).on === 'function') {
+            (this.license as any).on('downgraded', async (payload: any) => {
+                this.log.info({ payload }, '[DeviceManager] License downgraded. Executing active enforcement reconciliation.');
+                try {
+                    await this.reconcileActiveEnforcementsToFree();
+                } catch (err: any) {
+                    this.log.error({ err: err?.message || err }, '[DeviceManager] Failed to reconcile active enforcements after license downgrade');
+                }
+            });
+        }
+
         // Listen for network changes from Python
         this.python.on('telemetry', (data) => {
             this.emit('telemetry', data);
@@ -643,6 +655,13 @@ export class DeviceManager extends EventEmitter implements IDeviceManager {
 
     async stopRedirectDevice(ip: string): Promise<Device> {
         return this.trafficService.stopRedirectDevice(ip);
+    }
+
+    async reconcileActiveEnforcementsToFree(): Promise<any> {
+        if (typeof this.trafficService.reconcileActiveEnforcementsToFree === 'function') {
+            return this.trafficService.reconcileActiveEnforcementsToFree();
+        }
+        return { unblocked: [], throttlesReset: [], redirectsReset: [] };
     }
 
     async deleteDevice(mac: string): Promise<void> {

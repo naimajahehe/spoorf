@@ -201,6 +201,11 @@ export class WebSocketManager {
                 this.log.info({ event: 'licenseStatus', tier: status?.license?.tier }, `Broadcast licenseStatus updated: ${status?.license?.tier?.toUpperCase()}`);
                 this.io.emit('licenseStatus', status);
             });
+
+            this.licenseManager.on('sessionRevoked', (payload: any) => {
+                this.log.warn({ event: 'sessionRevoked', payload }, `Broadcast sessionRevoked: ${payload?.reason}`);
+                this.io.emit('sessionRevoked', payload);
+            });
         }
     }
 

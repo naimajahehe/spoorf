@@ -2,6 +2,49 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.79] - 2026-09-21
+
+### Implementasi: Periodic Background Heartbeat & Remote Session Synchronization (Langkah 1 Cloud)
+- **Latar Belakang & Masalah Sistem**:
+  - Sebelumnya, desktop `LicenseManager` hanya melakukan autentikasi satu kali saat login awal, mengakibatkan jendela masa tenggang offline (*grace period* 7 hari) statis dan tidak pernah bergeser ke depan saat aplikasi dijalankan berhari-hari.
+  - Desktop juga buta terhadap pencabutan sesi jarak jauh (*remote session kick*) saat batas login bersamaan terlampaui oleh perangkat lain di cloud (`isRevoked: true`), dan tidak memiliki mekanisme rekonsiliasi penegakan jaringan aktif saat lisensi di-downgrade.
+- **Pembaruan Arsitektur & Logika Sistem**:
+  1. **Background Heartbeat Engine (`LicenseManager`)**:
+     - Menjalankan loop asynchronous periodik setiap 3 menit (`HEARTBEAT_INTERVAL_MS = 180_000`) dengan random jitter $\pm 15$ detik untuk mencegah *thundering herd* pada armada jaringan.
+     - Menggunakan timer `unref()` agar tidak memblokir shutdown proses atau test runner.
+     - Menyediakan pengaman mutex `isHeartbeatInFlight` untuk mencegah request paralel bertumpuk.
+     - Berjalan otomatis setelah login, aktivasi key, atau pemulihan cache SQLite pada startup; berhenti otomatis pada logout atau shutdown.
+  2. **Sliding Offline Grace Period Window & Ketahanan Offline (Resilience Invariant)**:
+     - Setiap respons `200 OK` dari Cloud `POST /v1/auth/heartbeat` memajukan `grace_period_until` (+7 hari ke depan) dan memutar token RS256 terenkripsi ke dalam SQLite `license_cache`.
+     - Masalah koneksi jaringan (DNS, timeout, server down) **TIDAK AKAN** mendowngrade sesi PRO selama masa tenggang offline masih berlaku (`now < grace_period_until`).
+     - Downgrade hanya terjadi saat masa tenggang offline benar-benar habis atau saat cloud mengirimkan instruksi pencabutan eksplisit.
+  3. **Mekanisme Remote Revocation ("Kick Mechanism") & Rekonsiliasi Penegakan Aktif**:
+     - Menerima respons HTTP 401 berkode `SESSION_REVOKED` dari Cloud saat akun aktif di perangkat lain.
+     - Seketika mengembalikan state lisensi ke `DEFAULT_FREE_LICENSE`, menghapus token dari SQLite, menghentikan loop heartbeat, dan memancarkan event `sessionRevoked`, `downgraded`, serta `licenseChanged`.
+     - `DeviceManager` & `TrafficService` (`reconcileActiveEnforcementsToFree`):
+       - Mereset limit PWM (`speed_limit < 100`) kembali ke 100% (unrestricted).
+       - Menghentikan sesi transparent redirect / DNS sinkhole.
+       - Membatasi kuota pemutusan sesuai limit Free (`max_cuts = 5`), melepas kelebihan perangkat terblokir secara serial dengan jeda 50ms untuk mencegah lonjakan badai paket ARP (*anti ARP storm*).
+       - Menjaga kebalan mutlak **Invariant 1 (Gateway Immunity)** dan **Invariant 2 (Anti-Self-Cut)**.
+  4. **Propagasi WebSocket & UI React (`frontend-react`)**:
+     - `WebSocketManager` memancarkan event `sessionRevoked` ke seluruh klien terhubung.
+     - `useWebSocket.ts` menangkap notifikasi dan mengekspos `sessionRevokedNotice`.
+     - `App.tsx` menampilkan notifikasi floating error toast dengan judul *"Sesi Dicabut (Remote Kick)"* dan otomatis memperbarui badge tier dari PRO ke FREE.
+   5. **Automated Testing Suite (`unit_license.test.ts`)**:
+      - Test 13: Heartbeat sliding window update & token rotation ke SQLite.
+      - Test 14: Remote kick handling (HTTP 401 `SESSION_REVOKED`).
+      - Test 15: Ketahanan offline saat koneksi putus dalam masa tenggang.
+      - Test 16: Kedaluwarsa masa tenggang offline mengembalikan lisensi ke Free.
+      - Test 17: Rekonsiliasi penegakan aktif saat lisensi di-downgrade (mempertahankan target cut tetap `speed_limit: 0`).
+      - Test 18: Logout eksplisit memancarkan event `downgraded` untuk memicu rekonsiliasi perangkat aktif.
+      - Test 19: Pencegahan race condition asinkron (respons heartbeat lambat pasca-logout tidak menghidupkan kembali token).
+   6. **Superpowers Code Review Hardening**:
+      - Perbaikan selektor penegakan throttle di `TrafficService`: memeriksa `!dev.is_blocked` agar target pemutusan (cut-off) tidak salah dideteksi sebagai throttle aktif.
+      - Pembersihan status `dev.session_id` dan pembaruan SQLite saat sesi HTTP redirect dilepas pada saat downgrade.
+      - Persistensi `this.cloudEndpoint = targetUrl` pada login sukses dengan URL terpercaya.
+      - Penanganan defensif respons HTTP 200 dengan payload `{ isRevoked: true }`.
+- **Verifikasi**: Seluruh 562 automated unit test lulus 100% (430 Python + 132 Node.js). Build frontend sukses tanpa kesalahan TypeScript.
+
 ## [v2.41.78] - 2026-09-21
 
 ### Perbaikan: Eliminasi Error Login "Request failed with status code 400" & Propagasi Diagnostik End-to-End

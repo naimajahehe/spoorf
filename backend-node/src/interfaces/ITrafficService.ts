@@ -6,6 +6,11 @@ export interface ITrafficService {
     setSpeedLimit(ip: string, limit: number, gatewayIp?: string): Promise<Device>;
     redirectDevice(ip: string, redirectUrl: string, instagramUsername?: string, gatewayIp?: string): Promise<Device>;
     stopRedirectDevice(ip: string): Promise<Device>;
+    reconcileActiveEnforcementsToFree?(): Promise<{
+        unblocked: string[];
+        throttlesReset: string[];
+        redirectsReset: string[];
+    }>;
 }
 
 

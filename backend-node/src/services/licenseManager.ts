@@ -83,6 +83,9 @@ export const VIP_TIER_LICENSE: UserLicense = {
     grace_period_until: null
 };
 
+export const HEARTBEAT_INTERVAL_MS = 180_000; // 3 menit
+export const HEARTBEAT_JITTER_MS = 15_000; // +/- 15 detik
+
 export class FeatureLimitError extends ForbiddenError {
     constructor(message: string) {
         super(message, 'FEATURE_LIMIT_EXCEEDED');
@@ -106,6 +109,12 @@ export class LicenseManager extends EventEmitter implements ILicenseManager {
     private sessionId: string;
     private cloudEndpoint: string;
     private isInitialized = false;
+
+    // Background Heartbeat Engine State
+    private heartbeatTimer: NodeJS.Timeout | null = null;
+    private isHeartbeatInFlight = false;
+    private heartbeatIntervalMs = HEARTBEAT_INTERVAL_MS;
+    private heartbeatJitterMs = HEARTBEAT_JITTER_MS;
 
     constructor(db: IDatabaseService, cloudEndpoint?: string) {
         super();
@@ -158,6 +167,9 @@ export class LicenseManager extends EventEmitter implements ILicenseManager {
                         this.sessionId = (cached as any).session_id || cached.hwid;
                     }
                     this.log.info({ tier: cached.tier, email: this.currentUser?.email }, `Restored cached ${cached.tier.toUpperCase()} license for ${this.currentUser?.email}`);
+                    if (this.currentToken && this.currentLicense.tier !== 'free') {
+                        this.startHeartbeat();
+                    }
                 } else {
                     this.log.warn('Cached license grace period expired. Reverting to Free tier.');
                     this.currentLicense = { ...DEFAULT_FREE_LICENSE };
@@ -328,6 +340,7 @@ export class LicenseManager extends EventEmitter implements ILicenseManager {
         this.currentUser = authResult.user;
         this.currentLicense = authResult.license;
         this.currentToken = authResult.token;
+        this.cloudEndpoint = targetUrl;
 
         // Persistensikan ke SQLite
         const cacheRecord: CachedLicense = {
@@ -348,6 +361,10 @@ export class LicenseManager extends EventEmitter implements ILicenseManager {
             hwid: this.hwid
         };
         await this.db.saveLicenseCache(cacheRecord);
+
+        if (this.currentToken && this.currentLicense.tier !== 'free') {
+            this.startHeartbeat();
+        }
 
         this.emit('licenseChanged', this.getStatus());
         return this.getStatus();
@@ -412,16 +429,238 @@ export class LicenseManager extends EventEmitter implements ILicenseManager {
             hwid: this.hwid
         });
 
+        if (this.currentToken && this.currentLicense.tier !== 'free') {
+            this.startHeartbeat();
+        }
+
         this.emit('licenseChanged', this.getStatus());
         return this.getStatus();
     }
 
     public async logout(): Promise<void> {
+        this.stopHeartbeat();
         await this.init();
+        const prevTier = this.currentLicense.tier;
         this.currentUser = null;
         this.currentToken = null;
         this.currentLicense = { ...DEFAULT_FREE_LICENSE };
         await this.db.clearLicenseCache();
+        if (prevTier !== 'free') {
+            this.emit('downgraded', { reason: 'User logged out', previousTier: prevTier, tier: 'free' });
+        }
+        this.emit('licenseChanged', this.getStatus());
+    }
+
+    public setHeartbeatInterval(intervalMs: number, jitterMs: number = 0): void {
+        this.heartbeatIntervalMs = intervalMs;
+        this.heartbeatJitterMs = jitterMs;
+        if (this.heartbeatTimer) {
+            this.startHeartbeat();
+        }
+    }
+
+    public startHeartbeat(): void {
+        if (!this.currentToken || this.currentLicense.tier === 'free') {
+            return;
+        }
+        if (this.heartbeatTimer) {
+            return;
+        }
+        this.scheduleNextHeartbeat();
+    }
+
+    public stopHeartbeat(): void {
+        if (this.heartbeatTimer) {
+            clearTimeout(this.heartbeatTimer);
+            this.heartbeatTimer = null;
+        }
+    }
+
+    public shutdown(): void {
+        this.stopHeartbeat();
+    }
+
+    private scheduleNextHeartbeat(): void {
+        if (this.heartbeatTimer) {
+            clearTimeout(this.heartbeatTimer);
+            this.heartbeatTimer = null;
+        }
+
+        const jitter = this.heartbeatJitterMs > 0
+            ? Math.floor(Math.random() * (2 * this.heartbeatJitterMs)) - this.heartbeatJitterMs
+            : 0;
+        const interval = Math.max(10, this.heartbeatIntervalMs + jitter);
+
+        this.heartbeatTimer = setTimeout(async () => {
+            try {
+                await this.heartbeat();
+            } catch (err: any) {
+                this.log.error({ err: err?.message || err }, 'Unhandled error in heartbeat tick');
+            }
+        }, interval);
+
+        this.heartbeatTimer.unref();
+    }
+
+    public async heartbeat(): Promise<void> {
+        if (this.isHeartbeatInFlight) {
+            return;
+        }
+        if (!this.currentToken || this.currentLicense.tier === 'free') {
+            this.stopHeartbeat();
+            return;
+        }
+
+        this.isHeartbeatInFlight = true;
+        let shouldReschedule = true;
+
+        try {
+            const targetUrl = this.cloudEndpoint;
+            const res = await fetch(`${targetUrl}/auth/heartbeat`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${this.currentToken}`
+                },
+                body: JSON.stringify({
+                    session_id: this.sessionId,
+                    sessionId: this.sessionId
+                }),
+                signal: AbortSignal.timeout(env.SPOORF_CLOUD_AUTH_TIMEOUT_MS)
+            });
+
+            // Race condition guard: jika user logout saat fetch sedang berlangsung, abaikan respons
+            if (!this.currentToken || (this.currentLicense.tier as string) === 'free') {
+                return;
+            }
+
+            if (res.ok) {
+                const data: any = await res.json();
+                if (data && data.isRevoked === true) {
+                    this.log.warn('Session marked revoked in 200 payload. Executing kick downgrade.');
+                    shouldReschedule = false;
+                    await this.handleSessionRevoked(data.message || data.revokedReason);
+                    return;
+                }
+                if (data && (data.status === 'success' || data.success === true)) {
+                    if (data.token) {
+                        this.currentToken = data.token;
+                    }
+                    if (data.grace_period_until) {
+                        this.currentLicense.grace_period_until = data.grace_period_until;
+                    }
+                    const cached = await this.db.getLicenseCache();
+                    if (cached) {
+                        await this.db.saveLicenseCache({
+                            ...cached,
+                            token: this.currentToken || cached.token,
+                            grace_period_until: data.grace_period_until || cached.grace_period_until,
+                            last_synced_at: new Date().toISOString()
+                        });
+                    }
+                    this.log.debug({ grace_period_until: data.grace_period_until }, 'Heartbeat synchronized successfully');
+                }
+            } else {
+                let errorData: any;
+                try {
+                    errorData = await res.json();
+                } catch {}
+
+                const errCode = errorData?.error?.code || errorData?.code;
+                const errMsg = errorData?.error?.message || errorData?.message || `Auth heartbeat status ${res.status}`;
+
+                if (res.status === 401 && (errCode === 'SESSION_REVOKED' || errorData?.error?.details?.isRevoked || errMsg.toLowerCase().includes('dicabut') || errMsg.toLowerCase().includes('revoked'))) {
+                    this.log.warn({ errCode, errMsg }, 'Session revoked by cloud. Executing kick downgrade.');
+                    shouldReschedule = false;
+                    await this.handleSessionRevoked(errMsg);
+                    return;
+                } else if (res.status === 401) {
+                    this.log.warn({ errMsg }, 'Session token invalid or expired. Reverting to Free tier.');
+                    shouldReschedule = false;
+                    await this.handleSessionExpired(errMsg);
+                    return;
+                } else {
+                    this.log.warn({ status: res.status, errMsg }, 'Heartbeat received non-200 response from cloud');
+                    const isGraceValid = Boolean(
+                        this.currentLicense.grace_period_until &&
+                        new Date(this.currentLicense.grace_period_until).getTime() > Date.now()
+                    );
+                    if (!isGraceValid) {
+                        this.log.warn('Heartbeat server error and grace period has expired. Reverting to Free tier.');
+                        shouldReschedule = false;
+                        await this.handleSessionExpired('Masa tenggang offline (grace period) telah habis.');
+                        return;
+                    }
+                }
+            }
+        } catch (networkErr: any) {
+            // Network Error / Timeout / Cloud unreachable
+            // OFFLINE RESILIENCE: Tetap gunakan lisensi yang ada jika masih dalam masa tenggang
+            const isGraceValid = Boolean(
+                this.currentLicense.grace_period_until &&
+                new Date(this.currentLicense.grace_period_until).getTime() > Date.now()
+            );
+
+            if (isGraceValid) {
+                this.log.debug({ err: networkErr?.message }, 'Cloud unreachable for heartbeat, continuing offline mode within grace period');
+            } else {
+                this.log.warn('Heartbeat failed and grace period has expired. Reverting to Free tier.');
+                shouldReschedule = false;
+                await this.handleSessionExpired('Masa tenggang offline (grace period) telah habis. Silakan hubungkan internet dan login kembali.');
+            }
+        } finally {
+            this.isHeartbeatInFlight = false;
+            if (shouldReschedule && this.currentToken && (this.currentLicense.tier as string) !== 'free') {
+                this.scheduleNextHeartbeat();
+            }
+        }
+    }
+
+    public async handleSessionRevoked(reason?: string): Promise<void> {
+        this.stopHeartbeat();
+        const prevTier = this.currentLicense.tier;
+        this.currentUser = null;
+        this.currentToken = null;
+        this.currentLicense = { ...DEFAULT_FREE_LICENSE };
+        try {
+            await this.db.clearLicenseCache();
+        } catch (err: any) {
+            this.log.warn({ err: err?.message || err }, 'Failed to clear license cache on revocation');
+        }
+
+        const payload = {
+            reason: reason || 'Sesi Anda telah dicabut karena login di perangkat lain.',
+            revokedAt: new Date().toISOString(),
+            previousTier: prevTier,
+            tier: 'free'
+        };
+
+        this.emit('sessionRevoked', payload);
+        this.emit('downgraded', payload);
+        this.emit('licenseChanged', this.getStatus());
+    }
+
+    public async handleSessionExpired(reason?: string): Promise<void> {
+        this.stopHeartbeat();
+        const prevTier = this.currentLicense.tier;
+        this.currentUser = null;
+        this.currentToken = null;
+        this.currentLicense = { ...DEFAULT_FREE_LICENSE };
+        try {
+            await this.db.clearLicenseCache();
+        } catch (err: any) {
+            this.log.warn({ err: err?.message || err }, 'Failed to clear license cache on expiry');
+        }
+
+        const payload = {
+            reason: reason || 'Sesi lisensi telah kedaluwarsa.',
+            revokedAt: new Date().toISOString(),
+            previousTier: prevTier,
+            tier: 'free'
+        };
+
+        this.emit('licenseExpired', payload);
+        this.emit('downgraded', payload);
         this.emit('licenseChanged', this.getStatus());
     }
 
