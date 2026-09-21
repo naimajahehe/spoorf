@@ -1,5 +1,6 @@
 import { EventEmitter } from 'events';
 import crypto from 'crypto';
+import os from 'os';
 import { IDatabaseService, ILicenseManager } from '../interfaces';
 import { LicenseTier, UserLicense, AuthUser, CachedLicense, AuthStatusResponse } from '../types';
 import { env } from '../config/env';
@@ -167,7 +168,7 @@ export class LicenseManager extends EventEmitter implements ILicenseManager {
                         this.sessionId = (cached as any).session_id || cached.hwid;
                     }
                     this.log.info({ tier: cached.tier, email: this.currentUser?.email }, `Restored cached ${cached.tier.toUpperCase()} license for ${this.currentUser?.email}`);
-                    if (this.currentToken && this.currentLicense.tier !== 'free') {
+                    if (this.currentToken) {
                         this.startHeartbeat();
                     }
                 } else {
@@ -271,7 +272,8 @@ export class LicenseManager extends EventEmitter implements ILicenseManager {
                     session_id: this.sessionId,
                     hwid: this.sessionId,
                     platform: process.platform,
-                    app_version: '2.21.0'
+                    app_version: '2.21.0',
+                    deviceName: os.hostname()
                 }),
                 signal: AbortSignal.timeout(env.SPOORF_CLOUD_AUTH_TIMEOUT_MS)
             });
@@ -362,7 +364,7 @@ export class LicenseManager extends EventEmitter implements ILicenseManager {
         };
         await this.db.saveLicenseCache(cacheRecord);
 
-        if (this.currentToken && this.currentLicense.tier !== 'free') {
+        if (this.currentToken) {
             this.startHeartbeat();
         }
 
@@ -506,7 +508,7 @@ export class LicenseManager extends EventEmitter implements ILicenseManager {
         if (this.isHeartbeatInFlight) {
             return;
         }
-        if (!this.currentToken || this.currentLicense.tier === 'free') {
+        if (!this.currentToken) {
             this.stopHeartbeat();
             return;
         }
@@ -530,7 +532,7 @@ export class LicenseManager extends EventEmitter implements ILicenseManager {
             });
 
             // Race condition guard: jika user logout saat fetch sedang berlangsung, abaikan respons
-            if (!this.currentToken || (this.currentLicense.tier as string) === 'free') {
+            if (!this.currentToken) {
                 return;
             }
 
