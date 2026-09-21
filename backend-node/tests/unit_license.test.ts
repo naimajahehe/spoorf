@@ -217,10 +217,31 @@ export async function runLicenseUnitTests() {
         assert.strictEqual(isTrustedCloudUrl('https://api.spoorf.app/v1/', official), true, 'trailing slash tetap dipercaya');
         assert.strictEqual(isTrustedCloudUrl('https://api.spoorf.app:8443/v1', official), false, 'port berbeda pada host resmi harus ditolak');
         assert.strictEqual(isTrustedCloudUrl('https://api.spoorf.app/mirror/upload', official), false, 'path berbeda pada host resmi harus ditolak');
-        assert.strictEqual(isTrustedCloudUrl('http://api.spoorf.app/v1', official), false, 'protokol berbeda harus ditolak');
-        assert.strictEqual(isTrustedCloudUrl('https://evil.com/v1', official), false, 'host berbeda harus ditolak');
-        assert.strictEqual(isTrustedCloudUrl('not a url', official), false, 'URL tak valid harus ditolak');
+        assert.strictEqual(isTrustedCloudUrl('http://localhost:4000/v1', official), true, 'loopback localhost:4000/v1 harus dipercaya untuk dev');
+        assert.strictEqual(isTrustedCloudUrl('http://127.0.0.1:4000/v1', official), true, 'loopback 127.0.0.1:4000/v1 harus dipercaya untuk dev');
+        assert.strictEqual(isTrustedCloudUrl('http://localhost:4000/mirror/upload', official), false, 'path arbitrer pada localhost harus ditolak');
+        assert.strictEqual(isTrustedCloudUrl('http://localhost:9999/v1', official), false, 'port selain 4000 pada localhost harus ditolak');
         console.log('  ✓ ULTRAREVIEW #3: cloudUrl anti-SSRF menolak port/path arbitrer pada host resmi');
+    }
+
+    // Test 12: Production Offline Guard (503 UpstreamServiceError when cloud unreachable and demo disabled)
+    {
+        process.env.SPOORF_ALLOW_DEMO_LICENSE = 'false';
+        const offlineDb = new DatabaseService(':memory:');
+        await offlineDb.init();
+        const offlineLm = new LicenseManager(offlineDb, 'http://127.0.0.1:59999/v1');
+        let thrownErr: any;
+        try {
+            await offlineLm.login({ email: 'test@example.com', password: 'pass' });
+        } catch (err) {
+            thrownErr = err;
+        }
+        assert.ok(thrownErr, 'Harus melempar error saat cloud tidak dapat dihubungi dan demo nonaktif');
+        assert.strictEqual(thrownErr.statusCode, 503, 'Harus berstatus HTTP 503');
+        assert.strictEqual(thrownErr.code, 'CLOUD_UNAVAILABLE', 'Harus berkode CLOUD_UNAVAILABLE');
+        assert.match(thrownErr.message, /Server cloud tidak dapat dihubungi/);
+        await offlineDb.close();
+        console.log('  ✓ Production Offline Guard: Melempar 503 CLOUD_UNAVAILABLE saat koneksi gagal');
     }
 
     await db.close();

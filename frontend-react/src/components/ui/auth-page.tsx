@@ -103,11 +103,13 @@ export const AuthPage: React.FC<AuthPageProps> = ({
         setTimeout(() => onClose?.(), 600);
       }
     } catch (err: any) {
-      setErrorMessage(
+      const errorPayload = err?.response?.data?.error;
+      const extractedMessage =
+        (typeof errorPayload === "string" ? errorPayload : errorPayload?.message) ||
         err?.response?.data?.message ||
-          err?.message ||
-          "Gagal memproses autentikasi. Periksa kredensial Anda."
-      );
+        err?.message ||
+        "Gagal memproses autentikasi. Periksa kredensial Anda.";
+      setErrorMessage(extractedMessage);
     } finally {
       setIsLoading(false);
     }

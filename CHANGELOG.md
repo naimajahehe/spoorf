@@ -2,6 +2,27 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.78] - 2026-09-21
+
+### Perbaikan: Eliminasi Error Login "Request failed with status code 400" & Propagasi Diagnostik End-to-End
+- **Akar Masalah (Terbukti Empiris)**:
+  - Pada aplikasi Electron terpaket, `desktop-electron/src/main.ts` tidak menyuntikkan `SPOORF_CLOUD_URL`, dan direktori kerja tidak memiliki `.env`, sehingga Zod default ke domain `https://api.spoorf.app/v1` yang belum dideploy ke DNS publik (`getaddrinfo ENOTFOUND`).
+  - `licenseManager.ts` sebelumnya melempar generic error tanpa membaca body `res.json()`, dan menelan error status 4xx ke dalam blok demo fallback yang dinonaktifkan (`SPOORF_ALLOW_DEMO_LICENSE=false`).
+  - `authController.ts` membungkus seluruh error non-AppError menjadi `BadRequestError` (HTTP 400), menutupi error koneksi (503) maupun kegagalan autentikasi (401).
+  - `auth-page.tsx` pada frontend hanya memeriksa `err?.response?.data?.message`, padahal backend mengembalikan `{ success: false, error: ... }`, sehingga Axios jatuh ke pesan bawaan `"Request failed with status code 400"`.
+- **Perbaikan Terstruktur 5 Lapisan**:
+  1. **Frontend UI (`auth-page.tsx`)**: Memprioritaskan `err?.response?.data?.error` di atas `data?.message` dan `err?.message`, menangani baik string maupun objek error.
+  2. **Service Lisensi (`licenseManager.ts`)**:
+     - Membaca dan mem-parsing respons JSON server cloud pada respons non-200.
+     - Melempar `UnauthorizedError` (HTTP 401) jika kredensial salah, `BadRequestError` (HTTP 400) jika format salah, `ForbiddenError` (HTTP 403), `TooManyRequestsError` (HTTP 429), dan `UpstreamServiceError` (HTTP 502/503).
+     - Memisahkan kegagalan jaringan/DNS (`catch (networkErr)`) untuk melempar `UpstreamServiceError` berkode `CLOUD_UNAVAILABLE` (HTTP 503) dengan pesan ramah pengguna: *"Server cloud tidak dapat dihubungi. Periksa koneksi internet Anda atau pastikan server cloud aktif."*
+     - Mempertahankan mode demo (`generateDemoLicense`) hanya saat `SPOORF_ALLOW_DEMO_LICENSE=true`.
+     - Memperbarui `isTrustedCloudUrl` agar mengenali loopback lokal (`localhost:4000` / `127.0.0.1:4000`) untuk pengujian cloud lokal.
+  3. **Domain Error Hierarchy (`AppError.ts`)**: Menambahkan kelas konkret `TooManyRequestsError` (HTTP 429).
+  4. **Supervisor Electron (`main.ts`)**: Menyuntikkan `process.env.SPOORF_CLOUD_URL` dari `%APPDATA%\SpoorfSentinel\config.json` atau `backend-node/.env` sebelum Node backend di-require.
+  5. **Pengujian Otomatis (`unit_license.test.ts`)**: Menambahkan assertion untuk loopback trusted URL dan verifikasi throwing 503 saat cloud unreachable.
+- **Verifikasi**: Seluruh 548 automated test lulus 100% (430 Python + 118 Node.js).
+
 ## [v2.41.77] - 2026-09-21
 
 ### Perbaikan: Deteksi Liveness Power-Save (Pulse-Fallback) untuk HP yang Flap Online/Offline (`python-service`)

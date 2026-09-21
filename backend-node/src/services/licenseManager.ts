@@ -3,21 +3,42 @@ import crypto from 'crypto';
 import { IDatabaseService, ILicenseManager } from '../interfaces';
 import { LicenseTier, UserLicense, AuthUser, CachedLicense, AuthStatusResponse } from '../types';
 import { env } from '../config/env';
-import { ForbiddenError } from '../errors';
+import {
+    AppError,
+    BadRequestError,
+    UnauthorizedError,
+    ForbiddenError,
+    TooManyRequestsError,
+    UpstreamServiceError
+} from '../errors';
 import { createChildLogger } from '../utils/logger';
 
 /**
  * KEAMANAN (Anti-SSRF): apakah `candidate` cloudUrl aman menerima kredensial + Session ID.
  * Harus cocok origin (protokol + host + PORT) DAN path resmi — bukan hanya protokol+host,
  * agar port/path arbitrer pada host yang sama (mis. `:8443/mirror/upload`) tidak lolos.
+ *
+ * Mode lokal/dev: loopback host (localhost / 127.0.0.1 / [::1]) pada port 4000
+ * dengan path resmi /v1 diizinkan untuk menghubungkan desktop dengan instance cloud lokal.
  */
 export function isTrustedCloudUrl(candidate: string, official: string): boolean {
     try {
         const parsed = new URL(candidate);
         const officialParsed = new URL(official);
         const normPath = (p: string) => p.replace(/\/+$/, '') || '/';
-        return parsed.origin === officialParsed.origin
-            && normPath(parsed.pathname) === normPath(officialParsed.pathname);
+
+        // 1. Cocok persis origin & path dengan official endpoint
+        if (parsed.origin === officialParsed.origin && normPath(parsed.pathname) === normPath(officialParsed.pathname)) {
+            return true;
+        }
+
+        // 2. Loopback local dev instance pada port 4000 (/v1)
+        const isLocalHost = parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1' || parsed.hostname === '::1';
+        if (isLocalHost && (parsed.port === '4000' || parsed.port === '') && normPath(parsed.pathname) === '/v1') {
+            return true;
+        }
+
+        return false;
     } catch {
         return false;
     }
@@ -177,6 +198,34 @@ export class LicenseManager extends EventEmitter implements ILicenseManager {
         };
     }
 
+    private generateDemoLicense(credentials: { email: string; password?: string }): { user: AuthUser; license: UserLicense; token: string } {
+        const isProEmail = credentials.email.toLowerCase().includes('pro') ||
+                           credentials.email.toLowerCase().includes('admin') ||
+                           (credentials.password && credentials.password.toLowerCase().includes('pro'));
+        const isVipEmail = credentials.email.toLowerCase().includes('vip');
+
+        const tier: LicenseTier = isVipEmail ? 'vip' : isProEmail ? 'pro' : 'free';
+        const baseLicense = tier === 'vip' ? VIP_TIER_LICENSE : tier === 'pro' ? PRO_TIER_LICENSE : DEFAULT_FREE_LICENSE;
+
+        const gracePeriod = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(); // 7 hari
+        const fakeToken = `spoorf_jwt_${Buffer.from(credentials.email).toString('base64')}_${Date.now()}`;
+
+        return {
+            user: {
+                id: `usr_${crypto.createHash('md5').update(credentials.email).digest('hex').substring(0, 10)}`,
+                email: credentials.email,
+                name: credentials.email.split('@')[0],
+                plan: tier,
+                created_at: new Date().toISOString()
+            },
+            license: {
+                ...baseLicense,
+                grace_period_until: gracePeriod
+            },
+            token: fakeToken
+        };
+    }
+
     public async login(credentials: {
         email: string;
         password?: string;
@@ -195,11 +244,12 @@ export class LicenseManager extends EventEmitter implements ILicenseManager {
             }
         }
 
-        let authResult: { user: AuthUser; license: UserLicense; token: string };
+        let authResult: { user: AuthUser; license: UserLicense; token: string } | null = null;
+        let res: Response | undefined;
 
         try {
             // 1. Coba hubungi Cloud Auth API resmi
-            const res = await fetch(`${targetUrl}/auth/login`, {
+            res = await fetch(`${targetUrl}/auth/login`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -213,7 +263,23 @@ export class LicenseManager extends EventEmitter implements ILicenseManager {
                 }),
                 signal: AbortSignal.timeout(env.SPOORF_CLOUD_AUTH_TIMEOUT_MS)
             });
+        } catch (networkErr: any) {
+            // 2. Kegagalan Jaringan / Offline / DNS resolution failure
+            // Hanya aktif bila operator secara eksplisit menyetel SPOORF_ALLOW_DEMO_LICENSE=true (dev/uji).
+            if (env.SPOORF_ALLOW_DEMO_LICENSE) {
+                authResult = this.generateDemoLicense(credentials);
+            } else {
+                this.log.warn({ targetUrl, err: networkErr?.message }, 'Cloud authentication service unreachable');
+                throw new UpstreamServiceError(
+                    'Server cloud tidak dapat dihubungi. Periksa koneksi internet Anda atau pastikan server cloud aktif.',
+                    503,
+                    'CLOUD_UNAVAILABLE'
+                );
+            }
+        }
 
+        // 3. Jika request mencapai server cloud dan mendapat respons HTTP
+        if (!authResult && res) {
             if (res.ok) {
                 const data: any = await res.json();
                 if (data && data.token) {
@@ -223,48 +289,39 @@ export class LicenseManager extends EventEmitter implements ILicenseManager {
                         token: data.token
                     };
                 } else {
-                    throw new Error('Invalid payload from auth server');
+                    throw new UpstreamServiceError('Invalid payload from auth server', 502, 'INVALID_CLOUD_RESPONSE');
                 }
             } else {
-                throw new Error(`Auth server returned status ${res.status}`);
+                if (env.SPOORF_ALLOW_DEMO_LICENSE) {
+                    authResult = this.generateDemoLicense(credentials);
+                } else {
+                    let errorData: any;
+                    try {
+                        errorData = await res.json();
+                    } catch {}
+                    const errorMsg =
+                        errorData?.error?.message ||
+                        (typeof errorData?.error === 'string' ? errorData.error : undefined) ||
+                        errorData?.message ||
+                        `Auth server returned status ${res.status}`;
+
+                    if (res.status === 401) {
+                        throw new UnauthorizedError(errorMsg);
+                    } else if (res.status === 400) {
+                        throw new BadRequestError(errorMsg);
+                    } else if (res.status === 403) {
+                        throw new ForbiddenError(errorMsg);
+                    } else if (res.status === 429) {
+                        throw new TooManyRequestsError(errorMsg);
+                    } else {
+                        throw new UpstreamServiceError(errorMsg, res.status >= 500 ? 502 : res.status, 'CLOUD_SERVER_ERROR');
+                    }
+                }
             }
-        } catch (cloudErr) {
-            // 2. Standalone / Demo fallback engine
-            // KEAMANAN (P0): fallback ini memberi tier berbayar berdasarkan substring email,
-            // sehingga sepele dieksploitasi. Dinonaktifkan secara default; hanya aktif bila
-            // operator secara eksplisit menyetel SPOORF_ALLOW_DEMO_LICENSE=true (dev/uji).
-            if (!env.SPOORF_ALLOW_DEMO_LICENSE) {
-                throw new Error(
-                    'Autentikasi cloud gagal dan lisensi demo dinonaktifkan. ' +
-                    'Setel SPOORF_ALLOW_DEMO_LICENSE=true untuk mode uji lokal.'
-                );
-            }
+        }
 
-            const isProEmail = credentials.email.toLowerCase().includes('pro') ||
-                               credentials.email.toLowerCase().includes('admin') ||
-                               (credentials.password && credentials.password.toLowerCase().includes('pro'));
-            const isVipEmail = credentials.email.toLowerCase().includes('vip');
-
-            const tier: LicenseTier = isVipEmail ? 'vip' : isProEmail ? 'pro' : 'free';
-            const baseLicense = tier === 'vip' ? VIP_TIER_LICENSE : tier === 'pro' ? PRO_TIER_LICENSE : DEFAULT_FREE_LICENSE;
-
-            const gracePeriod = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(); // 7 hari
-            const fakeToken = `spoorf_jwt_${Buffer.from(credentials.email).toString('base64')}_${Date.now()}`;
-
-            authResult = {
-                user: {
-                    id: `usr_${crypto.createHash('md5').update(credentials.email).digest('hex').substring(0, 10)}`,
-                    email: credentials.email,
-                    name: credentials.email.split('@')[0],
-                    plan: tier,
-                    created_at: new Date().toISOString()
-                },
-                license: {
-                    ...baseLicense,
-                    grace_period_until: gracePeriod
-                },
-                token: fakeToken
-            };
+        if (!authResult) {
+            throw new UpstreamServiceError('Authentication could not be completed', 500, 'AUTH_FAILED');
         }
 
         // Simpan ke state aktif
@@ -312,7 +369,7 @@ export class LicenseManager extends EventEmitter implements ILicenseManager {
         } else if (cleanKey.startsWith('PRO') || cleanKey.includes('SENTINEL') || (demoMode && cleanKey.length >= 10)) {
             newTier = 'pro';
         } else {
-            throw new Error('Format lisensi tidak valid. Contoh format: PRO-SENTINEL-2026');
+            throw new BadRequestError('Format lisensi tidak valid. Contoh format: PRO-SENTINEL-2026');
         }
 
         const template = newTier === 'vip' 

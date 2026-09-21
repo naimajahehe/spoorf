@@ -94,6 +94,16 @@ export class InvariantViolationError extends AppError {
 }
 
 /**
+ * 429 Too Many Requests
+ * Thrown when rate limit or request threshold is exceeded.
+ */
+export class TooManyRequestsError extends AppError {
+    constructor(message: string = 'Too many requests, please try again later', details?: unknown) {
+        super(message, 429, 'TOO_MANY_REQUESTS', true, details);
+    }
+}
+
+/**
  * 502 / 503 Upstream Service Error
  * Thrown when an upstream microservice (e.g. Python FastAPI engine) fails or is unreachable.
  */

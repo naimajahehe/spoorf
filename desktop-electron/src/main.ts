@@ -320,6 +320,33 @@ function startNodeBackend() {
         process.env.PORT = '5000';
         process.env.HOST = '127.0.0.1';
 
+        // Injeksi SPOORF_CLOUD_URL bila belum diset di environment
+        if (!process.env.SPOORF_CLOUD_URL) {
+            const userConfigFile = path.join(appDataPath, 'config.json');
+            if (fs.existsSync(userConfigFile)) {
+                try {
+                    const parsedConfig = JSON.parse(fs.readFileSync(userConfigFile, 'utf-8'));
+                    if (parsedConfig.cloudUrl || parsedConfig.SPOORF_CLOUD_URL) {
+                        process.env.SPOORF_CLOUD_URL = parsedConfig.cloudUrl || parsedConfig.SPOORF_CLOUD_URL;
+                        logElectron(`[Supervisor] Menggunakan SPOORF_CLOUD_URL dari config.json: ${process.env.SPOORF_CLOUD_URL}`);
+                    }
+                } catch {}
+            }
+            if (!process.env.SPOORF_CLOUD_URL && !app.isPackaged) {
+                const devEnvPath = path.join(__dirname, '../../backend-node/.env');
+                if (fs.existsSync(devEnvPath)) {
+                    try {
+                        const content = fs.readFileSync(devEnvPath, 'utf-8');
+                        const match = content.match(/^SPOORF_CLOUD_URL=(.+)$/m);
+                        if (match && match[1]) {
+                            process.env.SPOORF_CLOUD_URL = match[1].trim();
+                            logElectron(`[Supervisor] Menggunakan SPOORF_CLOUD_URL dari backend-node/.env: ${process.env.SPOORF_CLOUD_URL}`);
+                        }
+                    } catch {}
+                }
+            }
+        }
+
         const asarBackend = path.join(__dirname, 'backend', 'app.js');
         const unpackedBackend = path.join(process.resourcesPath, 'app.asar.unpacked', 'dist', 'backend', 'app.js');
         const appResourceBackend = path.join(process.resourcesPath, 'app', 'dist', 'backend', 'app.js');
