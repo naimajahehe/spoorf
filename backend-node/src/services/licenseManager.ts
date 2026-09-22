@@ -431,7 +431,7 @@ export class LicenseManager extends EventEmitter implements ILicenseManager {
             hwid: this.hwid
         });
 
-        if (this.currentToken && this.currentLicense.tier !== 'free') {
+        if (this.currentToken) {
             this.startHeartbeat();
         }
 
@@ -462,7 +462,7 @@ export class LicenseManager extends EventEmitter implements ILicenseManager {
     }
 
     public startHeartbeat(): void {
-        if (!this.currentToken || this.currentLicense.tier === 'free') {
+        if (!this.currentToken) {
             return;
         }
         if (this.heartbeatTimer) {
@@ -568,10 +568,10 @@ export class LicenseManager extends EventEmitter implements ILicenseManager {
                     errorData = await res.json();
                 } catch {}
 
-                const errCode = errorData?.error?.code || errorData?.code;
+                const errCode = errorData?.error?.code || errorData?.code || (typeof errorData?.error === 'string' ? errorData.error : undefined);
                 const errMsg = errorData?.error?.message || errorData?.message || `Auth heartbeat status ${res.status}`;
 
-                if (res.status === 401 && (errCode === 'SESSION_REVOKED' || errorData?.error?.details?.isRevoked || errMsg.toLowerCase().includes('dicabut') || errMsg.toLowerCase().includes('revoked'))) {
+                if (res.status === 401 && (errCode === 'SESSION_REVOKED' || errorData?.error?.details?.isRevoked || errMsg.toLowerCase().includes('dicabut') || errMsg.toLowerCase().includes('revoked') || errMsg.toLowerCase().includes('diputuskan'))) {
                     this.log.warn({ errCode, errMsg }, 'Session revoked by cloud. Executing kick downgrade.');
                     shouldReschedule = false;
                     await this.handleSessionRevoked(errMsg);

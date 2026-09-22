@@ -639,7 +639,7 @@ export async function runLicenseUnitTests() {
         }
     }
 
-    // Test 20: Authenticated Free Tier Heartbeat Reschedules Properly
+    // Test 20: Authenticated Free Tier Heartbeat Lifecycle & Remote Kick
     {
         const freeDb = new DatabaseService(':memory:');
         await freeDb.init();
@@ -651,18 +651,23 @@ export async function runLicenseUnitTests() {
         assert.strictEqual(freeLm.getStatus().license.tier, 'free');
         assert.strictEqual(freeLm.getStatus().isAuthenticated, true);
 
+        // 1. Verify heartbeat timer is started automatically upon login
+        assert.ok((freeLm as any).heartbeatTimer !== null, 'Heartbeat timer must be started automatically on login for free tier');
+
         let heartbeatCalls = 0;
+        let revokedFired = false;
+        freeLm.on('sessionRevoked', () => { revokedFired = true; });
+
         const origFetch = global.fetch;
         (global as any).fetch = async (url: string, opts: any) => {
             if (url.includes('/auth/heartbeat')) {
                 heartbeatCalls++;
                 return {
-                    ok: true,
-                    status: 200,
+                    ok: false,
+                    status: 401,
                     json: async () => ({
-                        status: 'success',
-                        token: 'free_token_renewed',
-                        grace_period_until: new Date(Date.now() + 7 * 86400000).toISOString()
+                        error: 'SESSION_REVOKED',
+                        message: 'Sesi diputuskan dari Cloud Web Portal'
                     })
                 };
             }
@@ -672,9 +677,10 @@ export async function runLicenseUnitTests() {
         try {
             await freeLm.heartbeat();
             assert.strictEqual(heartbeatCalls, 1);
-            // Verify heartbeat timer was rescheduled
-            assert.ok((freeLm as any).heartbeatTimer !== null, 'Heartbeat timer must be rescheduled for free tier with token');
-            console.log('  ✓ Free Tier Heartbeat: Heartbeat timer properly scheduled and alive for authenticated free accounts');
+            assert.strictEqual(revokedFired, true, 'sessionRevoked must fire on Free tier when Cloud returns SESSION_REVOKED');
+            assert.strictEqual(freeLm.getStatus().isAuthenticated, false, 'Free tier must be unauthenticated after SESSION_REVOKED');
+            assert.strictEqual((freeLm as any).heartbeatTimer, null, 'Heartbeat timer must be stopped after session revoked');
+            console.log('  ✓ Free Tier Heartbeat: Automatic lifecycle and remote kick handling verified for free accounts');
         } finally {
             global.fetch = origFetch;
             freeLm.shutdown();

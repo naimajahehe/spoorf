@@ -21,6 +21,11 @@ Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem
      - Diintegrasikan secara mulus ke `frontend-react/src/App.tsx` melalui hook `sessionRevokedNotice`.
   3. **Penyempurnaan Fixture Test Anti Self-Cut (`unit_deviceManager.test.ts`)**:
      - Menyesuaikan MAC dummy target pada test BUG-2 agar tidak bertabrakan dengan MAC adaptor fisik mesin (`a8:3b:76:0c:dc:55` -> `02:bb:cc:dd:ee:55`), serta menetapkan `currentNetworkId` agar terhindar dari pembersihan memori akibat transisi jaringan virtual.
+  4. **Superpowers Code Review Hardening**:
+     - Memperbaiki `startHeartbeat()` dan `activateLicenseKey()` di `licenseManager.ts` yang sebelumnya memblokir start awal heartbeat untuk akun Free (`this.currentLicense.tier === 'free'`).
+     - Mendukung parsing bentuk error code string (`errorData.error === 'SESSION_REVOKED'`) dan variasi keyword pencabutan (`diputuskan`).
+     - Memperbaiki transisi keluar Framer Motion (`exit` animation) pada `SessionRevokedModal.tsx` dengan memindahkan `{isOpen && ...}` ke dalam `<AnimatePresence>`, menambahkan penangkap tombol keyboard `Escape`, serta melengkapi atribut aksesibilitas WAI-ARIA (`role="dialog"`, `aria-modal="true"`).
+     - Memperkuat Test 20 di `unit_license.test.ts` untuk memverifikasi inisiasi otomatis heartbeat saat `login()` serta pemrosesan kode `SESSION_REVOKED` pada akun Free.
 - **Verifikasi**: Seluruh 562 automated tests lulus (430 Python + 132 Node.js). Build frontend TypeScript/Vite sukses tanpa error.
 
 ## [v2.41.79] - 2026-09-21
