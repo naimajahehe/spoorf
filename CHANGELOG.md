@@ -2,6 +2,35 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.81] - 2026-09-22
+
+### Implementasi: Spoorf Cloud Platform Landing Page (Guild / Fleet Warm Paper Aesthetic)
+- **Latar Belakang**:
+  - Repositori cloud `spoorf-web-cloud` sebelumnya hanya memiliki antarmuka dashboard, login, register, dan download yang langsung mengalihkan rute root `/` ke `/dashboard`.
+  - Belum ada landing page publik berkonversi tinggi dengan estetika editorial modern untuk memperkenalkan kapabilitas Sentinel L2 Engine, sistem invarian zero-collateral, serta koordinasi armada cloud multi-seat.
+- **Pembaruan Arsitektur & Desain**:
+  1. **Token Desain & Tipografi Editorial (Guild Theme)**:
+     - Mengintegrasikan palet warna Warm Editorial Paper (`#f4f3f1` background, `#0d0c11` foreground ink, `#5b34e8` electric brand indigo, hairline border `rgba(45, 42, 58, 0.14)`).
+     - Mengadopsi kombinasi tipografi Trinity: `Geist` (clean modern sans), `Geist Mono` (IP/MAC and technical telemetry), dan `Instrument Serif` (italic editorial accents pada headline).
+     - Menambahkan utilitas background `.bg-grid-paper`, animasi kartu melayang `.wander-x` & `.wander-y`, status pulsing `.status-pulse`, serta gradient mesh `.texture-wash-brand` dan `.texture-wash-mint`.
+  2. **Komponen Landing Page Lengkap (`frontend/src/components/landing/`)**:
+     - `LandingNavbar.tsx`: Floating pill navbar dengan efek glassmorphism, brand monogram, live status pulse, tautan navigasi anchor, smart auth (`useAuth()`), dan drawer menu responsif mobile.
+     - `HeroTopology.tsx`: Headline editorial beraksen serif italic, announcement pill, tombol CTA ganda, dan dynamic SVG Bezier topology canvas dengan 4 floating wandering node cards yang mengitari Core Sentinel Daemon hub.
+     - `MissionLead.tsx`: Editorial quote naratif (*“You cannot defend what you cannot see”*) dan 4-column metric ticker card (`< 1.0s`, `100k+`, `0ms`, `30s`).
+     - `InteractiveFeatureTabs.tsx`: Showcase 4 pilar operasional (L2 Discovery, PWM Limiter interaktif dengan slider pengatur kecepatan, Invarian Matematika, dan Simulasi Remote Session Kick) dilengkapi bar progres auto-advance 6 detik dan pause-on-hover.
+     - `BentoFeatures.tsx`: Multi-texture bento grid yang merangkum arsitektur tri-service terkopel mikro (Python + Node + React), Zero-HWID privacy & RS256 token, Bettercap defensive arsenal, dan persistensi hibrida SQLite WAL + PostgreSQL 17.
+     - `FeatureMatrix.tsx`: Matriks kapabilitas enterprise 3 kolom (L2 Engine, Cloud Fleet Hub, Standar Rekayasa & Higiene Kode).
+     - `PricingTiers.tsx`: Kartu transparan 3 tier (Community Free $0, Sentinel Pro $19 *Most Popular*, dan Enterprise VIP $49) dengan rincian kapabilitas dan tombol aksi langsung.
+     - `LandingFooter.tsx`: Kartu CTA penutup bertema gradient, direktori tautan 3 kolom, status pill `All Systems Operational · Cloud Heartbeat Live`, serta batasan regulasi RFC 1918.
+     - `LandingPage.tsx`: Komposer halaman tunggal root `/` yang menyatukan seluruh komponen secara terstruktur.
+  3. **Integrasi Routing & Pemisahan Konsol (`App.tsx`)**:
+     - Memperbarui `App.tsx` menggunakan React Router `<Outlet />` layout: rute root `/` menampilkan `<LandingPage />` bertema Warm Paper dengan navbar floating mandiri, sedangkan rute konsol (`/login`, `/register`, `/dashboard`, `/download`) dibungkus dalam layout dark slate dashboard tersendiri tanpa tumpang tindih visual.
+  4. **Verifikasi Kualitas**:
+     - Frontend build (`tsc && vite build`): 100% lolos tanpa kesalahan tipe data TypeScript (0 error).
+     - Backend API test suite (`spoorf-web-cloud/backend`): 40 unit & integrasi test 100% green.
+     - Desktop core test suites: 430 test Python + 132 test Node.js 100% green (total 602 test passed).
+     - Kode terdistribusi dan ter-commit rapi pada branch `main` di repositori GitHub `naimajahehe/spoorf-web-cloud`.
+
 ## [v2.41.80] - 2026-09-22
 
 ### Implementasi: Remote Kick Responsiveness (Heartbeat 30s) & Modal Sesi Berakhir Cyber-Dark
