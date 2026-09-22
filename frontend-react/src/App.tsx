@@ -918,6 +918,7 @@ function App() {
         };
         setActiveToasts(prev => [revokedToast, ...prev].slice(0, 3));
         setRevokedReason(sessionRevokedNotice.reason);
+        setIsLoginModalOpen(false);
         setIsRevokedModalOpen(true);
         clearSessionRevokedNotice();
     }, [sessionRevokedNotice, clearSessionRevokedNotice]);
@@ -1375,8 +1376,16 @@ function App() {
 
     const selectedCount = selectedIps.length;
 
+    const handleAuthLogin = useCallback(async (credentials: any) => {
+        setIsRevokedModalOpen(false);
+        return await authLogin(credentials);
+    }, [authLogin]);
+
     // 1. Initial Pre-Flight Engine Initialization & Login Gates with Smooth Horizontal Slide Transition
-    if (!isEngineReady || (authStatus && !authStatus.isAuthenticated)) {
+    // Catatan: Jika modal pencabutan sesi (session revoked) sedang aktif, tunda transisi ke AuthPage
+    // agar pengguna melihat dialog penjelasan terlebih dahulu sebelum diarahkan kembali ke layar login.
+    const isUnauthenticated = Boolean(authStatus && !authStatus.isAuthenticated);
+    if (!isEngineReady || (isUnauthenticated && !isRevokedModalOpen)) {
         return (
             <div className="flex flex-col w-full h-screen overflow-hidden bg-[#090a0c]">
                 <TitleBar theme={theme} />
@@ -1405,7 +1414,7 @@ function App() {
                         >
                             <AuthPage
                                 authStatus={authStatus}
-                                onLogin={authLogin}
+                                onLogin={handleAuthLogin}
                                 onActivateKey={activateLicenseKey}
                                 isModal={false}
                             />
@@ -1414,6 +1423,12 @@ function App() {
                 </AnimatePresence>
             </NeonMesh>
         </div>
+        <SessionRevokedModal
+            isOpen={isRevokedModalOpen}
+            reason={revokedReason}
+            onClose={() => setIsRevokedModalOpen(false)}
+            onProceedToLogin={() => setIsRevokedModalOpen(false)}
+        />
     </div>
         );
     }
@@ -2333,7 +2348,7 @@ function App() {
                 isOpen={isLoginModalOpen}
                 onClose={() => setIsLoginModalOpen(false)}
                 authStatus={authStatus}
-                onLogin={authLogin}
+                onLogin={handleAuthLogin}
                 onActivateKey={activateLicenseKey}
                 onLogout={authLogout}
             />
@@ -2352,10 +2367,7 @@ function App() {
                 isOpen={isRevokedModalOpen}
                 reason={revokedReason}
                 onClose={() => setIsRevokedModalOpen(false)}
-                onReLogin={() => {
-                    setIsRevokedModalOpen(false);
-                    setIsLoginModalOpen(true);
-                }}
+                onProceedToLogin={() => setIsRevokedModalOpen(false)}
             />
 
             {/* BeUI-Inspired Command Palette (⌘K) */}

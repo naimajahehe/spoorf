@@ -26,6 +26,11 @@ Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem
      - Mendukung parsing bentuk error code string (`errorData.error === 'SESSION_REVOKED'`) dan variasi keyword pencabutan (`diputuskan`).
      - Memperbaiki transisi keluar Framer Motion (`exit` animation) pada `SessionRevokedModal.tsx` dengan memindahkan `{isOpen && ...}` ke dalam `<AnimatePresence>`, menambahkan penangkap tombol keyboard `Escape`, serta melengkapi atribut aksesibilitas WAI-ARIA (`role="dialog"`, `aria-modal="true"`).
      - Memperkuat Test 20 di `unit_license.test.ts` untuk memverifikasi inisiasi otomatis heartbeat saat `login()` serta pemrosesan kode `SESSION_REVOKED` pada akun Free.
+  5. **Perbaikan Transisi Gating Layar Login & Dialog Pencabutan Sesi (Delayed Gate Transition)**:
+     - **Akar Masalah**: Evaluasi awal `if (!isEngineReady || (authStatus && !authStatus.isAuthenticated))` pada `App.tsx` langsung me-render `<AuthPage />` begitu status autentikasi menjadi false. Hal ini meng-unmount view utama tempat `SessionRevokedModal` terpasang, sehingga modal tertahan dan baru muncul setelah user login kembali.
+     - **Solusi Gating**: Menambahkan kondisi `!isRevokedModalOpen` pada gate unauthenticated (`isUnauthenticated && !isRevokedModalOpen`). Pengguna tetap berada pada dashboard dengan overlay modal aktif sampai modal ditutup atau diarahkan ke login.
+     - **Penyederhanaan Dialog**: Menyederhanakan tombol aksi pada `SessionRevokedModal.tsx` menjadi satu tombol utama *"Kembali ke Halaman Login"* (`onProceedToLogin`). Menutup modal melalui tombol, backdrop, ikon X, atau tombol `Escape` mengeksekusi transisi mulus ke `AuthPage`.
+     - **Pembersihan State**: Menambahkan wrapper `handleAuthLogin` yang memastikan `isRevokedModalOpen` bernilai `false` saat login berhasil, menjamin modal tidak akan muncul kembali setelah login.
 - **Verifikasi**: Seluruh 562 automated tests lulus (430 Python + 132 Node.js). Build frontend TypeScript/Vite sukses tanpa error.
 
 ## [v2.41.79] - 2026-09-21

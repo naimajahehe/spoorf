@@ -6,26 +6,34 @@ interface SessionRevokedModalProps {
   isOpen: boolean;
   reason?: string;
   onClose: () => void;
-  onReLogin: () => void;
+  onProceedToLogin?: () => void;
 }
 
 export const SessionRevokedModal: React.FC<SessionRevokedModalProps> = ({
   isOpen,
   reason,
   onClose,
-  onReLogin,
+  onProceedToLogin,
 }) => {
-  // Global Escape key listener to close modal
+  const handleProceed = () => {
+    if (onProceedToLogin) {
+      onProceedToLogin();
+    } else {
+      onClose();
+    }
+  };
+
+  // Global Escape key listener to close modal and proceed to login
   useEffect(() => {
     if (!isOpen) return;
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        onClose();
+        handleProceed();
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isOpen, onClose]);
+  }, [isOpen]);
 
   return (
     <AnimatePresence>
@@ -41,7 +49,7 @@ export const SessionRevokedModal: React.FC<SessionRevokedModalProps> = ({
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            onClick={onClose}
+            onClick={handleProceed}
             className="absolute inset-0 bg-black/75 backdrop-blur-sm cursor-pointer"
           />
 
@@ -59,8 +67,8 @@ export const SessionRevokedModal: React.FC<SessionRevokedModalProps> = ({
             {/* Close Icon */}
             <button
               type="button"
-              onClick={onClose}
-              aria-label="Tutup dialog"
+              onClick={handleProceed}
+              aria-label="Tutup dan kembali ke halaman login"
               className="absolute top-4 right-4 text-slate-500 hover:text-slate-300 p-1 rounded-lg hover:bg-slate-800/60 transition-colors focus:outline-none cursor-pointer"
             >
               <X className="w-4 h-4" />
@@ -77,7 +85,7 @@ export const SessionRevokedModal: React.FC<SessionRevokedModalProps> = ({
               </h3>
 
               <p className="text-xs text-slate-400 mt-2 leading-relaxed">
-                Akses untuk perangkat ini telah diputuskan dari Web Portal Cloud. Akun Anda telah keluar otomatis.
+                Akses untuk perangkat ini telah diputuskan dari Web Portal Cloud. Anda akan dialihkan kembali ke halaman login.
               </p>
 
               {reason && (
@@ -88,23 +96,15 @@ export const SessionRevokedModal: React.FC<SessionRevokedModalProps> = ({
               )}
             </div>
 
-            {/* Action Buttons */}
-            <div className="mt-6 flex flex-col gap-2.5">
+            {/* Single Action Button */}
+            <div className="mt-6">
               <button
                 type="button"
-                onClick={onReLogin}
+                onClick={handleProceed}
                 className="w-full py-2.5 px-4 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs tracking-wide flex items-center justify-center gap-2 transition-colors shadow-lg shadow-cyan-500/20 cursor-pointer focus:outline-none"
               >
                 <LogIn className="w-4 h-4" />
-                <span>Login Kembali</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={onClose}
-                className="w-full py-2 px-4 rounded-xl bg-slate-800 hover:bg-slate-750 text-slate-400 hover:text-slate-200 text-xs font-medium transition-colors cursor-pointer focus:outline-none"
-              >
-                Tutup
+                <span>Kembali ke Halaman Login</span>
               </button>
             </div>
           </motion.div>
