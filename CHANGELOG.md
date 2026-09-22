@@ -2,6 +2,27 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.80] - 2026-09-22
+
+### Implementasi: Remote Kick Responsiveness (Heartbeat 30s) & Modal Sesi Berakhir Cyber-Dark
+- **Latar Belakang & Masalah**:
+  - Saat sesi perangkat diputuskan (*disconnect/kick*) dari Web Portal Cloud, sesi di Desktop App masih berjalan hingga 3 menit karena interval heartbeat sebelumnya diset 180 detik (3 menit).
+  - Selain itu, pada `LicenseManager.ts`, blok `finally` mengecek `tier !== 'free'`, sehingga pengguna paket Free yang sudah login tidak menjadwalkan ulang heartbeat berikutnya setelah heartbeat pertama.
+  - Pada sisi UI, notifikasi pencabutan sesi hanya muncul sebagai floating toast yang lekas menghilang tanpa modal dialog informatif yang jelas.
+- **Solusi & Pembaruan Sistem**:
+  1. **Optimalisasi Heartbeat Responsiveness (`licenseManager.ts`)**:
+     - `HEARTBEAT_INTERVAL_MS` dipercepat dari 180s (3 menit) menjadi 30s (`30_000` ms) dengan jitter $\pm 5$s untuk mendeteksi pencabutan sesi secara cepat dan efisien.
+     - Menghapus pembatasan `tier !== 'free'` pada penjadwalan ulang heartbeat di blok `finally`, sehingga semua sesi akun terautentikasi (`this.currentToken`) tetap mendapatkan pembaruan status berkala.
+     - Menambahkan unit test baru (Test 20) di `backend-node/tests/unit_license.test.ts` untuk memverifikasi penjadwalan heartbeat akun Free terautentikasi.
+  2. **Komponen Dialog Bersih & Minimalis (`SessionRevokedModal.tsx`)**:
+     - Dibuat komponen modal `SessionRevokedModal` bergaya Cyber-Dark yang rapi, sederhana, dan tidak berantakan ("informasinya sederhana saja").
+     - Menggunakan ikon murni Lucide-React (`PowerOff`, `LogIn`, `X`), tanpa emoji teks (patuh aturan UI).
+     - Menampilkan judul *"Sesi Telah Berakhir"*, penjelasan pemutusan dari Cloud, keterangan alasan, tombol aksi *"Login Kembali"*, serta tombol *"Tutup"*.
+     - Diintegrasikan secara mulus ke `frontend-react/src/App.tsx` melalui hook `sessionRevokedNotice`.
+  3. **Penyempurnaan Fixture Test Anti Self-Cut (`unit_deviceManager.test.ts`)**:
+     - Menyesuaikan MAC dummy target pada test BUG-2 agar tidak bertabrakan dengan MAC adaptor fisik mesin (`a8:3b:76:0c:dc:55` -> `02:bb:cc:dd:ee:55`), serta menetapkan `currentNetworkId` agar terhindar dari pembersihan memori akibat transisi jaringan virtual.
+- **Verifikasi**: Seluruh 562 automated tests lulus (430 Python + 132 Node.js). Build frontend TypeScript/Vite sukses tanpa error.
+
 ## [v2.41.79] - 2026-09-21
 
 ### Implementasi: Periodic Background Heartbeat & Remote Session Synchronization (Langkah 1 Cloud)

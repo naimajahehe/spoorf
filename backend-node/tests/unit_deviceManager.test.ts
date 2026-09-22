@@ -1,7 +1,7 @@
 import assert from 'assert';
 import { EventEmitter } from 'events';
 import { Device, ProfileAssessment, ProfileRefreshResponse, ProfileRefreshResult } from '../src/types';
-import { OFFLINE_GRACE_SECONDS } from '../src/services/database';
+import { OFFLINE_GRACE_SECONDS, deriveNetworkId } from '../src/services/database';
 import { DeviceManager, scopeDevicesToActiveSubnet, ipv4ToInt, netmaskToPrefix, isSameSubnetMasked, resolveActivePrefix } from '../src/services/deviceManager';
 
 function makeStateRetentionDevice(over: Partial<Device> = {}): Device {
@@ -2186,7 +2186,7 @@ export async function runDeviceManagerTests() {
             ipv6_link_local: 'fe80::1111', ipv6_global: undefined
         };
         const target: any = {
-            ip: '192.168.1.105', mac: 'a8:3b:76:0c:dc:55', hostname: 'Target', vendor: 'Lenovo',
+            ip: '192.168.1.105', mac: '02:bb:cc:dd:ee:55', hostname: 'Target', vendor: 'Lenovo',
             device_type: 'PC / Laptop', os: 'Windows 11', rtt_ms: 15, open_ports: [], services: [],
             is_blocked: true, is_online: true, is_gateway: false, speed_limit: 0,
             session_id: 'sess-old-stale',
@@ -2208,6 +2208,7 @@ export async function runDeviceManagerTests() {
 
         const manager = new DeviceManager(python, db);
         python.scan = async () => [gateway, target];
+        (manager as any).currentNetworkId = deriveNetworkId(gateway.mac);
         (manager as any).devices.set(gateway.ip, gateway);
         (manager as any).devices.set(target.ip, target);
 

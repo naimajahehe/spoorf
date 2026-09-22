@@ -84,8 +84,8 @@ export const VIP_TIER_LICENSE: UserLicense = {
     grace_period_until: null
 };
 
-export const HEARTBEAT_INTERVAL_MS = 180_000; // 3 menit
-export const HEARTBEAT_JITTER_MS = 15_000; // +/- 15 detik
+export const HEARTBEAT_INTERVAL_MS = 30_000; // 30 detik (responsif terhadap remote kick)
+export const HEARTBEAT_JITTER_MS = 5_000; // +/- 5 detik
 
 export class FeatureLimitError extends ForbiddenError {
     constructor(message: string) {
@@ -612,7 +612,7 @@ export class LicenseManager extends EventEmitter implements ILicenseManager {
             }
         } finally {
             this.isHeartbeatInFlight = false;
-            if (shouldReschedule && this.currentToken && (this.currentLicense.tier as string) !== 'free') {
+            if (shouldReschedule && this.currentToken) {
                 this.scheduleNextHeartbeat();
             }
         }

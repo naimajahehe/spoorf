@@ -639,6 +639,49 @@ export async function runLicenseUnitTests() {
         }
     }
 
+    // Test 20: Authenticated Free Tier Heartbeat Reschedules Properly
+    {
+        const freeDb = new DatabaseService(':memory:');
+        await freeDb.init();
+        const freeLm = new LicenseManager(freeDb, 'http://127.0.0.1:4000/v1');
+        await freeLm.init();
+
+        process.env.SPOORF_ALLOW_DEMO_LICENSE = 'true';
+        await freeLm.login({ email: 'free_operator@sentinel.lan', password: 'secret' });
+        assert.strictEqual(freeLm.getStatus().license.tier, 'free');
+        assert.strictEqual(freeLm.getStatus().isAuthenticated, true);
+
+        let heartbeatCalls = 0;
+        const origFetch = global.fetch;
+        (global as any).fetch = async (url: string, opts: any) => {
+            if (url.includes('/auth/heartbeat')) {
+                heartbeatCalls++;
+                return {
+                    ok: true,
+                    status: 200,
+                    json: async () => ({
+                        status: 'success',
+                        token: 'free_token_renewed',
+                        grace_period_until: new Date(Date.now() + 7 * 86400000).toISOString()
+                    })
+                };
+            }
+            return origFetch(url, opts);
+        };
+
+        try {
+            await freeLm.heartbeat();
+            assert.strictEqual(heartbeatCalls, 1);
+            // Verify heartbeat timer was rescheduled
+            assert.ok((freeLm as any).heartbeatTimer !== null, 'Heartbeat timer must be rescheduled for free tier with token');
+            console.log('  ✓ Free Tier Heartbeat: Heartbeat timer properly scheduled and alive for authenticated free accounts');
+        } finally {
+            global.fetch = origFetch;
+            freeLm.shutdown();
+            await freeDb.close();
+        }
+    }
+
     licenseManager.shutdown();
     await db.close();
 

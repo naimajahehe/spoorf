@@ -55,6 +55,7 @@ import { WifiDetailsPopover } from './components/WifiDetailsPopover';
 import { DashboardWelcomeView } from './components/DashboardWelcomeView';
 import { LoginModal } from './components/LoginModal';
 import { UpgradeProModal } from './components/UpgradeProModal';
+import { SessionRevokedModal } from './components/SessionRevokedModal';
 import { ConfirmExitDialog } from './components/ConfirmExitDialog';
 import { TitleBar } from './components/TitleBar';
 import { EngineReadinessGateContent } from './components/EngineReadinessGate';
@@ -172,6 +173,8 @@ function App() {
     const [isCheckingWifi, setIsCheckingWifi] = useState(false);
     const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
     const [upgradeModalState, setUpgradeModalState] = useState<{ isOpen: boolean; reason?: string }>({ isOpen: false });
+    const [isRevokedModalOpen, setIsRevokedModalOpen] = useState(false);
+    const [revokedReason, setRevokedReason] = useState<string | undefined>();
     const [isExitDialogOpen, setIsExitDialogOpen] = useState(false);
 
     const [activeTab, setActiveTab] = useState<FilterTab>('all');
@@ -901,7 +904,7 @@ function App() {
         return () => clearTimeout(timer);
     }, [error, clearError]);
 
-    // Surface session revoked notice as high-priority Toast Notification
+    // Surface session revoked notice as modal dialog & high-priority Toast Notification
     useEffect(() => {
         if (!sessionRevokedNotice) return;
 
@@ -914,6 +917,8 @@ function App() {
             timestamp: Date.now()
         };
         setActiveToasts(prev => [revokedToast, ...prev].slice(0, 3));
+        setRevokedReason(sessionRevokedNotice.reason);
+        setIsRevokedModalOpen(true);
         clearSessionRevokedNotice();
     }, [sessionRevokedNotice, clearSessionRevokedNotice]);
 
@@ -2339,6 +2344,16 @@ function App() {
                 onClose={() => setUpgradeModalState({ isOpen: false })}
                 onOpenLoginModal={() => {
                     setUpgradeModalState({ isOpen: false });
+                    setIsLoginModalOpen(true);
+                }}
+            />
+
+            <SessionRevokedModal
+                isOpen={isRevokedModalOpen}
+                reason={revokedReason}
+                onClose={() => setIsRevokedModalOpen(false)}
+                onReLogin={() => {
+                    setIsRevokedModalOpen(false);
                     setIsLoginModalOpen(true);
                 }}
             />
