@@ -1382,10 +1382,11 @@ function App() {
     }, [authLogin]);
 
     // 1. Initial Pre-Flight Engine Initialization & Login Gates with Smooth Horizontal Slide Transition
-    // Catatan: Jika modal pencabutan sesi (session revoked) sedang aktif, tunda transisi ke AuthPage
-    // agar pengguna melihat dialog penjelasan terlebih dahulu sebelum diarahkan kembali ke layar login.
+    // Catatan: Jika pencabutan sesi sedang berlangsung (sessionRevokedNotice / isRevokedModalOpen),
+    // tunda transisi ke AuthPage agar pengguna melihat dialog modal penjelasan tanpa screen flash.
     const isUnauthenticated = Boolean(authStatus && !authStatus.isAuthenticated);
-    if (!isEngineReady || (isUnauthenticated && !isRevokedModalOpen)) {
+    const isRevocationPending = Boolean(sessionRevokedNotice || isRevokedModalOpen);
+    if (!isEngineReady || (isUnauthenticated && !isRevocationPending)) {
         return (
             <div className="flex flex-col w-full h-screen overflow-hidden bg-[#090a0c]">
                 <TitleBar theme={theme} />
@@ -1421,15 +1422,9 @@ function App() {
                         </motion.div>
                     )}
                 </AnimatePresence>
-            </NeonMesh>
-        </div>
-        <SessionRevokedModal
-            isOpen={isRevokedModalOpen}
-            reason={revokedReason}
-            onClose={() => setIsRevokedModalOpen(false)}
-            onProceedToLogin={() => setIsRevokedModalOpen(false)}
-        />
-    </div>
+                    </NeonMesh>
+                </div>
+            </div>
         );
     }
 

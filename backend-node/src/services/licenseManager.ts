@@ -272,7 +272,7 @@ export class LicenseManager extends EventEmitter implements ILicenseManager {
                     session_id: this.sessionId,
                     hwid: this.sessionId,
                     platform: process.platform,
-                    app_version: '2.21.0',
+                    app_version: env.APP_VERSION || '2.41.80',
                     deviceName: os.hostname()
                 }),
                 signal: AbortSignal.timeout(env.SPOORF_CLOUD_AUTH_TIMEOUT_MS)
@@ -457,7 +457,7 @@ export class LicenseManager extends EventEmitter implements ILicenseManager {
         this.heartbeatIntervalMs = intervalMs;
         this.heartbeatJitterMs = jitterMs;
         if (this.heartbeatTimer) {
-            this.startHeartbeat();
+            this.scheduleNextHeartbeat();
         }
     }
 

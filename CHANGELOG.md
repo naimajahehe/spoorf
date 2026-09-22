@@ -31,6 +31,13 @@ Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem
      - **Solusi Gating**: Menambahkan kondisi `!isRevokedModalOpen` pada gate unauthenticated (`isUnauthenticated && !isRevokedModalOpen`). Pengguna tetap berada pada dashboard dengan overlay modal aktif sampai modal ditutup atau diarahkan ke login.
      - **Penyederhanaan Dialog**: Menyederhanakan tombol aksi pada `SessionRevokedModal.tsx` menjadi satu tombol utama *"Kembali ke Halaman Login"* (`onProceedToLogin`). Menutup modal melalui tombol, backdrop, ikon X, atau tombol `Escape` mengeksekusi transisi mulus ke `AuthPage`.
      - **Pembersihan State**: Menambahkan wrapper `handleAuthLogin` yang memastikan `isRevokedModalOpen` bernilai `false` saat login berhasil, menjamin modal tidak akan muncul kembali setelah login.
+  6. **Superpowers Code Review Hardening (Sesi Kedua)**:
+     - **Eliminasi Screen Flash**: Menghilangkan kedipan (*flash*) layar login `AuthPage` saat pencabutan sesi dengan guard sinkron `const isRevocationPending = Boolean(sessionRevokedNotice || isRevokedModalOpen);`, sehingga aplikasi tidak sempat merender ulang `AuthPage` sebelum state `isRevokedModalOpen` diset true.
+     - **Pembersihan Dead Code**: Menghapus deklarasi modal ganda/mati di dalam percabangan unauthenticated gate pada `App.tsx`.
+     - **Perbaikan Framer Motion Exit Animation**: Mengubah kontainer langsung di dalam `<AnimatePresence>` menjadi `<motion.div role="dialog" initial animate exit>` sehingga animasi transisi keluar (fade out / scale down) berjalan mulus saat modal ditutup.
+     - **Aksesibilitas WAI-ARIA & WCAG**: Menambahkan `autoFocus` dan indikator fokus keyboard berstandar WCAG (`focus-visible:ring-2 focus-visible:ring-cyan-300`) pada tombol aksi utama, serta memoize handler `handleProceed` dengan `useCallback`.
+     - **Reschedule Timer Aktif**: Memperbaiki `setHeartbeatInterval()` di `licenseManager.ts` agar langsung menjadwalkan ulang timer aktif (`scheduleNextHeartbeat()`), serta menggunakan `env.APP_VERSION` dinamis pada payload login.
+     - **Automated Test Suite**: Menambahkan Test 21 di `unit_license.test.ts` untuk memverifikasi penggantian dan penjadwalan ulang instans timer heartbeat saat interval diubah secara dinamis.
 - **Verifikasi**: Seluruh 562 automated tests lulus (430 Python + 132 Node.js). Build frontend TypeScript/Vite sukses tanpa error.
 
 ## [v2.41.79] - 2026-09-21

@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { PowerOff, LogIn, X } from 'lucide-react';
 
@@ -15,13 +15,13 @@ export const SessionRevokedModal: React.FC<SessionRevokedModalProps> = ({
   onClose,
   onProceedToLogin,
 }) => {
-  const handleProceed = () => {
+  const handleProceed = useCallback(() => {
     if (onProceedToLogin) {
       onProceedToLogin();
     } else {
       onClose();
     }
-  };
+  }, [onProceedToLogin, onClose]);
 
   // Global Escape key listener to close modal and proceed to login
   useEffect(() => {
@@ -33,15 +33,19 @@ export const SessionRevokedModal: React.FC<SessionRevokedModalProps> = ({
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isOpen]);
+  }, [isOpen, handleProceed]);
 
   return (
     <AnimatePresence>
       {isOpen && (
-        <div
+        <motion.div
           role="dialog"
           aria-modal="true"
           aria-labelledby="session-revoked-title"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          transition={{ duration: 0.15 }}
           className="fixed inset-0 z-50 flex items-center justify-center p-4 font-sans select-none"
         >
           {/* Backdrop */}
@@ -69,7 +73,7 @@ export const SessionRevokedModal: React.FC<SessionRevokedModalProps> = ({
               type="button"
               onClick={handleProceed}
               aria-label="Tutup dan kembali ke halaman login"
-              className="absolute top-4 right-4 text-slate-500 hover:text-slate-300 p-1 rounded-lg hover:bg-slate-800/60 transition-colors focus:outline-none cursor-pointer"
+              className="absolute top-4 right-4 text-slate-500 hover:text-slate-300 p-1 rounded-lg hover:bg-slate-800/60 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 cursor-pointer"
             >
               <X className="w-4 h-4" />
             </button>
@@ -100,15 +104,16 @@ export const SessionRevokedModal: React.FC<SessionRevokedModalProps> = ({
             <div className="mt-6">
               <button
                 type="button"
+                autoFocus
                 onClick={handleProceed}
-                className="w-full py-2.5 px-4 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs tracking-wide flex items-center justify-center gap-2 transition-colors shadow-lg shadow-cyan-500/20 cursor-pointer focus:outline-none"
+                className="w-full py-2.5 px-4 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs tracking-wide flex items-center justify-center gap-2 transition-colors shadow-lg shadow-cyan-500/20 cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-900"
               >
                 <LogIn className="w-4 h-4" />
                 <span>Kembali ke Halaman Login</span>
               </button>
             </div>
           </motion.div>
-        </div>
+        </motion.div>
       )}
     </AnimatePresence>
   );

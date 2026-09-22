@@ -688,6 +688,31 @@ export async function runLicenseUnitTests() {
         }
     }
 
+    // Test 21: setHeartbeatInterval Reschedules Active Timer
+    {
+        const intervalDb = new DatabaseService(':memory:');
+        await intervalDb.init();
+        const intervalLm = new LicenseManager(intervalDb, 'http://127.0.0.1:4000/v1');
+        await intervalLm.init();
+
+        process.env.SPOORF_ALLOW_DEMO_LICENSE = 'true';
+        await intervalLm.login({ email: 'operator@sentinel.lan', password: 'secret' });
+
+        const initialTimer = (intervalLm as any).heartbeatTimer;
+        assert.ok(initialTimer !== null, 'Heartbeat timer must be active after login');
+
+        // Dynamically update interval
+        intervalLm.setHeartbeatInterval(2500, 0);
+        const rescheduledTimer = (intervalLm as any).heartbeatTimer;
+        assert.ok(rescheduledTimer !== null, 'Rescheduled timer must be armed');
+        assert.notStrictEqual(rescheduledTimer, initialTimer, 'Timer must be replaced with new rescheduled instance');
+        assert.strictEqual((intervalLm as any).heartbeatIntervalMs, 2500, 'Interval MS must be updated');
+        console.log('  ✓ setHeartbeatInterval: Dynamically reschedules active timers immediately');
+
+        intervalLm.shutdown();
+        await intervalDb.close();
+    }
+
     licenseManager.shutdown();
     await db.close();
 
