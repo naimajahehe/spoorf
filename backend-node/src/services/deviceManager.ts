@@ -908,6 +908,11 @@ export class DeviceManager extends EventEmitter implements IDeviceManager {
     }
 
     async deepScanDevicePorts(ip: string, ports?: number[]): Promise<Device> {
+        const deepScanGate = this.license?.checkCanDeepFingerprint?.();
+        if (deepScanGate && !deepScanGate.allowed) {
+            throw new FeatureLockedError(deepScanGate.reason || 'Fitur Deep Fingerprinting khusus untuk pengguna PRO.');
+        }
+
         let device = this.devices.get(ip);
         if (!device) {
             device = (await this.db.getDeviceByIp(ip)) || undefined;

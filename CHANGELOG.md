@@ -2,6 +2,65 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.82] - 2026-09-23
+
+### Hardening: Verifikasi Token Lisensi RS256 Offline, Lockdown Build Terpaket & Sinkronisasi Lisensi Cloud
+- **Latar Belakang (audit `licenseManager.ts` 2026-09-23)**:
+  - Tier & fitur dipulihkan dari kolom cache SQLite tanpa verifikasi kriptografis; token RS256 dari cloud hanya disimpan.
+  - Mode demo dan endpoint cloud dapat diubah lewat environment/`.env`/`config.json` pada build terpaket; endpoint HTTP polos diterima.
+  - Heartbeat hanya memeriksa status logout sekali setelah `fetch`, sehingga respons yang terlambat dapat menghidupkan kembali token setelah logout atau menimpa sesi akun lain.
+  - `can_autoreblock` dan `can_deep_fingerprint` tidak ditegakkan di backend; `grace_period_until` bernilai null dianggap berlaku selamanya.
+- **Perbaikan Arsitektur**:
+  1. **Verifikasi Token Offline (`utils/licenseToken.ts`, `config/licensePublicKey.ts`)**:
+     - Verifikasi RS256 berbasis `crypto.verify` tanpa dependensi baru: algoritma terkunci, signature, issuer, `exp`, dan `iat` tidak boleh di masa depan (deteksi jam sistem dimundurkan).
+     - Lisensi, grace period, identitas, dan `sessionId` diturunkan dari klaim token terverifikasi saat `init()`, login, heartbeat, dan redeem. Cache yang gagal verifikasi dihapus dan klien kembali ke Free.
+  2. **Lockdown Build Terpaket (`config/env.ts`, `desktop-electron/src/main.ts`)**:
+     - Electron selalu menyetel `SPOORF_PACKAGED`; build terpaket menonaktifkan mode demo, mengunci endpoint ke `https://api.spoorf.app/v1`, tidak memuat `.env`, dan mengabaikan override `config.json`.
+     - `SPOORF_CLOUD_URL` wajib HTTPS kecuali loopback dev; `isTrustedCloudUrl` menolak loopback pada build terpaket.
+  3. **Integritas Sesi & Race Guard (`licenseManager.ts`)**:
+     - `authEpoch` naik pada setiap login/logout/revoke/expire; respons heartbeat/redeem dari epoch lama dibuang setelah setiap `await` dan tidak menjadwalkan ulang heartbeat.
+     - Token hasil rotasi wajib milik user & sesi yang sama; heartbeat HTTP 403/404 mengakhiri sesi.
+     - Aktivasi kode lisensi menebus via `POST /auth/redeem` (wajib login) dan menerapkan token baru bertanda tangan; logout memberi tahu cloud agar slot perangkat dibebaskan.
+     - Kedaluwarsa (`expires_at`) dievaluasi ulang di setiap `getLicense()`/`checkCan*`, termasuk saat offline; `grace_period_until` null tidak lagi berlaku.
+  4. **Penegakan Fitur**:
+     - `checkCanAutoreblock()` digerbang di `discoveryService` (auto-reblock); `checkCanDeepFingerprint()` digerbang di `deviceManager.deepScanDevicePorts`.
+     - Event `downgraded` tidak lagi dipancarkan untuk pencabutan free → free; pesan arsenal kini menyebut tier VIP.
+  5. **UI Desktop**: halaman autentikasi menjelaskan bahwa kode lisensi ditebus ke akun Spoorf Cloud dan memerlukan login + koneksi internet.
+- **Verifikasi Kualitas**:
+  - Node.js backend: 132 test 100% green (termasuk 12 skenario lisensi baru dan 2 test lockdown env).
+  - Python service: 430 test 100% green.
+  - Contract test lintas repo terhadap `spoorf-web-cloud` v0.0.4 (login → redeem → restart offline → kedaluwarsa server → remote revoke) lolos.
+- **Catatan Rilis**: public key di `config/licensePublicKey.ts` harus sama dengan public key server cloud production; rebuild `desktop-electron/dist` sebelum packaging.
+
+## [v2.41.81] - 2026-09-22
+
+### Implementasi: Spoorf Cloud Platform Landing Page (Guild / Fleet Warm Paper Aesthetic)
+- **Latar Belakang**:
+  - Repositori cloud `spoorf-web-cloud` sebelumnya hanya memiliki antarmuka dashboard, login, register, dan download yang langsung mengalihkan rute root `/` ke `/dashboard`.
+  - Belum ada landing page publik berkonversi tinggi dengan estetika editorial modern untuk memperkenalkan kapabilitas Sentinel L2 Engine, sistem invarian zero-collateral, serta koordinasi armada cloud multi-seat.
+- **Pembaruan Arsitektur & Desain**:
+  1. **Token Desain & Tipografi Editorial (Guild Theme)**:
+     - Mengintegrasikan palet warna Warm Editorial Paper (`#f4f3f1` background, `#0d0c11` foreground ink, `#5b34e8` electric brand indigo, hairline border `rgba(45, 42, 58, 0.14)`).
+     - Mengadopsi kombinasi tipografi Trinity: `Geist` (clean modern sans), `Geist Mono` (IP/MAC and technical telemetry), dan `Instrument Serif` (italic editorial accents pada headline).
+     - Menambahkan utilitas background `.bg-grid-paper`, animasi kartu melayang `.wander-x` & `.wander-y`, status pulsing `.status-pulse`, serta gradient mesh `.texture-wash-brand` dan `.texture-wash-mint`.
+  2. **Komponen Landing Page Lengkap (`frontend/src/components/landing/`)**:
+     - `LandingNavbar.tsx`: Floating pill navbar dengan efek glassmorphism, brand monogram, live status pulse, tautan navigasi anchor, smart auth (`useAuth()`), dan drawer menu responsif mobile.
+     - `HeroTopology.tsx`: Headline editorial beraksen serif italic, announcement pill, tombol CTA ganda, dan dynamic SVG Bezier topology canvas dengan 4 floating wandering node cards yang mengitari Core Sentinel Daemon hub.
+     - `MissionLead.tsx`: Editorial quote naratif (*“You cannot defend what you cannot see”*) dan 4-column metric ticker card (`< 1.0s`, `100k+`, `0ms`, `30s`).
+     - `InteractiveFeatureTabs.tsx`: Showcase 4 pilar operasional (L2 Discovery, PWM Limiter interaktif dengan slider pengatur kecepatan, Invarian Matematika, dan Simulasi Remote Session Kick) dilengkapi bar progres auto-advance 6 detik dan pause-on-hover.
+     - `BentoFeatures.tsx`: Multi-texture bento grid yang merangkum arsitektur tri-service terkopel mikro (Python + Node + React), Zero-HWID privacy & RS256 token, Bettercap defensive arsenal, dan persistensi hibrida SQLite WAL + PostgreSQL 17.
+     - `FeatureMatrix.tsx`: Matriks kapabilitas enterprise 3 kolom (L2 Engine, Cloud Fleet Hub, Standar Rekayasa & Higiene Kode).
+     - `PricingTiers.tsx`: Kartu transparan 3 tier (Community Free $0, Sentinel Pro $19 *Most Popular*, dan Enterprise VIP $49) dengan rincian kapabilitas dan tombol aksi langsung.
+     - `LandingFooter.tsx`: Kartu CTA penutup bertema gradient, direktori tautan 3 kolom, status pill `All Systems Operational · Cloud Heartbeat Live`, serta batasan regulasi RFC 1918.
+     - `LandingPage.tsx`: Komposer halaman tunggal root `/` yang menyatukan seluruh komponen secara terstruktur.
+  3. **Integrasi Routing & Pemisahan Konsol (`App.tsx`)**:
+     - Memperbarui `App.tsx` menggunakan React Router `<Outlet />` layout: rute root `/` menampilkan `<LandingPage />` bertema Warm Paper dengan navbar floating mandiri, sedangkan rute konsol (`/login`, `/register`, `/dashboard`, `/download`) dibungkus dalam layout dark slate dashboard tersendiri tanpa tumpang tindih visual.
+  4. **Verifikasi Kualitas**:
+     - Frontend build (`tsc && vite build`): 100% lolos tanpa kesalahan tipe data TypeScript (0 error).
+     - Backend API test suite (`spoorf-web-cloud/backend`): 40 unit & integrasi test 100% green.
+     - Desktop core test suites: 430 test Python + 132 test Node.js 100% green (total 602 test passed).
+     - Kode terdistribusi dan ter-commit rapi pada branch `main` di repositori GitHub `naimajahehe/spoorf-web-cloud`.
+
 ## [v2.41.80] - 2026-09-22
 
 ### Implementasi: Remote Kick Responsiveness (Heartbeat 30s) & Modal Sesi Berakhir Cyber-Dark

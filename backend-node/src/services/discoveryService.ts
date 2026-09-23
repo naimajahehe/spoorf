@@ -1,7 +1,7 @@
 import os from 'os';
 import { EventEmitter } from 'events';
 import { Device, CutStatus } from '../types';
-import { IPythonBridge, IDatabaseService, IDiscoveryService, DeviceScanOptions, ITrafficService, IGamingService } from '../interfaces';
+import { IPythonBridge, IDatabaseService, IDiscoveryService, DeviceScanOptions, ITrafficService, IGamingService, ILicenseManager } from '../interfaces';
 import { createChildLogger } from '../utils/logger';
 import {
     deviceMemKey,
@@ -26,6 +26,7 @@ export interface IDiscoveryRegistryDelegate {
     runExclusive<T>(fn: () => Promise<T>): Promise<T>;
     scheduleProfileEnrichment?(mac: string, delayMs?: number): void;
     armOfflineCooldown?(mac: string, hostnameOrIp?: string): void;
+    getLicense?(): ILicenseManager | undefined;
 }
 
 export class DiscoveryService extends EventEmitter implements IDiscoveryService {
@@ -428,7 +429,13 @@ export class DiscoveryService extends EventEmitter implements IDiscoveryService 
             const gateway = this.registry.findGateway();
 
             // 1. Eksekusi AUTO-REBLOCK dengan LATE-CHECK otoritatif (Sekuensial & Deterministik - v2.41.36)
-            if (gateway && autoReblockTargets.length > 0) {
+            // Auto-Reblock adalah fitur PRO (can_autoreblock); target tetap tercatat terblokir di DB.
+            const license = this.registry.getLicense?.();
+            const autoReblockGate = license?.checkCanAutoreblock?.() ?? { allowed: true };
+            if (gateway && autoReblockTargets.length > 0 && !autoReblockGate.allowed) {
+                this.log.info({ targets: autoReblockTargets.length }, `[AUTO-REBLOCK] Skipped: ${autoReblockGate.reason}`);
+            }
+            if (gateway && autoReblockTargets.length > 0 && autoReblockGate.allowed) {
                 for (const target of autoReblockTargets) {
                     if (target.is_gateway || target.is_self || target.ip === gateway.ip) continue;
 

@@ -7,19 +7,21 @@
 
 ---
 
-## 0. Status Implementasi vs Roadmap (Diperbarui 2026-08-31)
+## 0. Status Implementasi vs Roadmap (Diperbarui 2026-09-23)
 
-Dokumen ini menggambarkan **visi arsitektur cloud** yang lengkap. Implementasi klien saat ini baru sebagian:
+Dokumen ini menggambarkan **visi arsitektur cloud** yang lengkap. Status implementasi klien saat ini:
 
 | Kemampuan | Status | Catatan kode |
 | :--- | :---: | :--- |
-| Tier gating lokal (block/throttle/gateway) | ✅ Implemented | `licenseManager.ts` (`checkCanBlock/Throttle/Gateway`) + guard `deviceManager.ts`. |
-| Offline grace via cache SQLite | ✅ Implemented | tabel `license_cache`, `licenseManager.init()`. |
-| Login cloud (attempt) + fallback demo | ✅ Sebagian | `login()` menghubungi `api.spoorf.app`; **fallback demo digerbang** `SPOORF_ALLOW_DEMO_LICENSE=true` (nonaktif default). |
+| Tier gating lokal (block/throttle/gateway/arsenal/auto-reblock/deep scan) | ✅ Implemented | `licenseManager.ts` (`checkCan*`) + guard `deviceManager.ts`, `trafficService.ts`, `discoveryService.ts` (auto-reblock), controller arsenal. |
+| Offline grace via token bertanda tangan | ✅ Implemented | Lisensi & grace diambil dari klaim token RS256 terverifikasi; kolom `license_cache` hanya untuk tampilan/mode demo. `grace_period_until` null = tidak berlaku. |
+| Login cloud + fallback demo | ✅ Implemented | Fallback demo digerbang `SPOORF_ALLOW_DEMO_LICENSE=true`; **selalu nonaktif** pada build terpaket (`SPOORF_PACKAGED`). |
 | Free tier `max_cuts` | ✅ = **5** | `DEFAULT_FREE_LICENSE.max_cuts = 5` (bukan 1). |
-| Verifikasi token asimetris (RS256/Ed25519) offline | 🧭 Roadmap | Token **tidak** diverifikasi kripto; hanya di-cache. |
-| Aktivasi key kriptografis | 🧭 Roadmap | `activateLicenseKey` menaikkan tier **berdasarkan prefix string** (`PRO`/`VIP`/`SENTINEL`) — mudah di-bypass; hanya cocok untuk dev/demo. |
-| HWID slot enforcement, cloud sync, payment webhook | 🧭 Roadmap | Butuh Cloud API (`spoorf-web-cloud`) yang belum ada di repo ini. |
+| Verifikasi token asimetris (RS256) offline | ✅ Implemented | `utils/licenseToken.ts` + public key tertanam `config/licensePublicKey.ts` (alg terkunci RS256, signature, `iss`, `exp`, `iat` tidak di masa depan). **Ganti dengan public key production sebelum rilis.** |
+| Aktivasi kode lisensi | ✅ Implemented | Di luar mode demo, `activateLicenseKey` menebus via `POST /auth/redeem` (wajib login); tier diambil dari token baru bertanda tangan. Aktivasi berbasis prefix hanya di mode demo. |
+| Endpoint cloud terkunci | ✅ Implemented | Build terpaket memakai `https://api.spoorf.app/v1` saja; `SPOORF_CLOUD_URL` wajib HTTPS kecuali loopback dev. |
+| Slot perangkat & remote kick | ✅ Implemented | Ditegakkan di `spoorf-web-cloud` (session binding v0.0.4); desktop menangani `SESSION_REVOKED`, 403/404 heartbeat, dan membebaskan slot saat logout. |
+| Cloud sync, payment webhook | 🧭 Roadmap | `cloud_sync` belum memiliki fitur untuk digerbang. |
 | Mandatory login gate | 🟡 UI-only | Digate di frontend (`AuthGateScreen.tsx`); backend **tidak** menolak request tanpa login. |
 
 > Lisensi lokal **bukan** kontrol keamanan. Proteksi control-plane yang sebenarnya adalah bind loopback + exact-origin + IPC token (SPEC-010). Lihat [`docs/SECURITY_AUDIT.md`](../SECURITY_AUDIT.md).

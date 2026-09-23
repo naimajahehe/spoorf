@@ -82,10 +82,10 @@ export const AuthPage: React.FC<AuthPageProps> = ({
           return;
         }
         await onActivateKey(licenseKey.trim());
-        setSuccessMessage("Lisensi PRO berhasil diaktivasi!");
+        setSuccessMessage("Kode lisensi berhasil diaktivasi!");
         setTimeout(() => onClose?.(), 600);
       } else if (authMode === "signup") {
-        setErrorMessage("Pendaftaran akun belum tersedia di aplikasi ini. Gunakan akun cloud yang sudah ada atau aktifkan kode lisensi.");
+        setErrorMessage("Pendaftaran akun belum tersedia di aplikasi ini. Daftar di portal Spoorf Cloud, lalu masuk dengan akun tersebut untuk mengaktifkan kode lisensi.");
         return;
       } else {
         if (!email.trim()) {
@@ -154,7 +154,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({
                   type="button"
                   onClick={() => {
                     setAuthMode("signup");
-                    setErrorMessage("Pendaftaran akun belum tersedia di aplikasi ini. Gunakan akun cloud yang sudah ada atau aktifkan kode lisensi.");
+                    setErrorMessage("Pendaftaran akun belum tersedia di aplikasi ini. Daftar di portal Spoorf Cloud, lalu masuk dengan akun tersebut untuk mengaktifkan kode lisensi.");
                   }}
                   className="font-medium text-zinc-200 hover:text-white underline underline-offset-4 cursor-pointer"
                 >
@@ -333,6 +333,12 @@ export const AuthPage: React.FC<AuthPageProps> = ({
                   />
                 </div>
 
+                {!authStatus?.isAuthenticated && (
+                  <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/20 text-[11px] text-amber-200 leading-relaxed">
+                    Kode lisensi ditebus ke akun Spoorf Cloud Anda. Masuk terlebih dahulu (memerlukan koneksi internet).
+                  </div>
+                )}
+
                 <div className="p-2.5 rounded-xl bg-white/[0.02] border border-white/[0.06] text-[11px] text-zinc-400 flex items-center justify-between">
                   <span className="font-mono text-zinc-500">ID Sesi Klien:</span>
                   <span className="font-mono text-zinc-300 font-medium">
@@ -342,7 +348,7 @@ export const AuthPage: React.FC<AuthPageProps> = ({
               </div>
             ) : (
               <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/20 text-xs text-amber-200 leading-relaxed">
-                Pendaftaran akun belum tersedia di aplikasi ini. Silakan masuk dengan akun cloud yang sudah ada atau gunakan kode lisensi.
+                Pendaftaran akun belum tersedia di aplikasi ini. Daftar di portal Spoorf Cloud, lalu masuk dengan akun tersebut untuk mengaktifkan kode lisensi.
               </div>
             )}
 

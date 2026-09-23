@@ -12,6 +12,8 @@ export interface ILicenseManager {
     checkCanThrottle(): { allowed: boolean; reason?: string };
     checkCanGateway(): { allowed: boolean; reason?: string };
     checkCanArsenal(): { allowed: boolean; reason?: string };
+    checkCanAutoreblock?(): { allowed: boolean; reason?: string };
+    checkCanDeepFingerprint?(): { allowed: boolean; reason?: string };
     heartbeat?(): Promise<void>;
     startHeartbeat?(): void;
     stopHeartbeat?(): void;

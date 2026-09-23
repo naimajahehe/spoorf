@@ -72,4 +72,30 @@ export async function runEnvTests() {
         assert.strictEqual(EnvSchema.safeParse({ SPOORF_CLOUD_AUTH_TIMEOUT_MS: 'abc' }).success, false);
         console.log('  ✓ EnvSchema: Cloud auth timeout tunable (default 5000ms), rejects invalid values');
     }
+
+    // 5. Cloud endpoint must be HTTPS (plain HTTP only for loopback dev instances)
+    {
+        assert.strictEqual(EnvSchema.safeParse({ SPOORF_CLOUD_URL: 'https://api.spoorf.app/v1' }).success, true);
+        assert.strictEqual(EnvSchema.safeParse({ SPOORF_CLOUD_URL: 'http://localhost:4000/v1' }).success, true);
+        assert.strictEqual(EnvSchema.safeParse({ SPOORF_CLOUD_URL: 'http://127.0.0.1:4000/v1' }).success, true);
+        assert.strictEqual(EnvSchema.safeParse({ SPOORF_CLOUD_URL: 'http://api.spoorf.app/v1' }).success, false);
+        assert.strictEqual(EnvSchema.safeParse({ SPOORF_CLOUD_URL: 'http://192.168.1.20:4000/v1' }).success, false);
+        console.log('  ✓ EnvSchema: SPOORF_CLOUD_URL requires HTTPS outside loopback');
+    }
+
+    // 6. Packaged builds ignore demo mode and cloud endpoint overrides
+    {
+        const packaged = validateEnv({
+            SPOORF_PACKAGED: 'true',
+            SPOORF_ALLOW_DEMO_LICENSE: 'true',
+            SPOORF_CLOUD_URL: 'https://mirror.example.com/v1'
+        });
+        assert.strictEqual(packaged.SPOORF_ALLOW_DEMO_LICENSE, false);
+        assert.strictEqual(packaged.SPOORF_CLOUD_URL, 'https://api.spoorf.app/v1');
+
+        const dev = validateEnv({ SPOORF_ALLOW_DEMO_LICENSE: 'true', SPOORF_CLOUD_URL: 'http://localhost:4000/v1' });
+        assert.strictEqual(dev.SPOORF_ALLOW_DEMO_LICENSE, true);
+        assert.strictEqual(dev.SPOORF_CLOUD_URL, 'http://localhost:4000/v1');
+        console.log('  ✓ Packaged Lockdown: demo license and cloud URL overrides are ignored in installer builds');
+    }
 }

@@ -320,8 +320,16 @@ function startNodeBackend() {
         process.env.PORT = '5000';
         process.env.HOST = '127.0.0.1';
 
-        // Injeksi SPOORF_CLOUD_URL bila belum diset di environment
-        if (!process.env.SPOORF_CLOUD_URL) {
+        // Build installer: selalu ditimpa (bukan diwarisi) agar backend menerapkan lockdown lisensi
+        // (mode demo nonaktif, endpoint cloud resmi, tanpa .env/config.json override).
+        process.env.SPOORF_PACKAGED = app.isPackaged ? 'true' : 'false';
+        if (app.isPackaged) {
+            delete process.env.SPOORF_ALLOW_DEMO_LICENSE;
+            delete process.env.SPOORF_CLOUD_URL;
+        }
+
+        // Injeksi SPOORF_CLOUD_URL bila belum diset di environment (hanya mode pengembangan)
+        if (!app.isPackaged && !process.env.SPOORF_CLOUD_URL) {
             const userConfigFile = path.join(appDataPath, 'config.json');
             if (fs.existsSync(userConfigFile)) {
                 try {
@@ -332,7 +340,7 @@ function startNodeBackend() {
                     }
                 } catch {}
             }
-            if (!process.env.SPOORF_CLOUD_URL && !app.isPackaged) {
+            if (!process.env.SPOORF_CLOUD_URL) {
                 const devEnvPath = path.join(__dirname, '../../backend-node/.env');
                 if (fs.existsSync(devEnvPath)) {
                     try {
