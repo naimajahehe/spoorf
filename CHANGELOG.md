@@ -2,6 +2,36 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.82] - 2026-09-23
+
+### Hardening: Verifikasi Token Lisensi RS256 Offline, Lockdown Build Terpaket & Sinkronisasi Lisensi Cloud
+- **Latar Belakang (audit `licenseManager.ts` 2026-09-23)**:
+  - Tier & fitur dipulihkan dari kolom cache SQLite tanpa verifikasi kriptografis; token RS256 dari cloud hanya disimpan.
+  - Mode demo dan endpoint cloud dapat diubah lewat environment/`.env`/`config.json` pada build terpaket; endpoint HTTP polos diterima.
+  - Heartbeat hanya memeriksa status logout sekali setelah `fetch`, sehingga respons yang terlambat dapat menghidupkan kembali token setelah logout atau menimpa sesi akun lain.
+  - `can_autoreblock` dan `can_deep_fingerprint` tidak ditegakkan di backend; `grace_period_until` bernilai null dianggap berlaku selamanya.
+- **Perbaikan Arsitektur**:
+  1. **Verifikasi Token Offline (`utils/licenseToken.ts`, `config/licensePublicKey.ts`)**:
+     - Verifikasi RS256 berbasis `crypto.verify` tanpa dependensi baru: algoritma terkunci, signature, issuer, `exp`, dan `iat` tidak boleh di masa depan (deteksi jam sistem dimundurkan).
+     - Lisensi, grace period, identitas, dan `sessionId` diturunkan dari klaim token terverifikasi saat `init()`, login, heartbeat, dan redeem. Cache yang gagal verifikasi dihapus dan klien kembali ke Free.
+  2. **Lockdown Build Terpaket (`config/env.ts`, `desktop-electron/src/main.ts`)**:
+     - Electron selalu menyetel `SPOORF_PACKAGED`; build terpaket menonaktifkan mode demo, mengunci endpoint ke `https://api.spoorf.app/v1`, tidak memuat `.env`, dan mengabaikan override `config.json`.
+     - `SPOORF_CLOUD_URL` wajib HTTPS kecuali loopback dev; `isTrustedCloudUrl` menolak loopback pada build terpaket.
+  3. **Integritas Sesi & Race Guard (`licenseManager.ts`)**:
+     - `authEpoch` naik pada setiap login/logout/revoke/expire; respons heartbeat/redeem dari epoch lama dibuang setelah setiap `await` dan tidak menjadwalkan ulang heartbeat.
+     - Token hasil rotasi wajib milik user & sesi yang sama; heartbeat HTTP 403/404 mengakhiri sesi.
+     - Aktivasi kode lisensi menebus via `POST /auth/redeem` (wajib login) dan menerapkan token baru bertanda tangan; logout memberi tahu cloud agar slot perangkat dibebaskan.
+     - Kedaluwarsa (`expires_at`) dievaluasi ulang di setiap `getLicense()`/`checkCan*`, termasuk saat offline; `grace_period_until` null tidak lagi berlaku.
+  4. **Penegakan Fitur**:
+     - `checkCanAutoreblock()` digerbang di `discoveryService` (auto-reblock); `checkCanDeepFingerprint()` digerbang di `deviceManager.deepScanDevicePorts`.
+     - Event `downgraded` tidak lagi dipancarkan untuk pencabutan free → free; pesan arsenal kini menyebut tier VIP.
+  5. **UI Desktop**: halaman autentikasi menjelaskan bahwa kode lisensi ditebus ke akun Spoorf Cloud dan memerlukan login + koneksi internet.
+- **Verifikasi Kualitas**:
+  - Node.js backend: 132 test 100% green (termasuk 12 skenario lisensi baru dan 2 test lockdown env).
+  - Python service: 430 test 100% green.
+  - Contract test lintas repo terhadap `spoorf-web-cloud` v0.0.4 (login → redeem → restart offline → kedaluwarsa server → remote revoke) lolos.
+- **Catatan Rilis**: public key di `config/licensePublicKey.ts` harus sama dengan public key server cloud production; rebuild `desktop-electron/dist` sebelum packaging.
+
 ## [v2.41.81] - 2026-09-22
 
 ### Implementasi: Spoorf Cloud Platform Landing Page (Guild / Fleet Warm Paper Aesthetic)
