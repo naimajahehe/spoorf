@@ -1376,9 +1376,10 @@ function App() {
 
     const selectedCount = selectedIps.length;
 
-    const handleAuthLogin = useCallback(async (credentials: any) => {
+    // Teruskan seluruh argumen posisional: AuthPage memanggil onLogin(email, password).
+    const handleAuthLogin = useCallback(async (email: string, password?: string, token?: string, cloudUrl?: string) => {
         setIsRevokedModalOpen(false);
-        return await authLogin(credentials);
+        return await authLogin(email, password, token, cloudUrl);
     }, [authLogin]);
 
     // 1. Initial Pre-Flight Engine Initialization & Login Gates with Smooth Horizontal Slide Transition
