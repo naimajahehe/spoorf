@@ -2,6 +2,20 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.85] - 2026-09-25
+
+### Hardening: Enkripsi Token Cloud Tersimpan (safeStorage / DPAPI)
+- **Latar Belakang (audit desktop 2026-09-25, temuan M3)**:
+  - Token cloud yang di-cache di SQLite (`%APPDATA%\SpoorfSentinel\data\sentinel.db`) adalah kredensial bearer akun yang berlaku 30 hari, tetapi disimpan tanpa enkripsi. Siapa pun yang dapat membaca file database dapat memakai API cloud atas nama akun tersebut.
+- **Perbaikan**:
+  1. **`tokenCipher` (`backend-node/src/utils/tokenCipher.ts`)**: token disegel sebagai `enc:v1:<base64>` memakai secret storage platform. Electron main menyuntikkan `safeStorage` (DPAPI di Windows) sebelum backend di-`require`; langkah ini berjalan setelah app `ready`, saat `safeStorage` sudah tersedia.
+  2. **`LicenseRepository`**: token disegel saat ditulis dan dibuka saat dibaca. Baris lama yang masih plaintext tetap terbaca lalu disegel ulang di tempat. Token yang tidak dapat dibuka di sini (disegel untuk akun Windows atau mesin lain) dihapus dan cache dianggap kosong, sehingga salinan file database tidak membawa token yang bisa dipakai.
+  3. Tanpa secret storage (backend berdiri sendiri saat dev/test), perilaku plaintext sebelumnya dipertahankan.
+- **Verifikasi Kualitas**:
+  - Backend Node: 138 test 100% green (4 kasus repository baru: tersegel saat disimpan, migrasi baris lama, penolakan token akun/mesin lain, fallback + wiring `DatabaseService`).
+  - Electron supervisor: 6 test 100% green; `tsc` bersih pada `backend-node` dan `desktop-electron`.
+  - Uji dengan `safeStorage` Electron asli: nilai tersegel tidak memuat plaintext dan dapat dibuka kembali oleh proses baru untuk pengguna yang sama.
+
 ## [v2.41.84] - 2026-09-25
 
 ### Hardening Sesi Desktop: Rotasi Session ID, Token API Lokal di Luar Command Line & Versi Aplikasi Nyata
