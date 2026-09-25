@@ -653,7 +653,6 @@ export const AnimatedSidebar = forwardRef<HTMLElement, AnimatedSidebarProps>(
                       }
                     }}
                     icon={<Search size={18} />}
-                    badge={!collapsed ? <kbd className="text-[10px] font-mono bg-white/[0.08] px-1.5 py-0.5 rounded border border-white/[0.1] text-zinc-400">⌘K</kbd> : undefined}
                   >
                     Search
                   </AnimatedSidebarMenuButton>
@@ -662,9 +661,8 @@ export const AnimatedSidebar = forwardRef<HTMLElement, AnimatedSidebarProps>(
             </AnimatedSidebarGroupContent>
           </AnimatedSidebarGroup>
 
-          {/* Main Surveillance Group */}
+          {/* Main Navigation Group */}
           <AnimatedSidebarGroup>
-            <AnimatedSidebarGroupLabel>SURVEILLANCE</AnimatedSidebarGroupLabel>
             <AnimatedSidebarGroupContent>
               <AnimatedSidebarMenu>
                 <AnimatedSidebarMenuItem>

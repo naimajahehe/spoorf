@@ -4,10 +4,8 @@ function getInitialToken(): string {
     if (process.env.SENTINEL_API_TOKEN) {
         return process.env.SENTINEL_API_TOKEN;
     }
-    const tokenArg = process.argv.find(arg => arg.startsWith('--sentinel-api-token='));
-    if (tokenArg) {
-        return tokenArg.split('=')[1] || '';
-    }
+    // Token tidak lagi dibaca dari process.argv: menaruhnya di command line membocorkannya
+    // ke proses lain yang bisa membaca argv (mis. WMI). Ambil via IPC aman dari main.
     try {
         return ipcRenderer.sendSync('get-api-token-sync') || '';
     } catch {
@@ -22,7 +20,7 @@ ipcRenderer.on('window-minimize-state', (_event, isMin) => {
 
 contextBridge.exposeInMainWorld('electronAPI', {
     isDesktop: true,
-    appVersion: '2.35.0',
+    appVersion: '2.41.84',
     // KEAMANAN (P1): Token bearer lokal untuk memanggil control-plane (:5000/:8001).
     apiToken: getInitialToken(),
     getApiToken: () => ipcRenderer.invoke('get-api-token'),

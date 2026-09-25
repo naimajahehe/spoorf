@@ -703,6 +703,10 @@ export class LicenseManager extends EventEmitter implements ILicenseManager {
         this.currentUser = null;
         this.currentToken = null;
         this.currentLicense = { ...DEFAULT_FREE_LICENSE };
+        // Rotasi Session ID: cegah login berikutnya menghidupkan kembali sesi yang baru dicabut.
+        // Tanpa ini, login ulang memakai sessionId lama akan mengaktifkan kembali baris sesi di
+        // cloud dan menghidupkan setiap token yang pernah diterbitkan untuknya.
+        this.sessionId = crypto.randomUUID();
 
         // Best effort: bebaskan slot perangkat di cloud tanpa memblokir logout lokal.
         if (isCloudToken(cloudToken)) {
@@ -898,6 +902,9 @@ export class LicenseManager extends EventEmitter implements ILicenseManager {
         this.currentUser = null;
         this.currentToken = null;
         this.currentLicense = { ...DEFAULT_FREE_LICENSE };
+        // Rotasi Session ID (lihat logout): setelah kick/kedaluwarsa, login ulang harus mendaftarkan
+        // sesi baru, bukan menghidupkan kembali sesi yang sudah dicabut server.
+        this.sessionId = crypto.randomUUID();
         try {
             await this.db.clearLicenseCache();
         } catch (err: any) {

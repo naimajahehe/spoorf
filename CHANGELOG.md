@@ -2,6 +2,36 @@
 
 Seluruh riwayat perubahan arsitektur, penambahan fitur, dan perbaikan bug sistem NetCut Sentinel (Spoorf).
 
+## [v2.41.84] - 2026-09-25
+
+### Hardening Sesi Desktop: Rotasi Session ID, Token API Lokal di Luar Command Line & Versi Aplikasi Nyata
+- **Latar Belakang (audit `licenseManager` & auth desktop 2026-09-25)**, diverifikasi dengan `LicenseManager` asli terhadap Spoorf Cloud lokal (DB test):
+  - `logout()` dan `endSession()` tidak mengganti `sessionId`. Login ulang di proses yang sama memakai id lama, sehingga cloud mengaktifkan kembali baris sesi yang sudah dicabut dan **token lama hidup lagi** (`401 → 200`), termasuk salinan cache di mesin lain dan setelah "Putuskan semua" dari dashboard.
+  - Token API lokal (`SENTINEL_API_TOKEN`) dikirim ke renderer lewat `additionalArguments`, sehingga tercantum di command line proses renderer dan dapat dibaca proses lain milik pengguna yang sama (mis. WMI) tanpa hak admin.
+  - `APP_VERSION` tidak pernah diset, sehingga cloud mencatat `app_version: "1.0.0"` untuk semua perangkat.
+- **Perbaikan**:
+  1. **Rotasi Session ID (`licenseManager.ts`)**: `logout()` dan `endSession()` (kick/kedaluwarsa) membuat `sessionId` baru (`crypto.randomUUID()`), sehingga login berikutnya mendaftarkan sesi baru. Token dari sesi yang dicabut tetap `401` setelah login ulang.
+  2. **Token API Lokal (`main.ts`, `preload.ts`)**: token tidak lagi diteruskan lewat argv; renderer mengambilnya melalui IPC sinkron `get-api-token-sync` yang sudah ada. Backend Node (satu proses) dan Python engine tetap memperolehnya dari environment.
+  3. **Versi Aplikasi (`main.ts`)**: `process.env.APP_VERSION = app.getVersion()` diset sebelum backend dimuat, sehingga telemetri cloud memakai versi terpasang.
+- **Verifikasi Kualitas**:
+  - Backend Node: 134 test 100% green (2 test regresi baru rotasi Session ID: logout & remote kick).
+  - Electron supervisor: 6 test 100% green; `tsc` bersih pada `backend-node` dan `desktop-electron`.
+  - Uji end-to-end terhadap cloud lokal: token lama tetap `401` setelah logout → login dan kick → login (sebelumnya `200`).
+  - Code review independen: siap merge, tanpa temuan Critical/Important.
+- **Tindak Lanjut (belum di rilis ini)**: pemisahan token Node↔Python dan pengecekan lisensi di engine, jam masa tenggang offline monotonik, enkripsi token cloud tersimpan (`safeStorage`), serta asar + Electron fuses + code signing.
+
+## [v2.41.83] - 2026-09-25
+
+### Refinement UI Sidebar: Eliminasi Badge ⌘K Search & Label Grup Surveillance
+- **Pembaruan Antarmuka (`AnimatedSidebar.tsx`)**:
+  - Menghapus badge shortcut `[ ⌘K ]` pada tombol menu *Search* di sidebar agar tampilan menu navigasi menjadi lebih bersih dan minimalis.
+  - Menghapus label grup teks `"SURVEILLANCE"` di atas grup menu navigasi utama (*Dashboard*, *NetCut*, *Smart Gateway*, dll.).
+- **Verifikasi Kualitas**:
+  - `frontend-react`: Build lolos tanpa error TypeScript (`npm run build`).
+  - Unit test frontend: 3 suite assertions lolos (`test:dhcp-profiling`, `test:refresh-sequencer`, `test:profile-coverage`).
+  - Backend Node: 132 test 100% green.
+  - Python Service: 430 test 100% green.
+
 ## [v2.41.82] - 2026-09-23
 
 ### Hardening: Verifikasi Token Lisensi RS256 Offline, Lockdown Build Terpaket & Sinkronisasi Lisensi Cloud

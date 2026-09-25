@@ -80,7 +80,7 @@ console.error = (...args: any[]) => {
 };
 
 logElectron('=====================================================');
-logElectron(`🚀 Spoorf Sentinel v2.21.0 Launching... (Platform: ${process.platform}, Arch: ${process.arch}, Node: ${process.versions.node}, Electron: ${process.versions.electron})`);
+logElectron(`🚀 Spoorf Sentinel v2.41.82 Launching... (Platform: ${process.platform}, Arch: ${process.arch}, Node: ${process.versions.node}, Electron: ${process.versions.electron})`);
 logElectron(`📁 AppPath: ${app.getAppPath()}`);
 logElectron(`📁 ResourcesPath: ${process.resourcesPath}`);
 logElectron(`📁 AppData: ${appDataPath}`);
@@ -319,6 +319,9 @@ function startNodeBackend() {
         process.env.SENTINEL_DB_PATH = path.join(dataDir, 'sentinel.db');
         process.env.PORT = '5000';
         process.env.HOST = '127.0.0.1';
+        // Versi aplikasi nyata untuk telemetri cloud (app_version pada login/heartbeat).
+        // Tanpa ini backend memakai default '1.0.0' untuk SEMUA perangkat.
+        process.env.APP_VERSION = app.getVersion();
 
         // Build installer: selalu ditimpa (bukan diwarisi) agar backend menerapkan lockdown lisensi
         // (mode demo nonaktif, endpoint cloud resmi, tanpa .env/config.json override).
@@ -450,8 +453,11 @@ function createMainWindow() {
         webPreferences: {
             preload: path.join(__dirname, 'preload.js'),
             contextIsolation: true,
-            nodeIntegration: false,
-            additionalArguments: [`--sentinel-api-token=${SENTINEL_API_TOKEN}`]
+            nodeIntegration: false
+            // KEAMANAN (P1): token API lokal TIDAK diteruskan lewat additionalArguments (argv).
+            // Command line sebuah proses dapat dibaca proses lain pada mesin yang sama (mis. lewat
+            // WMI Win32_Process.CommandLine) tanpa hak admin, sehingga menaruh token di argv
+            // membocorkannya. Renderer mengambil token via IPC `get-api-token-sync` di preload.
         }
     });
 

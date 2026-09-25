@@ -51,7 +51,7 @@ async function main() {
 
     try {
         await runLicenseUnitTests();
-        passed += 19;
+        passed += 21;
     } catch (err: any) {
         console.error('❌ License Unit Test Failed:', err);
         failed++;
