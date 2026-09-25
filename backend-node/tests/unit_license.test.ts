@@ -1081,6 +1081,50 @@ export async function runLicenseUnitTests() {
         await freeRevDb.close();
     }
 
+    // Test 33: Logout rotates the local session id (a revoked session must not be reactivated on re-login)
+    {
+        const rotDb = new DatabaseService(':memory:');
+        await rotDb.init();
+        const rotLm = new LicenseManager(rotDb);
+        await rotLm.init();
+
+        process.env.SPOORF_ALLOW_DEMO_LICENSE = 'true';
+        await rotLm.login({ email: 'pro_rotate@sentinel.lan', password: 'secret' });
+        const before = rotLm.getStatus().sessionId;
+
+        await rotLm.logout();
+        const after = rotLm.getStatus().sessionId;
+
+        assert.notStrictEqual(after, before, 'Logout must rotate the local session id');
+        assert.match(after || '', /^[0-9a-f-]{36}$/, 'Rotated session id must be a fresh UUID');
+        console.log('  ✓ Session Rotation: logout rotates the local session id so re-login cannot reactivate the revoked session');
+
+        rotLm.shutdown();
+        await rotDb.close();
+    }
+
+    // Test 34: Remote kick rotates the local session id (offline cache copy cannot be revived on re-login)
+    {
+        const kickRotDb = new DatabaseService(':memory:');
+        await kickRotDb.init();
+        const kickRotLm = new LicenseManager(kickRotDb);
+        await kickRotLm.init();
+
+        process.env.SPOORF_ALLOW_DEMO_LICENSE = 'true';
+        await kickRotLm.login({ email: 'pro_kickrotate@sentinel.lan', password: 'secret' });
+        const before = kickRotLm.getStatus().sessionId;
+
+        await kickRotLm.handleSessionRevoked('kicked by another device');
+        const after = kickRotLm.getStatus().sessionId;
+
+        assert.notStrictEqual(after, before, 'Remote kick must rotate the local session id');
+        assert.match(after || '', /^[0-9a-f-]{36}$/, 'Rotated session id must be a fresh UUID');
+        console.log('  ✓ Session Rotation: remote kick rotates the local session id so re-login cannot revive the kicked session');
+
+        kickRotLm.shutdown();
+        await kickRotDb.close();
+    }
+
     licenseManager.shutdown();
     await db.close();
 
