@@ -4,10 +4,8 @@ function getInitialToken(): string {
     if (process.env.SENTINEL_API_TOKEN) {
         return process.env.SENTINEL_API_TOKEN;
     }
-    const tokenArg = process.argv.find(arg => arg.startsWith('--sentinel-api-token='));
-    if (tokenArg) {
-        return tokenArg.split('=')[1] || '';
-    }
+    // Token tidak lagi dibaca dari process.argv: menaruhnya di command line membocorkannya
+    // ke proses lain yang bisa membaca argv (mis. WMI). Ambil via IPC aman dari main.
     try {
         return ipcRenderer.sendSync('get-api-token-sync') || '';
     } catch {
