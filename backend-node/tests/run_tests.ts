@@ -171,7 +171,7 @@ async function main() {
 
     try {
         await runRepositoriesTests();
-        passed += 6;
+        passed += 10;
     } catch (err: any) {
         console.error('❌ Repositories Test Failed:', err);
         failed++;

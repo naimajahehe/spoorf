@@ -1,4 +1,5 @@
 import assert from 'assert';
+import crypto from 'crypto';
 import Database from 'better-sqlite3';
 import {
     CREATE_NETWORKS_TABLE_SQL,
@@ -17,6 +18,29 @@ import {
     RetentionRepository
 } from '../src/repositories';
 import { Device, Network, CachedLicense } from '../src/types';
+import { createTokenCipher, resolveTokenCipher, SecretStorage } from '../src/utils/tokenCipher';
+
+/**
+ * Stand-in for Electron safeStorage (DPAPI): authenticated encryption keyed per account, so
+ * opening a value sealed under another account/machine throws, as DPAPI does.
+ */
+function fakeSecretStorage(account: string): SecretStorage {
+    const key = crypto.createHash('sha256').update(account).digest();
+    return {
+        isEncryptionAvailable: () => true,
+        encryptString: (text: string) => {
+            const iv = crypto.randomBytes(12);
+            const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+            const body = Buffer.concat([cipher.update(text, 'utf8'), cipher.final()]);
+            return Buffer.concat([iv, cipher.getAuthTag(), body]);
+        },
+        decryptString: (sealed: Buffer) => {
+            const decipher = crypto.createDecipheriv('aes-256-gcm', key, sealed.subarray(0, 12));
+            decipher.setAuthTag(sealed.subarray(12, 28));
+            return Buffer.concat([decipher.update(sealed.subarray(28)), decipher.final()]).toString('utf8');
+        }
+    };
+}
 
 function createTestDatabase(): Database.Database {
     const db = new Database(':memory:');
@@ -390,5 +414,87 @@ export async function runRepositoriesTests(): Promise<void> {
 
         await dbService.close();
         console.log('  ✓ Invariant 1 & 2: Gateway and Controller host are strictly immune to continuity archiving');
+    }
+
+    // Cloud token at rest (license_cache.token): a 30-day bearer credential for the cloud account.
+    const CLOUD_TOKEN = 'eyJhbGciOiJSUzI1NiJ9.cloud-token-payload.signature';
+    const licenseWithToken = (token: string): CachedLicense => ({
+        id: 'current_license',
+        tier: 'pro',
+        token,
+        max_cuts: 999,
+        can_throttle: true,
+        can_gateway: true,
+        can_autoreblock: true,
+        can_arsenal: false,
+        cloud_sync: true,
+        email: 'sealed@example.com'
+    });
+    const storedToken = (db: Database.Database): string | undefined =>
+        (db.prepare(`SELECT token FROM license_cache WHERE id = 'current_license'`).get() as any)?.token;
+
+    // Test 7: The cloud token is encrypted at rest when secret storage is available
+    {
+        const db = createTestDatabase();
+        const repo = new LicenseRepository(db, createTokenCipher(fakeSecretStorage('user-a')));
+        await repo.saveLicenseCache(licenseWithToken(CLOUD_TOKEN));
+
+        const raw = storedToken(db) || '';
+        assert.ok(raw.startsWith('enc:v1:'), 'token must be stored sealed');
+        assert.ok(!raw.includes(CLOUD_TOKEN), 'plaintext token must not be stored');
+        assert.strictEqual((await repo.getLicenseCache())?.token, CLOUD_TOKEN);
+        db.close();
+        console.log('  ✓ LicenseRepository: cloud token is encrypted at rest and decrypted on read');
+    }
+
+    // Test 8: A legacy plaintext cache row is still read, then re-encrypted in place
+    {
+        const db = createTestDatabase();
+        await new LicenseRepository(db, createTokenCipher(null)).saveLicenseCache(licenseWithToken(CLOUD_TOKEN));
+        assert.strictEqual(storedToken(db), CLOUD_TOKEN, 'precondition: legacy plaintext row');
+
+        const repo = new LicenseRepository(db, createTokenCipher(fakeSecretStorage('user-a')));
+        assert.strictEqual((await repo.getLicenseCache())?.token, CLOUD_TOKEN);
+        assert.ok((storedToken(db) || '').startsWith('enc:v1:'), 'legacy row must be re-encrypted on read');
+        db.close();
+        console.log('  ✓ LicenseRepository: legacy plaintext token is migrated to encrypted storage on read');
+    }
+
+    // Test 9: A token sealed for another Windows account or machine is discarded
+    {
+        const db = createTestDatabase();
+        await new LicenseRepository(db, createTokenCipher(fakeSecretStorage('user-a'))).saveLicenseCache(licenseWithToken(CLOUD_TOKEN));
+
+        const otherAccount = new LicenseRepository(db, createTokenCipher(fakeSecretStorage('user-b')));
+        assert.strictEqual(await otherAccount.getLicenseCache(), null, 'undecryptable cache must read as empty');
+        assert.strictEqual(storedToken(db), undefined, 'undecryptable cache row must be removed');
+        db.close();
+        console.log('  ✓ LicenseRepository: a token sealed for another account/machine is discarded, not used');
+    }
+
+    // Test 10: Plaintext fallback without secret storage; Electron's injected storage reaches DatabaseService
+    {
+        const previous = globalThis.__SPOORF_SECRET_STORAGE__;
+        try {
+            globalThis.__SPOORF_SECRET_STORAGE__ = undefined;
+            assert.strictEqual(resolveTokenCipher().encrypts, false, 'no secret storage: plaintext (dev/tests)');
+
+            globalThis.__SPOORF_SECRET_STORAGE__ = { ...fakeSecretStorage('user-a'), isEncryptionAvailable: () => false };
+            assert.strictEqual(resolveTokenCipher().encrypts, false, 'unavailable encryption falls back to plaintext');
+
+            globalThis.__SPOORF_SECRET_STORAGE__ = fakeSecretStorage('user-a');
+            assert.strictEqual(resolveTokenCipher().encrypts, true, 'injected secret storage is used');
+
+            const { DatabaseService } = await import('../src/services/database');
+            const dbService = new DatabaseService(':memory:');
+            await dbService.init();
+            await dbService.saveLicenseCache(licenseWithToken(CLOUD_TOKEN));
+            assert.ok((storedToken(dbService.db) || '').startsWith('enc:v1:'), 'DatabaseService must encrypt via the injected storage');
+            assert.strictEqual((await dbService.getLicenseCache())?.token, CLOUD_TOKEN);
+            await dbService.close();
+        } finally {
+            globalThis.__SPOORF_SECRET_STORAGE__ = previous;
+        }
+        console.log('  ✓ Token cipher: plaintext fallback without secret storage; Electron-injected storage reaches DatabaseService');
     }
 }

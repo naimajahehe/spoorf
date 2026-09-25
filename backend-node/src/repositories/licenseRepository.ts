@@ -1,9 +1,13 @@
 import type Database from 'better-sqlite3';
 import { CachedLicense } from '../types';
 import { ILicenseRepository } from '../interfaces';
+import { TokenCipher, resolveTokenCipher, isSealedToken } from '../utils/tokenCipher';
 
 export class LicenseRepository implements ILicenseRepository {
-    constructor(private readonly db: Database.Database) {}
+    constructor(
+        private readonly db: Database.Database,
+        private readonly cipher: TokenCipher = resolveTokenCipher()
+    ) {}
 
     async saveLicenseCache(lic: CachedLicense): Promise<void> {
         const stmt = this.db.prepare(`
@@ -41,7 +45,7 @@ export class LicenseRepository implements ILicenseRepository {
             lic.name || null,
             lic.avatar_url || null,
             lic.tier || 'free',
-            lic.token,
+            this.cipher.seal(lic.token),
             lic.max_cuts ?? 1,
             lic.can_throttle ? 1 : 0,
             lic.can_gateway ? 1 : 0,
@@ -58,6 +62,9 @@ export class LicenseRepository implements ILicenseRepository {
         const row = this.db.prepare(`SELECT * FROM license_cache WHERE id = 'current_license'`).get() as any;
         if (!row || !row.token) return null;
 
+        const token = this.openStoredToken(row.token);
+        if (token === null) return null;
+
         return {
             id: row.id,
             user_id: row.user_id || undefined,
@@ -65,7 +72,7 @@ export class LicenseRepository implements ILicenseRepository {
             name: row.name || undefined,
             avatar_url: row.avatar_url || undefined,
             tier: row.tier || 'free',
-            token: row.token,
+            token,
             max_cuts: row.max_cuts ?? 1,
             can_throttle: Boolean(row.can_throttle),
             can_gateway: Boolean(row.can_gateway),
@@ -103,7 +110,7 @@ export class LicenseRepository implements ILicenseRepository {
                 name: row.name || undefined,
                 avatar_url: row.avatar_url || undefined,
                 tier: row.tier || 'free',
-                token: row.token || '',
+                token: row.token ? this.peekStoredToken(row.token) : '',
                 max_cuts: row.max_cuts ?? 1,
                 can_throttle: Boolean(row.can_throttle),
                 can_gateway: Boolean(row.can_gateway),
@@ -117,6 +124,34 @@ export class LicenseRepository implements ILicenseRepository {
             };
         } catch {
             return null;
+        }
+    }
+
+    /**
+     * Opens the stored token. A legacy plaintext row is re-sealed in place; a token that cannot be
+     * opened here (sealed for another Windows account or machine) is unusable, so the row is removed
+     * and the caller sees no cache.
+     */
+    private openStoredToken(stored: string): string | null {
+        let token: string;
+        try {
+            token = this.cipher.open(stored);
+        } catch {
+            this.db.prepare(`DELETE FROM license_cache WHERE id = 'current_license'`).run();
+            return null;
+        }
+        if (this.cipher.encrypts && !isSealedToken(stored)) {
+            this.db.prepare(`UPDATE license_cache SET token = ? WHERE id = 'current_license'`).run(this.cipher.seal(token));
+        }
+        return token;
+    }
+
+    /** Side-effect-free variant for the synchronous display read. */
+    private peekStoredToken(stored: string): string {
+        try {
+            return this.cipher.open(stored);
+        } catch {
+            return '';
         }
     }
 
