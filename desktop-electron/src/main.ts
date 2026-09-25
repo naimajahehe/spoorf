@@ -322,11 +322,22 @@ function startNodeBackend() {
         // Versi aplikasi nyata untuk telemetri cloud (app_version pada login/heartbeat).
         // Tanpa ini backend memakai default '1.0.0' untuk SEMUA perangkat.
         process.env.APP_VERSION = app.getVersion();
-        // Token cloud yang di-cache di SQLite dienkripsi dengan safeStorage (DPAPI di Windows), sehingga
-        // file database yang disalin ke akun/mesin lain tidak membawa token yang bisa dipakai.
+        // Token cloud yang di-cache di SQLite disegel dengan safeStorage: kuncinya ada di userData aplikasi
+        // (Local State) dan dilindungi DPAPI untuk akun Windows, sehingga file database yang disalin ke
+        // akun, mesin, atau folder data lain tidak membawa token yang bisa dipakai.
         // Harus diset sebelum backend di-require; fungsi ini berjalan setelah app 'ready'.
-        (globalThis as { __SPOORF_SECRET_STORAGE__?: unknown }).__SPOORF_SECRET_STORAGE__ = safeStorage;
-        logElectron(`[Supervisor] safeStorage untuk cache token: ${safeStorage.isEncryptionAvailable() ? 'aktif (DPAPI)' : 'TIDAK tersedia, token tersimpan tanpa enkripsi'}`);
+        // Anotasi tipe ini memastikan saat compile bahwa safeStorage cocok dengan SecretStorage di backend.
+        const secretStorage: {
+            isEncryptionAvailable(): boolean;
+            encryptString(plainText: string): Buffer;
+            decryptString(encrypted: Buffer): string;
+        } = safeStorage;
+        (globalThis as { __SPOORF_SECRET_STORAGE__?: typeof secretStorage }).__SPOORF_SECRET_STORAGE__ = secretStorage;
+        logElectron(`[Supervisor] safeStorage untuk cache token: ${secretStorage.isEncryptionAvailable()
+            ? 'aktif (DPAPI)'
+            : app.isPackaged
+                ? 'TIDAK tersedia: token hanya disimpan di memori, login ulang diperlukan setiap peluncuran'
+                : 'TIDAK tersedia: token disimpan tanpa enkripsi (build pengembangan)'}`);
 
         // Build installer: selalu ditimpa (bukan diwarisi) agar backend menerapkan lockdown lisensi
         // (mode demo nonaktif, endpoint cloud resmi, tanpa .env/config.json override).

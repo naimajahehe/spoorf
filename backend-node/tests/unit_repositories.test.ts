@@ -1,5 +1,7 @@
 import assert from 'assert';
-import crypto from 'crypto';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import Database from 'better-sqlite3';
 import {
     CREATE_NETWORKS_TABLE_SQL,
@@ -18,32 +20,11 @@ import {
     RetentionRepository
 } from '../src/repositories';
 import { Device, Network, CachedLicense } from '../src/types';
-import { createTokenCipher, resolveTokenCipher, SecretStorage } from '../src/utils/tokenCipher';
+import { createTokenCipher, resolveTokenCipher, SecretStorage, TokenCipher } from '../src/utils/tokenCipher';
+import { fakeSecretStorage } from './helpers/fakeSecretStorage';
 
-/**
- * Stand-in for Electron safeStorage (DPAPI): authenticated encryption keyed per account, so
- * opening a value sealed under another account/machine throws, as DPAPI does.
- */
-function fakeSecretStorage(account: string): SecretStorage {
-    const key = crypto.createHash('sha256').update(account).digest();
-    return {
-        isEncryptionAvailable: () => true,
-        encryptString: (text: string) => {
-            const iv = crypto.randomBytes(12);
-            const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
-            const body = Buffer.concat([cipher.update(text, 'utf8'), cipher.final()]);
-            return Buffer.concat([iv, cipher.getAuthTag(), body]);
-        },
-        decryptString: (sealed: Buffer) => {
-            const decipher = crypto.createDecipheriv('aes-256-gcm', key, sealed.subarray(0, 12));
-            decipher.setAuthTag(sealed.subarray(12, 28));
-            return Buffer.concat([decipher.update(sealed.subarray(28)), decipher.final()]).toString('utf8');
-        }
-    };
-}
-
-function createTestDatabase(): Database.Database {
-    const db = new Database(':memory:');
+function createTestDatabase(file: string = ':memory:'): Database.Database {
+    const db = new Database(file);
     db.pragma('journal_mode = WAL');
     db.pragma('foreign_keys = ON');
 
@@ -497,4 +478,114 @@ export async function runRepositoriesTests(): Promise<void> {
         }
         console.log('  ✓ Token cipher: plaintext fallback without secret storage; Electron-injected storage reaches DatabaseService');
     }
+
+    // Test 11: A packaged build without usable secret storage never writes the token to disk (fail closed)
+    {
+        const unavailable: SecretStorage = { ...fakeSecretStorage('user-a'), isEncryptionAvailable: () => false };
+        const cases: Array<[string, TokenCipher]> = [
+            ['no secret storage injected', createTokenCipher(null, { failClosed: true })],
+            ['secret storage unavailable', createTokenCipher(unavailable, { failClosed: true })]
+        ];
+        for (const [label, cipher] of cases) {
+            const db = createTestDatabase();
+            const repo = new LicenseRepository(db, cipher);
+            await repo.saveLicenseCache(licenseWithToken(CLOUD_TOKEN));
+            assert.strictEqual(storedToken(db), '', `${label}: token must not be written to disk`);
+            assert.strictEqual(await repo.getLicenseCache(), null, `${label}: nothing to restore on the next launch`);
+            db.close();
+        }
+
+        const previousPackaged = process.env.SPOORF_PACKAGED;
+        const previousStorage = globalThis.__SPOORF_SECRET_STORAGE__;
+        try {
+            process.env.SPOORF_PACKAGED = 'true';
+            globalThis.__SPOORF_SECRET_STORAGE__ = undefined;
+            assert.strictEqual(resolveTokenCipher().seal(CLOUD_TOKEN), '', 'packaged without secret storage must fail closed');
+        } finally {
+            if (previousPackaged === undefined) delete process.env.SPOORF_PACKAGED;
+            else process.env.SPOORF_PACKAGED = previousPackaged;
+            globalThis.__SPOORF_SECRET_STORAGE__ = previousStorage;
+        }
+        console.log('  ✓ Token cipher: packaged build without secret storage keeps the token in memory only (fail closed)');
+    }
+
+    // Test 12: Fail-closed mode still restores a legacy plaintext session once, then wipes it from disk
+    {
+        const db = createTestDatabase();
+        await new LicenseRepository(db, createTokenCipher(null)).saveLicenseCache(licenseWithToken(CLOUD_TOKEN));
+
+        const repo = new LicenseRepository(db, createTokenCipher(null, { failClosed: true }));
+        assert.strictEqual((await repo.getLicenseCache())?.token, CLOUD_TOKEN, 'legacy session still restores this launch');
+        assert.strictEqual(storedToken(db), '', 'the plaintext token must be wiped from disk');
+        db.close();
+        console.log('  ✓ LicenseRepository: fail-closed mode restores a legacy session once and wipes the plaintext');
+    }
+
+    // Test 13: A backend without secret storage keeps a sealed row it cannot read (no data loss)
+    {
+        const db = createTestDatabase();
+        await new LicenseRepository(db, createTokenCipher(fakeSecretStorage('user-a'))).saveLicenseCache(licenseWithToken(CLOUD_TOKEN));
+        const sealed = storedToken(db);
+
+        const standalone = new LicenseRepository(db, createTokenCipher(null));
+        assert.strictEqual(await standalone.getLicenseCache(), null, 'a sealed token it cannot open reads as empty');
+        assert.strictEqual(storedToken(db), sealed, 'the sealed row must be kept for the app that can open it');
+        db.close();
+        console.log('  ✓ LicenseRepository: a backend without secret storage leaves sealed rows untouched');
+    }
+
+    // Test 14: The synchronous display read opens sealed rows without side effects
+    {
+        const db = createTestDatabase();
+        await new LicenseRepository(db, createTokenCipher(fakeSecretStorage('user-a'))).saveLicenseCache(licenseWithToken(CLOUD_TOKEN));
+        const sealed = storedToken(db);
+
+        assert.strictEqual(new LicenseRepository(db, createTokenCipher(fakeSecretStorage('user-a'))).getCachedLicense()?.token, CLOUD_TOKEN);
+        assert.strictEqual(new LicenseRepository(db, createTokenCipher(fakeSecretStorage('user-b'))).getCachedLicense()?.token, '');
+        assert.strictEqual(storedToken(db), sealed, 'getCachedLicense must not modify the row');
+        db.close();
+        console.log('  ✓ LicenseRepository: getCachedLicense opens sealed tokens without side effects');
+    }
+
+    // Test 15: Migrating a legacy row leaves no plaintext token in the main database file (WAL)
+    {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'spoorf-token-'));
+        const file = path.join(dir, 'sentinel.db');
+        const opened: Database.Database[] = [];
+        try {
+            const legacy = createTestDatabase(file);
+            opened.push(legacy);
+            await new LicenseRepository(legacy, createTokenCipher(null)).saveLicenseCache(licenseWithToken(CLOUD_TOKEN));
+            legacy.close();
+            assert.ok(fs.readFileSync(file).includes(CLOUD_TOKEN), 'precondition: plaintext token in the main file');
+
+            const current = createTestDatabase(file);
+            opened.push(current);
+            const repo = new LicenseRepository(current, createTokenCipher(fakeSecretStorage('user-a')));
+            assert.strictEqual((await repo.getLicenseCache())?.token, CLOUD_TOKEN);
+            assert.ok(!fs.readFileSync(file).includes(CLOUD_TOKEN), 'plaintext must not remain in the main database file');
+        } finally {
+            // Close before removing the folder: Windows keeps an open SQLite file locked, and a cleanup
+            // error here would hide the assertion that actually failed.
+            for (const db of opened) if (db.open) db.close();
+            fs.rmSync(dir, { recursive: true, force: true });
+        }
+        console.log('  ✓ LicenseRepository: migration leaves no plaintext token in the database file');
+    }
+
+    // Test 16: A failed re-seal during migration does not lose the session
+    {
+        const db = createTestDatabase();
+        await new LicenseRepository(db, createTokenCipher(null)).saveLicenseCache(licenseWithToken(CLOUD_TOKEN));
+
+        const brokenSeal: SecretStorage = {
+            ...fakeSecretStorage('user-a'),
+            encryptString: () => { throw new Error('encrypt failed'); }
+        };
+        const repo = new LicenseRepository(db, createTokenCipher(brokenSeal));
+        assert.strictEqual((await repo.getLicenseCache())?.token, CLOUD_TOKEN, 'a failed re-seal must not lose the session');
+        db.close();
+        console.log('  ✓ LicenseRepository: re-sealing is best effort and never blocks the session restore');
+    }
 }
+
