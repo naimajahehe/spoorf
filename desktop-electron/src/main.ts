@@ -80,7 +80,7 @@ console.error = (...args: any[]) => {
 };
 
 logElectron('=====================================================');
-logElectron(`🚀 Spoorf Sentinel v2.21.0 Launching... (Platform: ${process.platform}, Arch: ${process.arch}, Node: ${process.versions.node}, Electron: ${process.versions.electron})`);
+logElectron(`🚀 Spoorf Sentinel v2.41.82 Launching... (Platform: ${process.platform}, Arch: ${process.arch}, Node: ${process.versions.node}, Electron: ${process.versions.electron})`);
 logElectron(`📁 AppPath: ${app.getAppPath()}`);
 logElectron(`📁 ResourcesPath: ${process.resourcesPath}`);
 logElectron(`📁 AppData: ${appDataPath}`);

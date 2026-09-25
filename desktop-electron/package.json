@@ -1,6 +1,6 @@
 {
   "name": "spoorf-sentinel",
-  "version": "2.21.0",
+  "version": "2.41.82",
   "description": "Next-Gen Layer 2 Network Discovery & Control Suite",
   "author": "Spoorf Sentinel Team",
   "main": "dist/main.js",
