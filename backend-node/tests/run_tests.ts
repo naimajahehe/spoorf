@@ -51,7 +51,7 @@ async function main() {
 
     try {
         await runLicenseUnitTests();
-        passed += 21;
+        passed += 23;
     } catch (err: any) {
         console.error('❌ License Unit Test Failed:', err);
         failed++;
@@ -171,7 +171,7 @@ async function main() {
 
     try {
         await runRepositoriesTests();
-        passed += 6;
+        passed += 16;
     } catch (err: any) {
         console.error('❌ Repositories Test Failed:', err);
         failed++;

@@ -5,6 +5,9 @@ import { LicenseManager, DEFAULT_FREE_LICENSE, PRO_TIER_LICENSE, VIP_TIER_LICENS
 import { DeviceManager } from '../src/services/deviceManager';
 import { PythonBridge } from '../src/services/pythonBridge';
 import { Device } from '../src/types';
+import { LicenseRepository } from '../src/repositories';
+import { createTokenCipher } from '../src/utils/tokenCipher';
+import { fakeSecretStorage } from './helpers/fakeSecretStorage';
 
 // Mock Python Bridge for fast offline unit testing
 class MockPythonBridge extends PythonBridge {
@@ -1123,6 +1126,79 @@ export async function runLicenseUnitTests() {
 
         kickRotLm.shutdown();
         await kickRotDb.close();
+    }
+
+    // Test 35: init restores a legacy plaintext cache, verifies it (RS256) and migrates it to sealed storage
+    {
+        const previousStorage = globalThis.__SPOORF_SECRET_STORAGE__;
+        try {
+            globalThis.__SPOORF_SECRET_STORAGE__ = fakeSecretStorage('user-a');
+            const migDb = new DatabaseService(':memory:');
+            await migDb.init();
+            const sessionId = crypto.randomUUID();
+            const legacyRepo = new LicenseRepository(migDb.db, createTokenCipher(null));
+            await legacyRepo.saveLicenseCache({
+                id: 'current_license',
+                user_id: 'usr_cloud',
+                email: 'cloud@spoorf.app',
+                tier: 'pro',
+                token: signToken(claimsFor('pro', sessionId)),
+                max_cuts: 999,
+                can_throttle: true,
+                can_gateway: true,
+                can_autoreblock: true,
+                can_arsenal: false,
+                cloud_sync: true,
+                hwid: sessionId
+            });
+
+            const migLm = await newCloudLm(migDb);
+            assert.strictEqual(migLm.getStatus().isAuthenticated, true, 'legacy session must restore after upgrading');
+            assert.strictEqual(migLm.getStatus().license.tier, 'pro');
+            assert.strictEqual(migLm.getStatus().sessionId, sessionId);
+            const raw = (migDb.db.prepare(`SELECT token FROM license_cache WHERE id = 'current_license'`).get() as any).token;
+            assert.ok(String(raw).startsWith('enc:v1:'), 'restored token must now be sealed at rest');
+            console.log('  ✓ Token At Rest: legacy plaintext cache restores, passes RS256, and is migrated to sealed storage');
+            migLm.shutdown();
+            await migDb.close();
+        } finally {
+            globalThis.__SPOORF_SECRET_STORAGE__ = previousStorage;
+        }
+    }
+
+    // Test 36: init with a cache sealed for another Windows account starts signed out on Free
+    {
+        const previousStorage = globalThis.__SPOORF_SECRET_STORAGE__;
+        try {
+            globalThis.__SPOORF_SECRET_STORAGE__ = fakeSecretStorage('user-b');
+            const foreignDb = new DatabaseService(':memory:');
+            await foreignDb.init();
+            const sessionId = crypto.randomUUID();
+            await new LicenseRepository(foreignDb.db, createTokenCipher(fakeSecretStorage('user-a'))).saveLicenseCache({
+                id: 'current_license',
+                user_id: 'usr_cloud',
+                email: 'cloud@spoorf.app',
+                tier: 'vip',
+                token: signToken(claimsFor('vip', sessionId)),
+                max_cuts: 9999,
+                can_throttle: true,
+                can_gateway: true,
+                can_autoreblock: true,
+                can_arsenal: true,
+                cloud_sync: true,
+                hwid: sessionId
+            });
+
+            const foreignLm = await newCloudLm(foreignDb);
+            assert.strictEqual(foreignLm.getStatus().isAuthenticated, false, 'a foreign sealed cache must not sign anyone in');
+            assert.strictEqual(foreignLm.getStatus().license.tier, 'free');
+            assert.strictEqual(await foreignDb.getLicenseCache(), null, 'the unusable cache is discarded');
+            console.log('  ✓ Token At Rest: a cache sealed for another account starts signed out on Free and is discarded');
+            foreignLm.shutdown();
+            await foreignDb.close();
+        } finally {
+            globalThis.__SPOORF_SECRET_STORAGE__ = previousStorage;
+        }
     }
 
     licenseManager.shutdown();

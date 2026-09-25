@@ -1,4 +1,7 @@
 import assert from 'assert';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import Database from 'better-sqlite3';
 import {
     CREATE_NETWORKS_TABLE_SQL,
@@ -17,9 +20,11 @@ import {
     RetentionRepository
 } from '../src/repositories';
 import { Device, Network, CachedLicense } from '../src/types';
+import { createTokenCipher, resolveTokenCipher, SecretStorage, TokenCipher } from '../src/utils/tokenCipher';
+import { fakeSecretStorage } from './helpers/fakeSecretStorage';
 
-function createTestDatabase(): Database.Database {
-    const db = new Database(':memory:');
+function createTestDatabase(file: string = ':memory:'): Database.Database {
+    const db = new Database(file);
     db.pragma('journal_mode = WAL');
     db.pragma('foreign_keys = ON');
 
@@ -391,4 +396,196 @@ export async function runRepositoriesTests(): Promise<void> {
         await dbService.close();
         console.log('  ✓ Invariant 1 & 2: Gateway and Controller host are strictly immune to continuity archiving');
     }
+
+    // Cloud token at rest (license_cache.token): a 30-day bearer credential for the cloud account.
+    const CLOUD_TOKEN = 'eyJhbGciOiJSUzI1NiJ9.cloud-token-payload.signature';
+    const licenseWithToken = (token: string): CachedLicense => ({
+        id: 'current_license',
+        tier: 'pro',
+        token,
+        max_cuts: 999,
+        can_throttle: true,
+        can_gateway: true,
+        can_autoreblock: true,
+        can_arsenal: false,
+        cloud_sync: true,
+        email: 'sealed@example.com'
+    });
+    const storedToken = (db: Database.Database): string | undefined =>
+        (db.prepare(`SELECT token FROM license_cache WHERE id = 'current_license'`).get() as any)?.token;
+
+    // Test 7: The cloud token is encrypted at rest when secret storage is available
+    {
+        const db = createTestDatabase();
+        const repo = new LicenseRepository(db, createTokenCipher(fakeSecretStorage('user-a')));
+        await repo.saveLicenseCache(licenseWithToken(CLOUD_TOKEN));
+
+        const raw = storedToken(db) || '';
+        assert.ok(raw.startsWith('enc:v1:'), 'token must be stored sealed');
+        assert.ok(!raw.includes(CLOUD_TOKEN), 'plaintext token must not be stored');
+        assert.strictEqual((await repo.getLicenseCache())?.token, CLOUD_TOKEN);
+        db.close();
+        console.log('  ✓ LicenseRepository: cloud token is encrypted at rest and decrypted on read');
+    }
+
+    // Test 8: A legacy plaintext cache row is still read, then re-encrypted in place
+    {
+        const db = createTestDatabase();
+        await new LicenseRepository(db, createTokenCipher(null)).saveLicenseCache(licenseWithToken(CLOUD_TOKEN));
+        assert.strictEqual(storedToken(db), CLOUD_TOKEN, 'precondition: legacy plaintext row');
+
+        const repo = new LicenseRepository(db, createTokenCipher(fakeSecretStorage('user-a')));
+        assert.strictEqual((await repo.getLicenseCache())?.token, CLOUD_TOKEN);
+        assert.ok((storedToken(db) || '').startsWith('enc:v1:'), 'legacy row must be re-encrypted on read');
+        db.close();
+        console.log('  ✓ LicenseRepository: legacy plaintext token is migrated to encrypted storage on read');
+    }
+
+    // Test 9: A token sealed for another Windows account or machine is discarded
+    {
+        const db = createTestDatabase();
+        await new LicenseRepository(db, createTokenCipher(fakeSecretStorage('user-a'))).saveLicenseCache(licenseWithToken(CLOUD_TOKEN));
+
+        const otherAccount = new LicenseRepository(db, createTokenCipher(fakeSecretStorage('user-b')));
+        assert.strictEqual(await otherAccount.getLicenseCache(), null, 'undecryptable cache must read as empty');
+        assert.strictEqual(storedToken(db), undefined, 'undecryptable cache row must be removed');
+        db.close();
+        console.log('  ✓ LicenseRepository: a token sealed for another account/machine is discarded, not used');
+    }
+
+    // Test 10: Plaintext fallback without secret storage; Electron's injected storage reaches DatabaseService
+    {
+        const previous = globalThis.__SPOORF_SECRET_STORAGE__;
+        try {
+            globalThis.__SPOORF_SECRET_STORAGE__ = undefined;
+            assert.strictEqual(resolveTokenCipher().encrypts, false, 'no secret storage: plaintext (dev/tests)');
+
+            globalThis.__SPOORF_SECRET_STORAGE__ = { ...fakeSecretStorage('user-a'), isEncryptionAvailable: () => false };
+            assert.strictEqual(resolveTokenCipher().encrypts, false, 'unavailable encryption falls back to plaintext');
+
+            globalThis.__SPOORF_SECRET_STORAGE__ = fakeSecretStorage('user-a');
+            assert.strictEqual(resolveTokenCipher().encrypts, true, 'injected secret storage is used');
+
+            const { DatabaseService } = await import('../src/services/database');
+            const dbService = new DatabaseService(':memory:');
+            await dbService.init();
+            await dbService.saveLicenseCache(licenseWithToken(CLOUD_TOKEN));
+            assert.ok((storedToken(dbService.db) || '').startsWith('enc:v1:'), 'DatabaseService must encrypt via the injected storage');
+            assert.strictEqual((await dbService.getLicenseCache())?.token, CLOUD_TOKEN);
+            await dbService.close();
+        } finally {
+            globalThis.__SPOORF_SECRET_STORAGE__ = previous;
+        }
+        console.log('  ✓ Token cipher: plaintext fallback without secret storage; Electron-injected storage reaches DatabaseService');
+    }
+
+    // Test 11: A packaged build without usable secret storage never writes the token to disk (fail closed)
+    {
+        const unavailable: SecretStorage = { ...fakeSecretStorage('user-a'), isEncryptionAvailable: () => false };
+        const cases: Array<[string, TokenCipher]> = [
+            ['no secret storage injected', createTokenCipher(null, { failClosed: true })],
+            ['secret storage unavailable', createTokenCipher(unavailable, { failClosed: true })]
+        ];
+        for (const [label, cipher] of cases) {
+            const db = createTestDatabase();
+            const repo = new LicenseRepository(db, cipher);
+            await repo.saveLicenseCache(licenseWithToken(CLOUD_TOKEN));
+            assert.strictEqual(storedToken(db), '', `${label}: token must not be written to disk`);
+            assert.strictEqual(await repo.getLicenseCache(), null, `${label}: nothing to restore on the next launch`);
+            db.close();
+        }
+
+        const previousPackaged = process.env.SPOORF_PACKAGED;
+        const previousStorage = globalThis.__SPOORF_SECRET_STORAGE__;
+        try {
+            process.env.SPOORF_PACKAGED = 'true';
+            globalThis.__SPOORF_SECRET_STORAGE__ = undefined;
+            assert.strictEqual(resolveTokenCipher().seal(CLOUD_TOKEN), '', 'packaged without secret storage must fail closed');
+        } finally {
+            if (previousPackaged === undefined) delete process.env.SPOORF_PACKAGED;
+            else process.env.SPOORF_PACKAGED = previousPackaged;
+            globalThis.__SPOORF_SECRET_STORAGE__ = previousStorage;
+        }
+        console.log('  ✓ Token cipher: packaged build without secret storage keeps the token in memory only (fail closed)');
+    }
+
+    // Test 12: Fail-closed mode still restores a legacy plaintext session once, then wipes it from disk
+    {
+        const db = createTestDatabase();
+        await new LicenseRepository(db, createTokenCipher(null)).saveLicenseCache(licenseWithToken(CLOUD_TOKEN));
+
+        const repo = new LicenseRepository(db, createTokenCipher(null, { failClosed: true }));
+        assert.strictEqual((await repo.getLicenseCache())?.token, CLOUD_TOKEN, 'legacy session still restores this launch');
+        assert.strictEqual(storedToken(db), '', 'the plaintext token must be wiped from disk');
+        db.close();
+        console.log('  ✓ LicenseRepository: fail-closed mode restores a legacy session once and wipes the plaintext');
+    }
+
+    // Test 13: A backend without secret storage keeps a sealed row it cannot read (no data loss)
+    {
+        const db = createTestDatabase();
+        await new LicenseRepository(db, createTokenCipher(fakeSecretStorage('user-a'))).saveLicenseCache(licenseWithToken(CLOUD_TOKEN));
+        const sealed = storedToken(db);
+
+        const standalone = new LicenseRepository(db, createTokenCipher(null));
+        assert.strictEqual(await standalone.getLicenseCache(), null, 'a sealed token it cannot open reads as empty');
+        assert.strictEqual(storedToken(db), sealed, 'the sealed row must be kept for the app that can open it');
+        db.close();
+        console.log('  ✓ LicenseRepository: a backend without secret storage leaves sealed rows untouched');
+    }
+
+    // Test 14: The synchronous display read opens sealed rows without side effects
+    {
+        const db = createTestDatabase();
+        await new LicenseRepository(db, createTokenCipher(fakeSecretStorage('user-a'))).saveLicenseCache(licenseWithToken(CLOUD_TOKEN));
+        const sealed = storedToken(db);
+
+        assert.strictEqual(new LicenseRepository(db, createTokenCipher(fakeSecretStorage('user-a'))).getCachedLicense()?.token, CLOUD_TOKEN);
+        assert.strictEqual(new LicenseRepository(db, createTokenCipher(fakeSecretStorage('user-b'))).getCachedLicense()?.token, '');
+        assert.strictEqual(storedToken(db), sealed, 'getCachedLicense must not modify the row');
+        db.close();
+        console.log('  ✓ LicenseRepository: getCachedLicense opens sealed tokens without side effects');
+    }
+
+    // Test 15: Migrating a legacy row leaves no plaintext token in the main database file (WAL)
+    {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'spoorf-token-'));
+        const file = path.join(dir, 'sentinel.db');
+        const opened: Database.Database[] = [];
+        try {
+            const legacy = createTestDatabase(file);
+            opened.push(legacy);
+            await new LicenseRepository(legacy, createTokenCipher(null)).saveLicenseCache(licenseWithToken(CLOUD_TOKEN));
+            legacy.close();
+            assert.ok(fs.readFileSync(file).includes(CLOUD_TOKEN), 'precondition: plaintext token in the main file');
+
+            const current = createTestDatabase(file);
+            opened.push(current);
+            const repo = new LicenseRepository(current, createTokenCipher(fakeSecretStorage('user-a')));
+            assert.strictEqual((await repo.getLicenseCache())?.token, CLOUD_TOKEN);
+            assert.ok(!fs.readFileSync(file).includes(CLOUD_TOKEN), 'plaintext must not remain in the main database file');
+        } finally {
+            // Close before removing the folder: Windows keeps an open SQLite file locked, and a cleanup
+            // error here would hide the assertion that actually failed.
+            for (const db of opened) if (db.open) db.close();
+            fs.rmSync(dir, { recursive: true, force: true });
+        }
+        console.log('  ✓ LicenseRepository: migration leaves no plaintext token in the database file');
+    }
+
+    // Test 16: A failed re-seal during migration does not lose the session
+    {
+        const db = createTestDatabase();
+        await new LicenseRepository(db, createTokenCipher(null)).saveLicenseCache(licenseWithToken(CLOUD_TOKEN));
+
+        const brokenSeal: SecretStorage = {
+            ...fakeSecretStorage('user-a'),
+            encryptString: () => { throw new Error('encrypt failed'); }
+        };
+        const repo = new LicenseRepository(db, createTokenCipher(brokenSeal));
+        assert.strictEqual((await repo.getLicenseCache())?.token, CLOUD_TOKEN, 'a failed re-seal must not lose the session');
+        db.close();
+        console.log('  ✓ LicenseRepository: re-sealing is best effort and never blocks the session restore');
+    }
 }
+

@@ -1,9 +1,16 @@
 import type Database from 'better-sqlite3';
 import { CachedLicense } from '../types';
 import { ILicenseRepository } from '../interfaces';
+import { TokenCipher, TokenDecryptError, resolveTokenCipher } from '../utils/tokenCipher';
+import { createChildLogger } from '../utils/logger';
 
 export class LicenseRepository implements ILicenseRepository {
-    constructor(private readonly db: Database.Database) {}
+    private readonly log = createChildLogger('LicenseRepository');
+
+    constructor(
+        private readonly db: Database.Database,
+        private readonly cipher: TokenCipher = resolveTokenCipher()
+    ) {}
 
     async saveLicenseCache(lic: CachedLicense): Promise<void> {
         const stmt = this.db.prepare(`
@@ -41,7 +48,7 @@ export class LicenseRepository implements ILicenseRepository {
             lic.name || null,
             lic.avatar_url || null,
             lic.tier || 'free',
-            lic.token,
+            this.cipher.seal(lic.token),
             lic.max_cuts ?? 1,
             lic.can_throttle ? 1 : 0,
             lic.can_gateway ? 1 : 0,
@@ -58,6 +65,9 @@ export class LicenseRepository implements ILicenseRepository {
         const row = this.db.prepare(`SELECT * FROM license_cache WHERE id = 'current_license'`).get() as any;
         if (!row || !row.token) return null;
 
+        const token = this.openStoredToken(row.token);
+        if (token === null) return null;
+
         return {
             id: row.id,
             user_id: row.user_id || undefined,
@@ -65,7 +75,7 @@ export class LicenseRepository implements ILicenseRepository {
             name: row.name || undefined,
             avatar_url: row.avatar_url || undefined,
             tier: row.tier || 'free',
-            token: row.token,
+            token,
             max_cuts: row.max_cuts ?? 1,
             can_throttle: Boolean(row.can_throttle),
             can_gateway: Boolean(row.can_gateway),
@@ -103,7 +113,7 @@ export class LicenseRepository implements ILicenseRepository {
                 name: row.name || undefined,
                 avatar_url: row.avatar_url || undefined,
                 tier: row.tier || 'free',
-                token: row.token || '',
+                token: row.token ? this.peekStoredToken(row.token) : '',
                 max_cuts: row.max_cuts ?? 1,
                 can_throttle: Boolean(row.can_throttle),
                 can_gateway: Boolean(row.can_gateway),
@@ -117,6 +127,48 @@ export class LicenseRepository implements ILicenseRepository {
             };
         } catch {
             return null;
+        }
+    }
+
+    /**
+     * Opens the stored token for a session restore.
+     * - A token sealed with a key this app cannot use (another Windows account, machine or app
+     *   data) can never be opened here: the row is removed and the caller sees no cache.
+     * - A sealed token this process simply has no secret storage for (e.g. the standalone backend)
+     *   reads as no cache, and the row is kept for the app that can open it.
+     * - A legacy plaintext token is rewritten in the cipher's form (sealed, or wiped when the
+     *   packaged app fails closed). This is best effort and never blocks the restore.
+     */
+    private openStoredToken(stored: string): string | null {
+        let token: string;
+        try {
+            token = this.cipher.open(stored);
+        } catch (err) {
+            if (err instanceof TokenDecryptError && err.reason === 'foreign') {
+                this.db.prepare(`DELETE FROM license_cache WHERE id = 'current_license'`).run();
+                this.log.warn('Cached cloud token was sealed with a key this app cannot use (other Windows account, machine or app data); discarded, sign-in required.');
+            }
+            return null;
+        }
+        if (this.cipher.needsRewrite(stored)) {
+            try {
+                this.db.prepare(`UPDATE license_cache SET token = ? WHERE id = 'current_license'`).run(this.cipher.seal(token));
+                // Flush the rewritten page from the WAL into the main file now, so no plaintext copy
+                // of the token lingers in sentinel.db until a later checkpoint.
+                this.db.pragma('wal_checkpoint(TRUNCATE)');
+            } catch (err: any) {
+                this.log.warn({ err: err?.message || err }, 'Could not rewrite the cached cloud token; it will be rewritten on the next save.');
+            }
+        }
+        return token;
+    }
+
+    /** Side-effect-free variant for the synchronous display read. */
+    private peekStoredToken(stored: string): string {
+        try {
+            return this.cipher.open(stored);
+        } catch {
+            return '';
         }
     }
 
