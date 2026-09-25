@@ -20,7 +20,7 @@ ipcRenderer.on('window-minimize-state', (_event, isMin) => {
 
 contextBridge.exposeInMainWorld('electronAPI', {
     isDesktop: true,
-    appVersion: '2.41.82',
+    appVersion: '2.41.84',
     // KEAMANAN (P1): Token bearer lokal untuk memanggil control-plane (:5000/:8001).
     apiToken: getInitialToken(),
     getApiToken: () => ipcRenderer.invoke('get-api-token'),
