@@ -32,7 +32,9 @@ import {
     BookOpen,
     Sun,
     Moon,
-    LogOut
+    LogOut,
+    Eye,
+    EyeOff
 } from 'lucide-react';
 import { Select, SelectTrigger, SelectContent, SelectItem } from './components/motion/select';
 import { AnimatedSidebar, AnimatedSidebarProvider } from './components/AnimatedSidebar';
@@ -88,6 +90,23 @@ const ViewLoadingFallback = () => (
 );
 
 type FilterTab = 'all' | 'online' | 'throttled' | 'blocked';
+
+// "Ghost" MAC-acak: baris OFFLINE dari perangkat privasi (MAC teracak) yang datang-pergi &
+// memutar MAC-nya, TANPA niat pengguna atau identitas stabil — tidak diblokir, tanpa sesi
+// aktif, tanpa alias personal, dan bukan operator/gateway. Kriteria ini sengaja identik dengan
+// proteksi GC backend `pruneStaleRandomizedMacs` (himpunan PROTEKSI-nya identik). Catatan:
+// ambang basi 2-hari milik GC sengaja TIDAK ditiru di sini — UI menyembunyikan begitu perangkat
+// offline, lebih awal dari saat GC menghapus. Hanya menyaring TAMPILAN — tidak menghapus data.
+function isInactiveGhost(d: Device): boolean {
+    const alias = (d.alias || '').trim();
+    return !d.is_online
+        && d.is_randomized_mac === true
+        && !d.is_blocked
+        && !d.session_id
+        && (alias === '' || alias === 'Target Device')
+        && !d.is_gateway
+        && !d.is_self;
+}
 
 export interface ActiveToastItem {
     id: string;
@@ -178,6 +197,23 @@ function App() {
     const [isExitDialogOpen, setIsExitDialogOpen] = useState(false);
 
     const [activeTab, setActiveTab] = useState<FilterTab>('all');
+    // Sembunyikan "ghost" MAC-acak offline agar tab "All Hosts" tetap rapi. Default ON; dapat
+    // dimatikan untuk melihat histori penuh. Preferensi dipersist per-browser — akses storage
+    // bisa gagal (mode privat) sehingga dibungkus try/catch dan jatuh ke default aman (true).
+    const [hideInactive, setHideInactive] = useState<boolean>(() => {
+        try {
+            return localStorage.getItem('spoorf.hideInactiveGhosts') !== 'false';
+        } catch {
+            return true;
+        }
+    });
+    useEffect(() => {
+        try {
+            localStorage.setItem('spoorf.hideInactiveGhosts', hideInactive ? 'true' : 'false');
+        } catch {
+            /* storage tak tersedia — abaikan, preferensi cukup untuk sesi ini */
+        }
+    }, [hideInactive]);
     const [searchQuery, setSearchQuery] = useState('');
     const deferredSearchQuery = useDeferredValue(searchQuery);
     const [isSearchFocused, setIsSearchFocused] = useState(false);
@@ -1068,6 +1104,11 @@ function App() {
 
     const filteredDevices = useMemo(() => {
         const list = dedupedDevices.filter(device => {
+            // Sembunyikan ghost MAC-acak offline HANYA di tab "All Hosts" — di-scope eksplisit ke
+            // tab ini. Alasan: perangkat THROTTLED yang offline (session_id sudah dibersihkan saat
+            // ganti jaringan) bisa lolos isInactiveGhost, sehingga menyaringnya di tab "Dibatasi"
+            // membuat badge≠baris. Murni penyaringan tampilan — data tetap utuh di DB.
+            if (activeTab === 'all' && hideInactive && isInactiveGhost(device)) return false;
             if (activeTab === 'online') {
                 if (!device.is_online || device.is_blocked) return false;
             }
@@ -1097,7 +1138,7 @@ function App() {
         });
 
         return [...list].sort(sortDevices);
-    }, [dedupedDevices, activeTab, deferredSearchQuery]);
+    }, [dedupedDevices, activeTab, deferredSearchQuery, hideInactive]);
 
     // Stats calculations
     const stats = useMemo(() => {
@@ -1105,7 +1146,8 @@ function App() {
         const onlineUnblocked = dedupedDevices.filter(d => d.is_online && !d.is_blocked).length;
         const throttledCount = dedupedDevices.filter(d => !d.is_blocked && (d.speed_limit ?? 100) < 100 && (d.speed_limit ?? 100) > 0).length;
         const blockedCount = dedupedDevices.filter(d => d.is_blocked).length;
-        return { total, onlineUnblocked, throttledCount, blockedCount };
+        const inactiveHidden = dedupedDevices.filter(isInactiveGhost).length;
+        return { total, onlineUnblocked, throttledCount, blockedCount, inactiveHidden };
     }, [dedupedDevices]);
 
     const dhcpUnprofiledCount = useMemo(() => {
@@ -1784,6 +1826,7 @@ function App() {
 
                     {/* BeUI Segment Tabs Filter Bar with Search on the Right */}
                     <div className="flex items-center justify-between w-full mb-6 gap-4 flex-wrap">
+                        <div className="flex items-center gap-3 flex-wrap">
                         <Tabs
                             value={activeTab}
                             onValueChange={(val) => setActiveTab(val as FilterTab)}
@@ -1824,6 +1867,21 @@ function App() {
                                 </TabsTrigger>
                             </TabsList>
                         </Tabs>
+                        {activeTab === 'all' && stats.inactiveHidden > 0 && (
+                            <button
+                                type="button"
+                                onClick={() => setHideInactive(v => !v)}
+                                title={hideInactive
+                                    ? `Menyembunyikan ${stats.inactiveHidden} perangkat tak-aktif (MAC teracak, datang-pergi). Klik untuk menampilkan histori penuh.`
+                                    : 'Menampilkan semua histori. Klik untuk menyembunyikan perangkat tak-aktif.'}
+                                aria-pressed={hideInactive}
+                                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-mono border border-white/[0.08] bg-white/[0.03] text-zinc-400 hover:text-zinc-200 hover:bg-white/[0.06] transition-colors"
+                            >
+                                {hideInactive ? <EyeOff size={14} /> : <Eye size={14} />}
+                                <span>{hideInactive ? `+${stats.inactiveHidden} tak-aktif` : 'Sembunyikan tak-aktif'}</span>
+                            </button>
+                        )}
+                        </div>
 
                         <div className={cn(
                             "relative transition-all duration-300 ease-out",
