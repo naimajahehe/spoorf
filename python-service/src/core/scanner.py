@@ -327,10 +327,18 @@ class NetworkScanner:
             )
             if not has_active_signal:
                 probe_disc: Dict[str, str] = {}
-                try:
-                    probe_sleeping_host_via_unicast_arp(ip, norm_mac, probe_disc, timeout=0.35)
-                except Exception:
-                    pass
+                # Wi-Fi power-save (HP/tablet) membangunkan radio di interval DTIM ~600ms-1s,
+                # jadi probe 0.35s dulu memvonis mereka OFFLINE meski hadir di L2 (ditemukan
+                # sweep). Beri jendela realistis (1.2s) + satu percobaan ulang. `srp` balik
+                # SEKETIKA saat ada balasan, sehingga biaya penuh hanya ditanggung IP yang
+                # benar-benar mati; host power-save yang menjawab pulang lebih awal.
+                for _probe_attempt in range(2):
+                    try:
+                        probe_sleeping_host_via_unicast_arp(ip, norm_mac, probe_disc, timeout=1.2)
+                    except Exception:
+                        pass
+                    if ip in probe_disc:
+                        break
                 if ip not in probe_disc:
                     is_active_layer2 = False
 

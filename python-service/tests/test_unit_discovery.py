@@ -451,6 +451,60 @@ class TestCoreDiscovery(unittest.TestCase):
             result_ips = [d['ip'] for d in results]
             self.assertIn('192.168.1.150', result_ips)
 
+    def test_build_device_powersave_phone_survives_slow_arp_wake(self):
+        """REGRESI (under-deteksi): perangkat Wi-Fi power-save yang gagal ICMP & tanpa sinyal
+        aktif lain TIDAK boleh divonis offline hanya karena melewatkan probe ARP pertama.
+        Radio HP bangun di interval DTIM ~600ms-1s, jadi re-probe harus memakai jendela
+        realistis (>=1.0s) dan mengulang sekali. Perangkat yang menjawab ARP di percobaan
+        kedua wajib is_online=True. (Sebelum perbaikan: probe 0.35s sekali -> offline.)"""
+        from src.core.scanner import NetworkScanner
+        from unittest.mock import patch
+
+        NetworkScanner._DEVICE_HISTORY.clear()
+
+        target_ip = '192.168.99.150'
+        target_mac = 'a6:47:b9:46:a8:ad'  # locally-administered (randomized) — HP modern
+
+        probe_state = {'calls': 0, 'timeouts': []}
+
+        def fake_probe(t_ip, t_mac, discovered, timeout=0.25):
+            probe_state['calls'] += 1
+            probe_state['timeouts'].append(timeout)
+            # Simulasi HP power-save: MISS percobaan pertama, JAWAB percobaan kedua.
+            if probe_state['calls'] >= 2:
+                discovered[t_ip] = t_mac
+
+        profile_stub = {
+            'hostname': 'sleepy-phone', 'vendor': 'Apple', 'os': 'iOS (Apple)',
+            'device_type': 'Smartphone', 'vendor_confidence': 50, 'type_confidence': 50,
+            'hostname_confidence': 50, 'profile_status': 'partial', 'profile_evidence': [],
+            'profiled_at': '2026-09-28T00:00:00Z', 'profile_version': 1,
+        }
+
+        with patch('src.core.scanner.get_self_mac', return_value='de:ad:be:ef:00:01'), \
+             patch('src.core.scanner.get_vendor', return_value='Apple'), \
+             patch('src.core.scanner.is_randomized_mac', return_value=True), \
+             patch('src.core.scanner.query_mdns', return_value='sleepy-phone'), \
+             patch('src.core.scanner.ping_fast', return_value={'alive': False, 'ttl': 0, 'rtt': 0}), \
+             patch('src.core.scanner.get_http_info', return_value={'web_title': '', 'web_server': ''}), \
+             patch('src.core.scanner.measure_target_proximity', return_value={'rtt_ms': 0, 'distance_zone': 'unknown', 'estimated_range': '-'}), \
+             patch('src.core.scanner.synthesize_profile_assessment', return_value=profile_stub), \
+             patch('src.core.scanner.probe_sleeping_host_via_unicast_arp', side_effect=fake_probe):
+            dev = NetworkScanner._build_device(
+                ip=target_ip, mac=target_mac, gateway_ip='192.168.99.1',
+                is_active_layer2=True,
+                dhcp_snapshot={'_dummy': {}}, ssdp_snapshot={'_dummy': {}},
+                mdns_snapshot={'_dummy': {}}, ipv6_snapshot={},
+            )
+
+        self.assertIsNotNone(dev)
+        self.assertTrue(dev['is_online'],
+                        'HP power-save yang menjawab ARP di percobaan kedua harus ONLINE')
+        self.assertGreaterEqual(probe_state['calls'], 2,
+                                're-probe harus mengulang minimal sekali (bukan sekali lalu menyerah)')
+        self.assertGreaterEqual(max(probe_state['timeouts']), 1.0,
+                                'timeout probe harus dilebarkan >=1.0s (bukan 0.35s) untuk wake DTIM')
+
     def test_scan_full_l2_discovery_uses_kernel_arp_cache_not_slow_broadcast(self):
         """PERF: penemuan L2 harus memakai jalur KERNEL (sweep socket + baca tabel ARP OS) yang
         cepat (~2s pada /24), BUKAN Scapy srp broadcast yang mengirim 254 paket serial (~60s di
